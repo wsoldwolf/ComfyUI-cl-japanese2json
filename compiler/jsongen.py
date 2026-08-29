@@ -53,6 +53,12 @@ AUDIO_INTRO_PATTERNS = tuple(
     )
 )
 NON_DIEGETIC_MUSIC = "non_diegetic_music:\nN/A"
+EFFECTS_ONLY_SUBJECT_BLOCK = (
+    "subject_definitions:\n"
+    "This is an effects-only scene. No character subject or reference-image person "
+    "is active. The only active visual elements are one fast-moving mass of blue ice "
+    "and two compact blue fireballs."
+)
 
 
 def _referenced_subjects(scene: Scene) -> list[int]:
@@ -125,10 +131,14 @@ def _without_audio_references(definition: str) -> str:
 
 
 def _subject_block(emd: Emd, scene: Scene, scene_number: int) -> str:
+    referenced_subjects = _referenced_subjects(scene)
+    if not referenced_subjects:
+        return EFFECTS_ONLY_SUBJECT_BLOCK
+
     definitions: list[str] = []
     keep_audio_references = _scene_requests_speech(scene)
     removed_audio_references = 0
-    for number in _referenced_subjects(scene):
+    for number in referenced_subjects:
         if number > len(emd.subjects):
             LOGGER.warning(
                 "[cl_japanese2json] Scene %d references undefined <Subject %d>; definition skipped",

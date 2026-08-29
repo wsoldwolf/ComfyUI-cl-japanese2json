@@ -28,7 +28,29 @@ class JSONGenerationTests(unittest.TestCase):
             block,
             "subject_definitions:\n<Subject 1> is one.\n<Subject 2> is two.",
         )
-        self.assertEqual(parsed["shots"][1]["prompt"][0], "subject_definitions:")
+        self.assertEqual(
+            parsed["shots"][1]["prompt"][0],
+            jsongen.EFFECTS_ONLY_SUBJECT_BLOCK,
+        )
+
+    def test_scene_without_subject_uses_fixed_effects_only_definition(self) -> None:
+        emd = Emd(
+            subjects=["unused character."],
+            scenes=[
+                Scene(
+                    shots=[
+                        "One fast-moving mass of blue ice and two compact blue fireballs cross the frame."
+                    ]
+                )
+            ],
+        )
+        block = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][0]
+        self.assertEqual(
+            block,
+            "subject_definitions:\n"
+            "This is an effects-only scene. No character subject or reference-image person is active. "
+            "The only active visual elements are one fast-moving mass of blue ice and two compact blue fireballs.",
+        )
 
     def test_silent_scene_removes_audio_reference_clauses(self) -> None:
         emd = Emd(
@@ -106,7 +128,10 @@ class JSONGenerationTests(unittest.TestCase):
             ],
         )
         parsed = json.loads(jsongen.generate_json(emd))
-        self.assertEqual(parsed["shots"][0]["prompt"][0], "subject_definitions:")
+        self.assertEqual(
+            parsed["shots"][0]["prompt"][0],
+            jsongen.EFFECTS_ONLY_SUBJECT_BLOCK,
+        )
 
     def test_undefined_subject_warns_and_remains_in_shot(self) -> None:
         emd = Emd(scenes=[Scene(shots=["<Subject 4> acts."])])
