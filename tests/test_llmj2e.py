@@ -469,6 +469,64 @@ class LLMJ2ETests(unittest.TestCase):
                 max_tokens=64,
             )
 
+    def test_retry_recovers_only_omitted_direct_speech_placeholder(self) -> None:
+        def first_response(kwargs):
+            def transform(record):
+                translated = default_translation(record)
+                if record["id"] == "R000001":
+                    return f"{record['protected_placeholders'][0]} まだ日本語。"
+                dialogue = record["protected_placeholders"][-1]
+                return translated.replace(dialogue, "")
+
+            return default_stream_translation(
+                kwargs["messages"], transform=transform
+            )
+
+        def retry_response(kwargs):
+            def transform(record):
+                translated = default_translation(record)
+                if record["id"] == "R000002":
+                    dialogue = record["protected_placeholders"][-1]
+                    return translated.replace(dialogue, "")
+                return translated
+
+            return default_stream_translation(
+                kwargs["messages"], transform=transform
+            )
+
+        source = (
+            "# シーン\n"
+            "* <Subject 1>が辺りを見る。\n"
+            "* <Subject 1>が「こんにちは」と言う。"
+        )
+        llm = FakeLLM([first_response, retry_response])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=128)
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("<d>[Japanese]こんにちは</d>", output)
+        self.assertTrue(
+            any(
+                "Recovered 1 omitted direct-speech placeholder(s) in R000002"
+                in line
+                for line in captured.output
+            )
+        )
+
+    def test_empty_retry_is_not_repaired_from_dialogue_alone(self) -> None:
+        def omit_entire_value(kwargs):
+            return default_stream_translation(
+                kwargs["messages"], transform=lambda _: ""
+            )
+
+        with self.assertRaises(errors.TranslationError):
+            llmj2e.translate_markdown(
+                "# シーン\n* 「こんにちは」と言う。",
+                FakeLLM([omit_entire_value, omit_entire_value]),
+                "sys",
+                max_tokens=64,
+            )
+
     def test_protected_placeholder_moved_between_segments_is_rejected(self) -> None:
         def swap_placeholders(kwargs):
             records = request_records(kwargs["messages"])

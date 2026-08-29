@@ -350,6 +350,7 @@ JSONファイル上では、JSONの文字列エスケープにより1個の論�
 - 構造プレースホルダの一部が残る応答を、段落数又は行数だけで復旧してはならない。構造プレースホルダが完全に0件の場合に限り、翻訳対象が2区間以上、文書内に保護プレースホルダが1個以上あり、空行で区切られた非空段落数が区間数と完全一致するとき、出力段落順を区間順として検証してよい。段落数が一致しない場合は、非空出力行数が区間数と完全一致するときだけ行順で検証してよい。段落内の物理改行は空白へ正規化する。この場合も各区間が所有する保護プレースホルダ、別区間からの移動、Subject文末及び日本語残留を通常どおり検証し、1項目でも失敗すれば採用しない。
 - 構造プレースホルダが完全に0件で段落数及び行数も区間数と一致しない場合は、完全に検証できた保護プレースホルダを区間アンカーとして使用してよい。アンカーは応答順と原文区間順がともに厳密な昇順でなければならない。隣接アンカー間、先頭及び末尾について、応答候補数と原文区間数が完全一致する範囲だけを順番に個別検証して保持する。件数が異なる範囲、保護プレースホルダが欠落した区間及び個別検証に失敗した区間は採用せず、その区間だけを1回再試行する。この復旧で位置を推測してはならない。
 - 再試行では対象を未解決区間だけに限定し、自然な英文では主語又は参照の反復を省略できる場合でも、各CLJ保護プレースホルダを英文中へ明示するよう指示する。診断ログには応答本文を含めず、段落数、非空行数、保護プレースホルダ検出数及び安全に保持できた区間数だけを記録する。
+- 1回の再試行後、Scene区間で欠落している保護プレースホルダが `<d>...</d>` の直接発話を保持するものだけであり、他の保護プレースホルダが各1回存在し、構造、所有関係、日本語残留及びその他の検証に合格する場合に限り、Python側の復元辞書から欠落した直接発話プレースホルダを英文末尾の明示的な発話内容として補完し、区間全体を再検証してよい。Subject、Picture、Video、Audio又はその他のプレースホルダ欠落、重複、別区間からの移動と同時に補完してはならない。補完後の再検証に失敗した場合は例外とする。
 
 ### 6.9 セクション別翻訳規則
 
@@ -400,6 +401,7 @@ Protected placeholders are required content, not optional labels. Even when natu
 Each segment ends immediately before the next structural placeholder.
 Do not add text after a directive placeholder.
 Do not translate text represented by protected placeholders.
+Some protected placeholders contain the only copy of an exact spoken line. Never summarize, paraphrase, or omit them even when surrounding prose already describes the speech.
 Preserve numbers, timing, counts, directions, left/right relationships, simultaneity, and negation.
 For a SUB segment, output only a singular English noun phrase ending with an ASCII period.
 Begin directly with the noun phrase and do not prepend a label, reference, index, copula, colon, or framing text.
@@ -1012,6 +1014,8 @@ prompt.append("non_diegetic_music:\nN/A")
 4. 1回の再試行後も不正な場合は例外になり、JSONを出力しない。
 5. 通常文章は英語になり、日本語は保護された読み上げ領域内にだけ残る。
 6. 長い応答が途中で欠落した場合、検証できた区間を保持し、欠落区間及び境界未確定の隣接区間だけを再試行する。
+7. 再試行後にScene区間の直接発話プレースホルダだけが欠落した場合、復元辞書から補完して完全検証できる。
+8. 再試行後にSubject、Picture、Video又はAudioプレースホルダが欠落した場合は補完せず例外になる。
 
 ### 12.6 JSON
 

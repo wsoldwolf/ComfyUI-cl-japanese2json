@@ -1001,6 +1001,52 @@ def _parse_stream_response(content: str, stream: TranslationStream) -> list[str]
     ]
 
 
+def _repair_retry_dialogue_placeholders(
+    stream_record: StreamRecord,
+    translated: str,
+    all_protected_tokens: tuple[str, ...],
+) -> str | None:
+    """Restore only omitted direct-speech values after the single LLM retry."""
+
+    record = stream_record.record
+    if record.section != "Scene" or not re.search(r"[A-Za-z]", translated):
+        return None
+
+    missing_dialogue: list[str] = []
+    for token, replacement in record.payload.replacements.items():
+        count = translated.count(token)
+        if count == 1:
+            continue
+        if count != 0 or not (
+            replacement.startswith("<d>") and replacement.endswith("</d>")
+        ):
+            return None
+        missing_dialogue.append(token)
+    if not missing_dialogue:
+        return None
+
+    repaired = translated.rstrip()
+    if repaired and repaired[-1] not in ".!?":
+        repaired += "."
+    for token in missing_dialogue:
+        if repaired:
+            repaired += " "
+        repaired += f"The exact spoken line is {token}."
+    try:
+        validated = _validate_stream_record_text(
+            stream_record, repaired, all_protected_tokens
+        )
+    except TranslationError:
+        return None
+    LOGGER.warning(
+        "[cl_japanese2json] Recovered %d omitted direct-speech placeholder(s) "
+        "in %s after retry",
+        len(missing_dialogue),
+        record.record_id,
+    )
+    return validated
+
+
 def _translate_batch(
     records: list[TranslationRecord],
     llm: Any,
@@ -1115,9 +1161,25 @@ def _translate_batch(
             stop_token=retry_stream.stop_token,
         )
         _capture_debug_response(retry_event, response)
-        retry_values = _parse_stream_response(
-            _content_from_response(response), retry_stream
+        retry_content = _content_from_response(response)
+        retry_translated_values = _parse_stream_text_values(
+            retry_content, retry_stream
         )
+        retry_values: list[str] = []
+        for stream_record, translated in zip(
+            retry_stream.records, retry_translated_values
+        ):
+            try:
+                value = _validate_stream_record_text(
+                    stream_record, translated, retry_stream.protected_tokens
+                )
+            except TranslationError:
+                value = _repair_retry_dialogue_placeholders(
+                    stream_record, translated, retry_stream.protected_tokens
+                )
+                if value is None:
+                    raise
+            retry_values.append(value)
         _set_debug_result(retry_event, "validated")
     except TranslationError as exc:
         _set_debug_result(retry_event, exc)
