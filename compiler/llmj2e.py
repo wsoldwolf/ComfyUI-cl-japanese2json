@@ -280,6 +280,65 @@ def _messages(
     ]
 
 
+def _start_debug_event(
+    debug_events: list[dict[str, Any]] | None,
+    *,
+    batch_index: int,
+    attempt: int,
+    stream: TranslationStream,
+    messages: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    if debug_events is None:
+        return None
+    event: dict[str, Any] = {
+        "batch": batch_index + 1,
+        "attempt": attempt,
+        "protected_stream": stream.text,
+        "user_request": messages[-1]["content"],
+        "response_content": None,
+        "finish_reason": None,
+        "usage": None,
+        "validation_result": "LLM call not completed",
+    }
+    debug_events.append(event)
+    return event
+
+
+def _capture_debug_response(
+    event: dict[str, Any] | None, response: Any
+) -> None:
+    if event is None:
+        return
+    event["validation_result"] = "LLM response received; validation pending"
+    if not isinstance(response, dict):
+        event["response_content"] = repr(response)
+        return
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        event["usage"] = {
+            str(key): value
+            for key, value in usage.items()
+            if isinstance(value, (str, int, float, bool)) or value is None
+        }
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return
+    event["finish_reason"] = choice.get("finish_reason")
+    message = choice.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), str):
+        event["response_content"] = message["content"]
+
+
+def _set_debug_result(
+    event: dict[str, Any] | None, result: str | Exception
+) -> None:
+    if event is not None:
+        event["validation_result"] = str(result)
+
+
 def _effective_n_ctx(llm: Any) -> int | None:
     value: Any = None
     if hasattr(llm, "effective_n_ctx"):
@@ -559,19 +618,59 @@ def _parse_stream_text_values(
     if not found_structural:
         return _parse_markerless_values(translated_stream, stream)
 
-    for token in structural_tokens:
+    expected_set = set(structural_tokens)
+    unexpected = [token for token in found_structural if token not in expected_set]
+    if unexpected:
+        raise TranslationError("LLM invented a structural placeholder")
+
+    record_tokens = [
+        stream_record.marker_token for stream_record in stream.records
+    ]
+    record_token_set = set(record_tokens)
+    for token in record_tokens:
         count = translated_stream.count(token)
         if count != 1:
             raise TranslationError(
                 f"Structural placeholder {token!r} occurred {count} time(s); expected exactly once"
             )
 
-    if found_structural != structural_tokens:
+    for token in stream.directive_tokens:
+        count = translated_stream.count(token)
+        if count > 1:
+            raise TranslationError(
+                f"Directive placeholder {token!r} occurred {count} time(s); expected at most once"
+            )
+
+    found_set = set(found_structural)
+    expected_present = [
+        token for token in structural_tokens if token in found_set
+    ]
+    if found_structural != expected_present:
         raise TranslationError(
             "LLM changed, added, or reordered structural placeholders"
         )
 
-    positions = [translated_stream.index(token) for token in structural_tokens]
+    found_record_tokens = [
+        token for token in found_structural if token in record_token_set
+    ]
+    if found_record_tokens != record_tokens:
+        raise TranslationError(
+            "LLM changed, added, or reordered record placeholders"
+        )
+
+    missing_directives = [
+        token for token in stream.directive_tokens if token not in found_set
+    ]
+    if missing_directives:
+        LOGGER.warning(
+            "[cl_japanese2json] LLM omitted %d directive placeholder(s); "
+            "reconstructing document structure from %d intact record placeholder(s)",
+            len(missing_directives),
+            len(record_tokens),
+        )
+
+    parse_tokens = found_structural
+    positions = [translated_stream.index(token) for token in parse_tokens]
     if translated_stream[: positions[0]].strip():
         raise TranslationError("LLM added text before the first structural placeholder")
 
@@ -579,11 +678,11 @@ def _parse_stream_text_values(
         stream_record.marker_token: stream_record for stream_record in stream.records
     }
     translated_by_id: dict[str, str] = {}
-    for index, token in enumerate(structural_tokens):
+    for index, token in enumerate(parse_tokens):
         value_start = positions[index] + len(token)
         value_end = (
             positions[index + 1]
-            if index + 1 < len(structural_tokens)
+            if index + 1 < len(parse_tokens)
             else len(translated_stream)
         )
         value = translated_stream[value_start:value_end]
@@ -721,6 +820,7 @@ def _translate_batch(
     repetition_penalty: float,
     seed: int,
     batch_index: int,
+    debug_events: list[dict[str, Any]] | None,
 ) -> list[str]:
     first_seed = _normalize_seed(seed + batch_index)
     stream = _build_translation_stream(records)
@@ -728,11 +828,20 @@ def _translate_batch(
     retry_indices: list[int]
     first_error: TranslationError
     content: str | None = None
+    first_event: dict[str, Any] | None = None
 
     try:
+        first_messages = _messages(system_prompt, stream)
+        first_event = _start_debug_event(
+            debug_events,
+            batch_index=batch_index,
+            attempt=1,
+            stream=stream,
+            messages=first_messages,
+        )
         response = _call_llm(
             llm,
-            _messages(system_prompt, stream),
+            first_messages,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -740,6 +849,7 @@ def _translate_batch(
             seed=first_seed,
             stop_token=stream.stop_token,
         )
+        _capture_debug_response(first_event, response)
         content = _content_from_response(response)
         translated_values = _parse_stream_text_values(content, stream)
         failures: list[tuple[int, TranslationError]] = []
@@ -753,6 +863,7 @@ def _translate_batch(
             except TranslationError as exc:
                 failures.append((index, exc))
         if not failures:
+            _set_debug_result(first_event, "validated")
             return [value for value in validated if value is not None]
         retry_indices = [index for index, _ in failures]
         first_error = failures[0][1]
@@ -760,8 +871,10 @@ def _translate_batch(
             first_error = TranslationError(
                 f"{len(failures)} text segment(s) failed; first error: {first_error}"
             )
+        _set_debug_result(first_event, first_error)
     except TranslationError as exc:
         first_error = exc
+        _set_debug_result(first_event, exc)
         salvaged = (
             _salvage_stream_response(content, stream)
             if content is not None
@@ -785,14 +898,23 @@ def _translate_batch(
         first_error,
     )
     retry_seed = _normalize_seed(seed + batch_index + 1_000_003)
+    retry_event: dict[str, Any] | None = None
     try:
+        retry_messages = _messages(
+            system_prompt,
+            retry_stream,
+            retry_reason=str(first_error),
+        )
+        retry_event = _start_debug_event(
+            debug_events,
+            batch_index=batch_index,
+            attempt=2,
+            stream=retry_stream,
+            messages=retry_messages,
+        )
         response = _call_llm(
             llm,
-            _messages(
-                system_prompt,
-                retry_stream,
-                retry_reason=str(first_error),
-            ),
+            retry_messages,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -800,10 +922,13 @@ def _translate_batch(
             seed=retry_seed,
             stop_token=retry_stream.stop_token,
         )
+        _capture_debug_response(retry_event, response)
         retry_values = _parse_stream_response(
             _content_from_response(response), retry_stream
         )
+        _set_debug_result(retry_event, "validated")
     except TranslationError as exc:
+        _set_debug_result(retry_event, exc)
         raise TranslationError(
             f"Batch {batch_index + 1} failed validation after one retry: {exc}"
         ) from first_error
@@ -851,6 +976,7 @@ def translate_markdown(
     top_p: float = 0.9,
     repetition_penalty: float = 1.05,
     seed: int = 1,
+    debug_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """Translate Japanese bullet payloads and rebuild canonical Markdown."""
 
@@ -880,6 +1006,7 @@ def translate_markdown(
                 repetition_penalty=repetition_penalty,
                 seed=seed,
                 batch_index=batch_index,
+                debug_events=debug_events,
             )
             for record, translated in zip(batch, translations):
                 record.translated = translated

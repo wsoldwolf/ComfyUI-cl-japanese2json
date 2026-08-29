@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 
 from .helpers import (
@@ -154,6 +155,24 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertEqual(
             [record["id"] for record in retried],
             ["R000002", "R000003"],
+        )
+
+    def test_missing_directive_markers_use_intact_record_markers(self) -> None:
+        def omit_directives(kwargs):
+            translated = default_stream_translation(kwargs["messages"])
+            return re.sub(r"CLJT\d+D\d+X\s*", "", translated)
+
+        llm = FakeLLM([omit_directives])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(SOURCE, llm, "sys", max_tokens=128)
+        self.assertEqual(output.count("* "), 3)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(
+            any(
+                "reconstructing document structure from 3 intact record"
+                in line
+                for line in captured.output
+            )
         )
 
     def test_markerless_line_aligned_output_is_strictly_validated(self) -> None:

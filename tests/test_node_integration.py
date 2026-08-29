@@ -46,13 +46,14 @@ class NodeIntegrationTests(unittest.TestCase):
         self.assertEqual(cls.FUNCTION, "compile_json")
         self.assertFalse(cls.OUTPUT_NODE)
 
-    def test_input_types_have_all_sixteen_inputs_in_order(self) -> None:
+    def test_input_types_have_all_sixteen_required_inputs_in_order(self) -> None:
         with patch.object(
             nodes.CLJapaneseToJSONGGUF,
             "discover_model_names",
             return_value=["model.gguf"],
         ):
-            required = nodes.CLJapaneseToJSONGGUF.INPUT_TYPES()["required"]
+            input_types = nodes.CLJapaneseToJSONGGUF.INPUT_TYPES()
+            required = input_types["required"]
         self.assertEqual(
             list(required),
             [
@@ -77,6 +78,9 @@ class NodeIntegrationTests(unittest.TestCase):
         self.assertEqual(required["model_name"][1]["default"], "model.gguf")
         self.assertEqual(required["op_offload"][0], "BOOLEAN")
         self.assertEqual(required["steps"][1]["default"], 8)
+        self.assertEqual(
+            input_types["optional"]["save_debug_output"][1]["default"], False
+        )
 
     def test_compile_returns_one_tuple_and_valid_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -176,6 +180,53 @@ class NodeIntegrationTests(unittest.TestCase):
             self.assertIsNone(backend.llm)
             self.assertEqual(node.last_json_text, "old-valid-json\n")
 
+    def test_debug_output_captures_both_failed_inference_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "model.gguf"
+            model.write_bytes(b"x")
+            node = nodes.CLJapaneseToJSONGGUF()
+            backend = FakeBackend(["bad first", "bad retry"])
+            node._backend = backend
+            debug_path = Path(temp) / "debug"
+            with patch.object(
+                nodes, "resolve_model_name", return_value=model
+            ), patch.object(
+                nodes, "load_system_prompt", return_value="system"
+            ), patch.object(
+                nodes, "save_debug_bundle", return_value=debug_path
+            ) as save, self.assertRaises(errors.TranslationError):
+                node.compile_json(**arguments(save_debug_output=True))
+            saved = save.call_args.kwargs
+            self.assertEqual(saved["plain_text"], arguments()["plain_text"])
+            self.assertIsInstance(saved["error"], errors.TranslationError)
+            self.assertEqual(len(saved["events"]), 2)
+            self.assertEqual(
+                [event["response_content"] for event in saved["events"]],
+                ["bad first", "bad retry"],
+            )
+
+    def test_debug_output_saves_successful_intermediates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "model.gguf"
+            model.write_bytes(b"x")
+            node = nodes.CLJapaneseToJSONGGUF()
+            backend = FakeBackend()
+            node._backend = backend
+            with patch.object(
+                nodes, "resolve_model_name", return_value=model
+            ), patch.object(
+                nodes, "load_system_prompt", return_value="system"
+            ), patch.object(
+                nodes, "save_debug_bundle", return_value=Path(temp) / "debug"
+            ) as save:
+                result = node.compile_json(**arguments(save_debug_output=True))
+            saved = save.call_args.kwargs
+            self.assertIsNone(saved["error"])
+            self.assertIn("# Scene", saved["canonical_markdown"])
+            self.assertEqual(saved["json_text"], result[0])
+            self.assertEqual(len(saved["events"]), 1)
+            self.assertEqual(saved["events"][0]["validation_result"], "validated")
+
     def test_invalid_generated_json_fails_and_is_not_cached(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             model = Path(temp) / "model.gguf"
@@ -219,6 +270,7 @@ class NodeIntegrationTests(unittest.TestCase):
             {"seed": 0},
             {"steps": 0},
             {"steps": True},
+            {"save_debug_output": 1},
         ]
         for override in bad_values:
             with self.subTest(override=override), self.assertRaises(

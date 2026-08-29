@@ -150,6 +150,7 @@ return (json_text,)
 14. `seed`
 15. `keep_last_prompt`
 16. `steps`
+17. `save_debug_output`（任意入力）
 
 ### 5.2 パラメータ定義
 
@@ -171,6 +172,7 @@ return (json_text,)
 | `seed` | `INT` | `1` | 1～4294967295 | 不要 |
 | `keep_last_prompt` | `BOOLEAN` | `False` | True / False | 不要 |
 | `steps` | `INT` | `8` | 1～10000、step 1 | 不要 |
+| `save_debug_output` | `BOOLEAN` | `False` | True / False | 不要 |
 
 「再ロード」は、既に保持している `Llama` インスタンスを破棄し、モデルを再ロードする必要がある設定変更を示す。
 
@@ -327,6 +329,15 @@ Llama(
 - LLMの翻訳生成パラメータではなく、変更時にGGUFモデルを再ロードしない。
 - 既存ワークフローのウィジェット位置を変えないため、入力一覧の末尾へ追加する。
 
+### 5.15 save_debug_output
+
+- 既定値は`False`とし、既存ワークフローとの互換性を維持するため`optional`入力として追加する。
+- `True`では成功・失敗を問わず、実行ごとの専用ディレクトリを `folder_paths.get_output_directory()/cl_japanese2json_debug/` 以下へ作成する。
+- 原文、system prompt、各推論の保護済みストリーム、user request、LLM生応答、終了理由、token usage、検証結果を保存する。成功時は正規形Markdownと最終JSON、失敗時は例外型とメッセージも保存する。
+- `ComfyUI/input`へは書き込まない。通常ログへ原文又はLLM生応答を表示しない。
+- 診断ファイルにはユーザー入力と生成内容が含まれるため、ユーザーが明示的に有効化した実行だけ保存し、自動削除又は外部送信を行わない。
+- デバッグ保存自体の失敗で、正常なJSON生成結果又は本来のコンパイル例外を置き換えてはならない。
+
 ## 6. INPUT_TYPES仕様
 
 論理的な `INPUT_TYPES()` は次に相当する。
@@ -397,7 +408,10 @@ def INPUT_TYPES(cls):
                 "INT",
                 {"default": 8, "min": 1, "max": 10000, "step": 1},
             ),
-        }
+        },
+        "optional": {
+            "save_debug_output": ("BOOLEAN", {"default": False}),
+        },
     }
 ```
 
@@ -419,6 +433,7 @@ ComfyUI-cl-japanese2json/
 ├── nodes.py
 ├── model_discovery.py
 ├── llama_backend.py
+├── debug_output.py
 ├── compiler/
 │   ├── __init__.py
 │   ├── llmj2e.py
@@ -436,7 +451,8 @@ ComfyUI-cl-japanese2json/
 │   ├── test_mdparse.py
 │   ├── test_jsongen.py
 │   ├── test_node_cache.py
-│   └── test_node_integration.py
+│   ├── test_node_integration.py
+│   └── test_debug_output.py
 ├── README.md
 ├── LICENSE
 └── pyproject.toml
@@ -450,6 +466,7 @@ ComfyUI-cl-japanese2json/
 | `nodes.py` | UI定義、入力検証、処理オーケストレーション |
 | `model_discovery.py` | GGUFルート探索、一覧生成、パス解決 |
 | `llama_backend.py` | `Llama` ロード、再利用、推論、解放 |
+| `debug_output.py` | 明示的に有効化された中間診断ファイルの保存 |
 | `compiler/llmj2e.py` | 保護済み翻訳、バッチ分割、LLM出力検証 |
 | `compiler/mdparse.py` | 正規形Markdownのパース |
 | `compiler/jsongen.py` | Python構造から厳格JSON生成 |
@@ -677,6 +694,7 @@ response = self.llm.create_chat_completion(
 - LLMの生出力をそのまま最終ノード出力にしない。
 - コア仕様の構造プレースホルダ、区間ごとの保護プレースホルダ及び日本語残留検査を通す。
 - 構造プレースホルダが完全に0件の場合の段落順／行順フォールバックは、コア仕様の区間数及び保護プレースホルダ条件をすべて満たす場合だけ許可する。空行で区切られた段落を優先し、段落内の物理改行は空白へ正規化する。
+- すべての`SUB/COM/SCN`区間先頭プレースホルダが完全一致して正順に各1回残り、未知又は重複した構造プレースホルダがない場合、`D`ディレクティブプレースホルダだけの欠落を許容し、Python側のブロック情報から復元してよい。
 
 ### 11.8 JSONモード不使用
 
@@ -743,6 +761,7 @@ keep_model_loaded
 seed
 keep_last_prompt
 steps
+save_debug_output
 system prompt本文
 ```
 
@@ -794,8 +813,9 @@ system prompt本文
 13. json.loads()で再検証
 14. Contex-Loopサブセット構造を検証
 15. last_json_textへ保存
-16. keep_model_loaded=Falseならモデル解放
-17. (json_text,) を返す
+16. save_debug_output=Trueなら成功中間結果をComfyUI/outputへ保存
+17. keep_model_loaded=Falseならモデル解放
+18. (json_text,) を返す
 ```
 
 ### 13.1 擬似コード
@@ -959,7 +979,7 @@ class JSONValidationError(CLJapaneseToJSONError): ...
 - 不要なメモリアドレス
 - 巨大なLLM生出力全文
 
-LLM生出力は先頭と末尾を限定したデバッグ情報としてログへ出してよいが、通常ログでは出力しない。
+通常ログへLLM生出力を含めない。`save_debug_output=True`の場合に限り、LLM生出力全文を実行専用の診断ディレクトリへ保存してよい。
 
 ## 17. ログ
 
@@ -978,7 +998,9 @@ LLM生出力は先頭と末尾を限定したデバッグ情報としてログ�
 [cl_japanese2json] Prepared one protected translation stream for 46 text segment(s); using 1 inference request(s)
 [cl_japanese2json] Translating batch 1/1 with 46 text segment(s)
 [cl_japanese2json] LLM tokens: prompt=4210 completion=2874 total=7084
+[cl_japanese2json] LLM omitted 4 directive placeholder(s); reconstructing document structure from 46 intact record placeholder(s)
 [cl_japanese2json] Generated 3 scene(s)
+[cl_japanese2json] Saved debug output: C:\...\ComfyUI\output\cl_japanese2json_debug\...
 [cl_japanese2json] Returning cached last JSON
 [cl_japanese2json] Unloading model
 ```
@@ -1059,6 +1081,7 @@ close呼び出し回数
 - `finish_reason=length`
 - 保護トークン欠落
 - 区間先頭プレースホルダの順序変更
+- ディレクティブプレースホルダだけの欠落を区間先頭プレースホルダから復元
 - `<think>` 混入
 - 再試行成功
 - 再試行失敗
@@ -1091,6 +1114,7 @@ close呼び出し回数
 - `gpu_layers=-1`
 - `keep_model_loaded=True/False`
 - `keep_last_prompt=True/False`
+- `save_debug_output=True/False`
 
 ## 19. README要件
 
@@ -1109,7 +1133,8 @@ READMEには最低限次を記載する。
 11. `keep_last_prompt` の初回動作
 12. Contex-Loop Planへの接続方法
 13. 主なエラーと対処方法
-14. GPL-3.0及び参考元の表示
+14. `save_debug_output`の保存先、保存内容及び機密性の注意
+15. GPL-3.0及び参考元の表示
 
 ## 20. ライセンス
 
@@ -1174,7 +1199,7 @@ Codexは次の順序で実装する。
 1. `ComfyUI-cl-japanese2json` が `QwenVL-Mod` なしでimportできる。
 2. `CL Japanese to JSON (GGUF)` がComfyUIのノード一覧へ表示される。
 3. `models/LLM/GGUF` のGGUFを選択できる。
-4. 指定された16入力がすべて存在する。
+4. 指定された16個の必須入力と1個の任意入力がすべて存在する。
 5. `op_offload` がBooleanである。
 6. `kv_cache_type` がK及びVのキャッシュ型へ反映される。
 7. ロード時設定変更でモデルが正しく再ロードされる。

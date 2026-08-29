@@ -11,6 +11,7 @@ from .compiler.errors import CLJapaneseToJSONError
 from .compiler.jsongen import generate_json, validate_final_json
 from .compiler.llmj2e import translate_markdown
 from .compiler.mdparse import parse_markdown
+from .debug_output import save_debug_bundle
 from .llama_backend import LlamaBackend
 from .model_discovery import discover_model_names, resolve_model_name
 from .system_prompt import load_system_prompt, system_prompt_fingerprint
@@ -104,7 +105,16 @@ class CLJapaneseToJSONGGUF:
                     "INT",
                     {"default": 8, "min": 1, "max": 10000, "step": 1},
                 ),
-            }
+            },
+            "optional": {
+                "save_debug_output": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Save source, protected requests, raw LLM responses, and validation results below ComfyUI/output/cl_japanese2json_debug.",
+                    },
+                ),
+            },
         }
 
     @classmethod
@@ -143,6 +153,7 @@ class CLJapaneseToJSONGGUF:
         seed: int,
         keep_last_prompt: bool,
         steps: int,
+        save_debug_output: bool,
     ) -> None:
         if not isinstance(plain_text, str) or plain_text.strip() == "":
             raise CLJapaneseToJSONError("plain_text must contain Japanese reduced Markdown")
@@ -179,6 +190,7 @@ class CLJapaneseToJSONGGUF:
             "op_offload": op_offload,
             "keep_model_loaded": keep_model_loaded,
             "keep_last_prompt": keep_last_prompt,
+            "save_debug_output": save_debug_output,
         }.items():
             if not isinstance(value, bool):
                 raise CLJapaneseToJSONError(f"{name} must be Boolean")
@@ -187,6 +199,36 @@ class CLJapaneseToJSONGGUF:
 
     def clear_model(self) -> None:
         self._backend.clear_model()
+
+    @staticmethod
+    def _save_debug_output(
+        *,
+        plain_text: str,
+        system_prompt: str,
+        model_name: str,
+        settings: dict[str, Any],
+        events: list[dict[str, Any]],
+        canonical_markdown: str | None,
+        json_text: str | None,
+        error: Exception | None,
+    ) -> None:
+        try:
+            path = save_debug_bundle(
+                plain_text=plain_text,
+                system_prompt=system_prompt,
+                model_name=model_name,
+                settings=settings,
+                events=events,
+                canonical_markdown=canonical_markdown,
+                json_text=json_text,
+                error=error,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "[cl_japanese2json] Could not save debug output: %s", exc
+            )
+            return
+        LOGGER.info("[cl_japanese2json] Saved debug output: %s", path)
 
     def compile_json(
         self,
@@ -206,12 +248,34 @@ class CLJapaneseToJSONGGUF:
         seed: int,
         keep_last_prompt: bool,
         steps: int = 8,
+        save_debug_output: bool = False,
     ) -> tuple[str]:
         with self._lock:
             if keep_last_prompt and self.last_json_text is not None:
                 LOGGER.info("[cl_japanese2json] Returning cached last JSON")
                 return (self.last_json_text,)
 
+            debug_events: list[dict[str, Any]] = []
+            system_prompt = ""
+            canonical: str | None = None
+            json_text: str | None = None
+            settings = {
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "gpu_layers": gpu_layers,
+                "n_batch": n_batch,
+                "n_ctx": n_ctx,
+                "flash_attn": flash_attn,
+                "kv_cache_type": kv_cache_type,
+                "op_offload": op_offload,
+                "keep_model_loaded": keep_model_loaded,
+                "seed": seed,
+                "keep_last_prompt": keep_last_prompt,
+                "steps": steps,
+                "save_debug_output": save_debug_output,
+            }
             try:
                 self._validate_parameters(
                     plain_text,
@@ -229,6 +293,7 @@ class CLJapaneseToJSONGGUF:
                     seed=seed,
                     keep_last_prompt=keep_last_prompt,
                     steps=steps,
+                    save_debug_output=save_debug_output,
                 )
                 system_prompt = load_system_prompt()
                 model_path = resolve_model_name(model_name)
@@ -250,6 +315,9 @@ class CLJapaneseToJSONGGUF:
                     top_p=float(top_p),
                     repetition_penalty=float(repetition_penalty),
                     seed=seed,
+                    debug_events=(
+                        debug_events if save_debug_output is True else None
+                    ),
                 )
                 emd = parse_markdown(canonical)
                 json_text = generate_json(emd, steps=steps)
@@ -258,8 +326,30 @@ class CLJapaneseToJSONGGUF:
                 LOGGER.info(
                     "[cl_japanese2json] Generated %d scene(s)", len(emd.scenes)
                 )
+                if save_debug_output is True:
+                    self._save_debug_output(
+                        plain_text=plain_text,
+                        system_prompt=system_prompt,
+                        model_name=model_name,
+                        settings=settings,
+                        events=debug_events,
+                        canonical_markdown=canonical,
+                        json_text=json_text,
+                        error=None,
+                    )
                 return (json_text,)
-            except Exception:
+            except Exception as exc:
+                if save_debug_output is True:
+                    self._save_debug_output(
+                        plain_text=plain_text,
+                        system_prompt=system_prompt,
+                        model_name=model_name,
+                        settings=settings,
+                        events=debug_events,
+                        canonical_markdown=canonical,
+                        json_text=json_text,
+                        error=exc,
+                    )
                 self.clear_model()
                 raise
             finally:
