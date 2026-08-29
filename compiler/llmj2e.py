@@ -246,7 +246,10 @@ def _user_payload(
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
         "A SUB marker starts a singular noun phrase ending in an ASCII period; COM and SCN markers "
         "start concise natural US English. Keep one segment after each marker and preserve the "
-        "marker order. Copy the final stop placeholder after translating the last segment."
+        "marker order. Copy the final stop placeholder after translating the last segment. "
+        "Emergency recovery only: if every CLJT structural marker is omitted, return exactly "
+        "one blank-line-separated paragraph per source segment in the original order and keep "
+        "every CLJ protected placeholder unchanged."
     )
     if retry_reason is not None:
         safe_reason = retry_reason.replace("\r", " ").replace("\n", " ")[:400]
@@ -488,22 +491,56 @@ def _normalize_segment_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _parse_markerless_line_values(
+def _parse_markerless_values(
     translated_stream: str, stream: TranslationStream
 ) -> list[str]:
     if len(stream.records) < 2 or not stream.protected_tokens:
         raise TranslationError("LLM omitted every structural placeholder")
     if stream.prefix in translated_stream:
         raise TranslationError("LLM altered every structural placeholder")
+
+    normalized_newlines = translated_stream.replace("\r\n", "\n").replace(
+        "\r", "\n"
+    )
+    paragraphs = [
+        _normalize_segment_text(paragraph)
+        for paragraph in re.split(r"\n[ \t]*\n+", normalized_newlines.strip())
+        if paragraph.strip()
+    ]
     lines = [
         _normalize_segment_text(line)
-        for line in translated_stream.splitlines()
+        for line in normalized_newlines.splitlines()
         if line.strip()
     ]
-    if len(lines) != len(stream.records):
+
+    protected_counts = [
+        translated_stream.count(token) for token in stream.protected_tokens
+    ]
+    protected_exact = sum(count == 1 for count in protected_counts)
+    protected_occurrences = sum(protected_counts)
+    LOGGER.info(
+        "[cl_japanese2json] Markerless response shape: paragraphs=%d "
+        "non_empty_lines=%d protected_exact=%d/%d protected_occurrences=%d",
+        len(paragraphs),
+        len(lines),
+        protected_exact,
+        len(stream.protected_tokens),
+        protected_occurrences,
+    )
+
+    expected = len(stream.records)
+    if len(paragraphs) == expected:
+        LOGGER.warning(
+            "[cl_japanese2json] LLM omitted all structural placeholders; "
+            "trying strict paragraph-aligned validation for %d text segment(s)",
+            len(paragraphs),
+        )
+        return paragraphs
+    if len(lines) != expected:
         raise TranslationError(
             "LLM omitted every structural placeholder and returned "
-            f"{len(lines)} non-empty line(s); expected {len(stream.records)}"
+            f"{len(paragraphs)} paragraph(s) and {len(lines)} non-empty "
+            f"line(s); expected {expected} text segment(s)"
         )
     LOGGER.warning(
         "[cl_japanese2json] LLM omitted all structural placeholders; "
@@ -520,7 +557,7 @@ def _parse_stream_text_values(
     structural_tokens = _structural_tokens(stream)
     found_structural = _structural_pattern(stream).findall(translated_stream)
     if not found_structural:
-        return _parse_markerless_line_values(translated_stream, stream)
+        return _parse_markerless_values(translated_stream, stream)
 
     for token in structural_tokens:
         count = translated_stream.count(token)
@@ -742,7 +779,7 @@ def _translate_batch(
     retry_records = [records[index] for index in retry_indices]
     retry_stream = _build_translation_stream(retry_records)
     LOGGER.warning(
-        "[cl_japanese2json] LLM validation failed for batch %d; retrying %d failed text segment(s) once: %s",
+        "[cl_japanese2json] LLM validation failed for batch %d; retrying %d unresolved text segment(s) once: %s",
         batch_index + 1,
         len(retry_records),
         first_error,

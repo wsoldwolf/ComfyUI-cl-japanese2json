@@ -11,6 +11,7 @@ SUB placeholders start Subjects text, COM placeholders start Common text, and SC
 Each segment ends immediately before the next CLJT placeholder.
 Do not merge, split, delete, add, or reorder segments.
 Keep each translated segment on one logical line.
+Emergency recovery only: if you nevertheless omit every CLJT structural placeholder, output exactly one paragraph per source segment in the original order, separate paragraphs with one blank line, and preserve every CLJ protected placeholder unchanged.
 For a SUB segment, output a singular English noun phrase that can directly follow "<Subject N> is" and end it with an ASCII period.
 For COM and SCN segments, output concise and natural US English prompt text.
 Do not translate text represented by CLJ protected placeholders.

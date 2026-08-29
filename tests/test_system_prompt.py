@@ -64,4 +64,5 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("Do not return JSON", prompt)
         self.assertIn("CLJT...ENDX stop placeholder", prompt)
         self.assertIn("Never translate, alter, move, reorder, duplicate, or delete", prompt)
+        self.assertIn("one paragraph per source segment", prompt)
         self.assertNotIn("photo prompt", prompt.lower())
