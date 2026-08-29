@@ -104,7 +104,7 @@ LLMは箇条書き本文の日本語からUS Englishへの翻訳だけを担当�
     {
       "id": "scene_2",
       "prompt": [
-        "subject_definitions:\n<Subject 1> is a character whose appearance is based on <Picture 1> and whose voice is based on <Audio 1>.",
+        "subject_definitions:\n<Subject 1> is a character whose appearance is based on <Picture 1>.",
         "[Shot 1] <Subject 1> raises a hand.",
         "non_diegetic_music:\nN/A"
       ],
@@ -116,6 +116,8 @@ LLMは箇条書き本文の日本語からUS Englishへの翻訳だけを担当�
 ```
 
 各シーンの `subject_definitions` には、そのシーンのショット本文で参照したSubjectだけが番号順に入ります。共通プロンプトだけに登場するSubjectや、そのシーンで未使用のSubjectは自動挿入されません。
+
+シーン内に`<d>...</d>`又は`say`、`saying`、`speak`、`whisper`、`shout`、`groan`等の発声指示が一つもない場合、そのシーンの`subject_definitions`から`<Audio N>`を含む音声参照句を自動的に削除します。無発声シーンでMiniMax H3が参照音声を契機にランダムな音声を生成することを防ぐためです。`does not speak`や`without speaking`等の否定された発声指示は無発声として扱います。一つでも発声指示があるシーンではAudio参照を維持します。
 
 ## BGMについて
 

@@ -774,6 +774,19 @@ referenced_subjects = sorted(set(referenced_subjects))
 definition = f"<Subject {n}> is {emd.subjects[n - 1]}"
 ```
 
+生成前に、そのシーンの `Scene.shots` だけを検査して発声指示の有無を決定する。`emd.common_prompt` はこの判定に使用しない。
+
+次のいずれかが1個以上存在するシーンは発声ありとする。
+
+- エスケープされていない有効な `<d>...</d>` 発話領域
+- 否定されていない `say`、`says`、`said`、`saying`、`speak`、`talk`、`utter`、`whisper`、`shout`、`yell`、`murmur`、`groan`、`grumble`、`chant`、`sing`、`announce`、`exclaim`、`reply`、`respond`又は`vocalize`の活用形
+
+`does not speak`、`without speaking`、`no one says`等、発声動詞が直前の否定表現に支配される場合は発声ありとして扱わない。
+
+シーン内の全ショットに発声指示がない場合、そのシーンへ挿入する各Subject定義から、エスケープされていない `<Audio N>` とそれを含む音声参照句を削除する。外観、衣装、身体的特徴、`<Picture N>`、`<Video N>`及び`<Subject N>`の記述は保持する。音声参照以外の定義が空になった場合は `a character.` を使用する。これにより、無発声シーンでMiniMax H3がAudio参照を契機にランダムな音声を生成することを防ぐ。
+
+シーン内に1個でも発声指示がある場合は、そのシーンのSubject定義に含まれるAudio参照を変更しない。
+
 定義の順序はSubject番号の昇順とする。
 
 すべての定義をLFで結合し、先頭へ `subject_definitions:` を付けた1個の文字列を生成する。
@@ -987,6 +1000,9 @@ prompt.append("non_diegetic_music:\nN/A")
 5. 未定義Subjectで `IndexError` が発生しない。
 6. 未定義Subjectタグはショット本文へ残る。
 7. Subjects翻訳結果が `<Subject N> is ` に文法的に接続できる。
+8. 発声指示のないシーンではSubject定義からAudio参照句が削除され、外観参照及び身体的特徴が維持される。
+9. `<d>...</d>`又は否定されていない発声動詞があるシーンではAudio参照が維持される。
+10. `does not speak`、`without speaking`及び`no one says`は発声指示として扱われない。
 
 ### 12.5 LLM出力検証
 

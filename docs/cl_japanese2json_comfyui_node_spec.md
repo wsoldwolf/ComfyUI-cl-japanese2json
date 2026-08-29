@@ -1062,6 +1062,8 @@ class JSONValidationError(CLJapaneseToJSONError): ...
 
 `cl_japanese2json_spec.md` 第12章の全受入テストを実装する。
 
+特にJSONGENについて、無発声シーンからAudio参照句が除去されること、発声シーンでは維持されること、否定された発声動詞を無発声として扱うことをテストする。
+
 ### 18.2 Llamaモックテスト
 
 実GPU及びGGUFを必要としないモックを用意する。

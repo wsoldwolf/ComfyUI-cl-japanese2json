@@ -30,6 +30,70 @@ class JSONGenerationTests(unittest.TestCase):
         )
         self.assertEqual(parsed["shots"][1]["prompt"][0], "subject_definitions:")
 
+    def test_silent_scene_removes_audio_reference_clauses(self) -> None:
+        emd = Emd(
+            subjects=[
+                "a character whose appearance is based on <Picture 1> and whose voice is based on <Audio 1>.",
+                "Character B based on <Picture 2>. Use <Audio 2> as the voice quality reference. She wears a red coat.",
+                "a tall and calm character.",
+                "a voice based on <Audio 3>.",
+            ],
+            scenes=[
+                Scene(
+                    shots=[
+                        "<Subject 1>, <Subject 2>, <Subject 3>, and <Subject 4> wave silently."
+                    ]
+                )
+            ],
+        )
+        with self.assertLogs("cl_japanese2json", level="INFO") as captured:
+            block = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][0]
+        self.assertEqual(
+            block,
+            "subject_definitions:\n"
+            "<Subject 1> is a character whose appearance is based on <Picture 1>.\n"
+            "<Subject 2> is Character B based on <Picture 2>. She wears a red coat.\n"
+            "<Subject 3> is a tall and calm character.\n"
+            "<Subject 4> is a character.",
+        )
+        self.assertNotIn("<Audio", block)
+        self.assertNotIn("voice", block.lower())
+        self.assertTrue(
+            any("removed 3 Audio reference(s)" in line for line in captured.output)
+        )
+
+    def test_positive_speech_cues_and_direct_speech_keep_audio_references(self) -> None:
+        definition = (
+            "a character based on <Picture 1> whose voice is based on <Audio 1>."
+        )
+        cues = (
+            "<Subject 1> says hello.",
+            "<Subject 1> is saying hello.",
+            "<Subject 1> whispers softly.",
+            "<Subject 1> groans audibly.",
+            "<Subject 1> moves their mouth: <d>[Japanese]こんにちは</d>.",
+        )
+        for shot in cues:
+            with self.subTest(shot=shot):
+                emd = Emd(subjects=[definition], scenes=[Scene(shots=[shot])])
+                block = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][0]
+                self.assertIn("<Audio 1>", block)
+
+    def test_negated_speech_cues_do_not_keep_audio_references(self) -> None:
+        definition = (
+            "a character based on <Picture 1> whose voice is based on <Audio 1>."
+        )
+        cues = (
+            "<Subject 1> does not speak and remains silent.",
+            "<Subject 1> moves without speaking.",
+            "No one says anything.",
+        )
+        for shot in cues:
+            with self.subTest(shot=shot):
+                emd = Emd(subjects=[definition], scenes=[Scene(shots=[shot])])
+                block = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][0]
+                self.assertNotIn("<Audio 1>", block)
+
     def test_direct_speech_and_escaped_subjects_are_not_extracted(self) -> None:
         emd = Emd(
             subjects=["one.", "two."],

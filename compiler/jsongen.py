@@ -14,6 +14,44 @@ from .structures import Emd, Scene
 
 LOGGER = logging.getLogger("cl_japanese2json")
 SUBJECT_RE = re.compile(r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>")
+AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
+DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
+SPEECH_CUE_RE = re.compile(
+    r"\b(?:say|says|said|saying|speak|speaks|spoke|spoken|speaking|"
+    r"talk|talks|talked|talking|utter|utters|uttered|uttering|"
+    r"whisper|whispers|whispered|whispering|shout|shouts|shouted|shouting|"
+    r"yell|yells|yelled|yelling|murmur|murmurs|murmured|murmuring|"
+    r"groan|groans|groaned|groaning|grumble|grumbles|grumbled|grumbling|"
+    r"chant|chants|chanted|chanting|sing|sings|sang|sung|singing|"
+    r"announce|announces|announced|announcing|"
+    r"exclaim|exclaims|exclaimed|exclaiming|"
+    r"reply|replies|replied|replying|respond|responds|responded|responding|"
+    r"vocalize|vocalizes|vocalized|vocalizing)\b",
+    re.IGNORECASE,
+)
+NEGATED_SPEECH_PREFIX_RE = re.compile(
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could|is|are|was|were)\s+"
+    r"(?:not|never)|\b(?:not|never|without|cannot|can't|refrains?\s+from|"
+    r"avoids?|no\s+one))\s+(?:[A-Za-z'-]+\s+){0,3}$",
+    re.IGNORECASE,
+)
+OTHER_REFERENCE_RE = re.compile(
+    r"(?<!\\)<(?:Picture|Video|Subject) [1-9][0-9]*(?<!\\)>"
+)
+AUDIO_CLAUSE_SPLIT_RE = re.compile(
+    r"\s*(?:,|;|\band\b|\bbut\b|\bwhile\b)\s*", re.IGNORECASE
+)
+SUBJECT_SENTENCE_RE = re.compile(r"[^.!?]+(?:[.!?]+|$)")
+AUDIO_INTRO_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bwhose\s+(?:voice|audio)\b",
+        r"\bwith\b[^,;]*\b(?:voice|audio)\b",
+        r"\bvoiced\s+by\s*$",
+        r"\b(?:use|uses|used|using)\s*$",
+        r"\b(?:an?\s+)?(?:voice|audio)(?:\s+quality)?(?:\s+(?:reference|source))?[^,;]*$",
+    )
+)
 NON_DIEGETIC_MUSIC = "non_diegetic_music:\nN/A"
 
 
@@ -28,8 +66,68 @@ def _referenced_subjects(scene: Scene) -> list[int]:
     return sorted(referenced)
 
 
+def _scene_requests_speech(scene: Scene) -> bool:
+    for shot in scene.shots:
+        if DIRECT_SPEECH_RE.search(shot):
+            return True
+        for match in SPEECH_CUE_RE.finditer(shot):
+            prefix = shot[max(0, match.start() - 80):match.start()]
+            if not NEGATED_SPEECH_PREFIX_RE.search(prefix):
+                return True
+    return False
+
+
+def _trim_audio_clause(clause: str) -> str:
+    audio = AUDIO_REFERENCE_RE.search(clause)
+    if audio is None:
+        return clause.strip()
+
+    prefix = clause[:audio.start()]
+    intro_starts = [
+        match.start()
+        for pattern in AUDIO_INTRO_PATTERNS
+        for match in pattern.finditer(prefix)
+    ]
+    if intro_starts:
+        return prefix[:min(intro_starts)].strip()
+    if OTHER_REFERENCE_RE.search(clause):
+        return AUDIO_REFERENCE_RE.sub("", clause).strip()
+    return prefix.strip()
+
+
+def _without_audio_references(definition: str) -> str:
+    if AUDIO_REFERENCE_RE.search(definition) is None:
+        return definition
+    retained_sentences: list[str] = []
+    for match in SUBJECT_SENTENCE_RE.finditer(definition):
+        sentence = match.group(0).strip()
+        if not sentence:
+            continue
+        if AUDIO_REFERENCE_RE.search(sentence) is None:
+            retained_sentences.append(sentence)
+            continue
+        clauses = AUDIO_CLAUSE_SPLIT_RE.split(sentence.rstrip(".!?"))
+        retained_clauses = [
+            cleaned
+            for clause in clauses
+            if (cleaned := _trim_audio_clause(clause))
+        ]
+        if retained_clauses:
+            retained_sentences.append(", ".join(retained_clauses) + ".")
+
+    result = " ".join(retained_sentences)
+    result = AUDIO_REFERENCE_RE.sub("", result)
+    result = re.sub(r"\s+([,.;!?])", r"\1", result)
+    result = re.sub(r"(?:,\s*){2,}", ", ", result).strip()
+    if not result:
+        return "a character."
+    return result.rstrip(".!?") + "."
+
+
 def _subject_block(emd: Emd, scene: Scene, scene_number: int) -> str:
     definitions: list[str] = []
+    keep_audio_references = _scene_requests_speech(scene)
+    removed_audio_references = 0
     for number in _referenced_subjects(scene):
         if number > len(emd.subjects):
             LOGGER.warning(
@@ -38,7 +136,18 @@ def _subject_block(emd: Emd, scene: Scene, scene_number: int) -> str:
                 number,
             )
             continue
-        definitions.append(f"<Subject {number}> is {emd.subjects[number - 1]}")
+        definition = emd.subjects[number - 1]
+        if not keep_audio_references:
+            removed_audio_references += len(AUDIO_REFERENCE_RE.findall(definition))
+            definition = _without_audio_references(definition)
+        definitions.append(f"<Subject {number}> is {definition}")
+
+    if removed_audio_references:
+        LOGGER.info(
+            "[cl_japanese2json] Scene %d has no speech instruction; removed %d Audio reference(s) from subject definitions",
+            scene_number,
+            removed_audio_references,
+        )
 
     block = "subject_definitions:"
     if definitions:
