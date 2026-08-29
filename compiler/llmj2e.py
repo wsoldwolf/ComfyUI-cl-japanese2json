@@ -488,11 +488,39 @@ def _normalize_segment_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _parse_markerless_line_values(
+    translated_stream: str, stream: TranslationStream
+) -> list[str]:
+    if len(stream.records) < 2 or not stream.protected_tokens:
+        raise TranslationError("LLM omitted every structural placeholder")
+    if stream.prefix in translated_stream:
+        raise TranslationError("LLM altered every structural placeholder")
+    lines = [
+        _normalize_segment_text(line)
+        for line in translated_stream.splitlines()
+        if line.strip()
+    ]
+    if len(lines) != len(stream.records):
+        raise TranslationError(
+            "LLM omitted every structural placeholder and returned "
+            f"{len(lines)} non-empty line(s); expected {len(stream.records)}"
+        )
+    LOGGER.warning(
+        "[cl_japanese2json] LLM omitted all structural placeholders; "
+        "trying strict line-aligned validation for %d text segment(s)",
+        len(lines),
+    )
+    return lines
+
+
 def _parse_stream_text_values(
     content: str, stream: TranslationStream
 ) -> list[str]:
     translated_stream = _translation_stream_from_content(content, stream)
     structural_tokens = _structural_tokens(stream)
+    found_structural = _structural_pattern(stream).findall(translated_stream)
+    if not found_structural:
+        return _parse_markerless_line_values(translated_stream, stream)
 
     for token in structural_tokens:
         count = translated_stream.count(token)
@@ -501,7 +529,6 @@ def _parse_stream_text_values(
                 f"Structural placeholder {token!r} occurred {count} time(s); expected exactly once"
             )
 
-    found_structural = _structural_pattern(stream).findall(translated_stream)
     if found_structural != structural_tokens:
         raise TranslationError(
             "LLM changed, added, or reordered structural placeholders"

@@ -156,6 +156,28 @@ class LLMJ2ETests(unittest.TestCase):
             ["R000002", "R000003"],
         )
 
+    def test_markerless_line_aligned_output_is_strictly_validated(self) -> None:
+        def markerless_lines(kwargs):
+            return "\n".join(
+                default_translation(record)
+                for record in request_records(kwargs["messages"])
+            )
+
+        source = (
+            "# シーン\n"
+            "* <Subject 1>が動く。\n"
+            "* <Subject 2>が話す。\n"
+            "* <Subject 3>が止まる。"
+        )
+        llm = FakeLLM([markerless_lines])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=128)
+        self.assertEqual(output.count("* "), 3)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(
+            any("strict line-aligned validation" in line for line in captured.output)
+        )
+
     def test_lf_crlf_and_no_final_newline_match(self) -> None:
         first = llmj2e.translate_markdown(SOURCE.rstrip("\n"), FakeLLM(), "sys", max_tokens=64)
         second = llmj2e.translate_markdown(
