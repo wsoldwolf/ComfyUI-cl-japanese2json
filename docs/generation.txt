@@ -1,0 +1,12 @@
+docsディレクトリ内の次の2つの仕様書を最後まで読み、独立したComfyUIカスタムノードを実装してください。
+
+- docs/cl_japanese2json_spec.md
+- docs/cl_japanese2json_comfyui_node_spec.md
+
+最初に仕様の矛盾や重大な曖昧点を確認してください。
+問題がなければ実装計画を示した後、そのまま実装、単体テスト、README作成まで進めてください。
+
+作業範囲は現在のプロジェクトフォルダー内だけとし、ComfyUI本体や他のcustom_nodesは変更しないでください。
+llama-cpp-pythonの自動インストールや更新も行わないでください。
+
+最後に、変更ファイル、テスト結果、未実施項目、ComfyUIへの導入手順を報告してください。

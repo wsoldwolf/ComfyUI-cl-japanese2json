@@ -1,0 +1,11 @@
+[project]
+name = "comfyui-cl-japanese2json"
+version = "0.1.0"
+description = "Deterministic Japanese reduced-Markdown compiler for MiniMax H3 Contex-Loop plans"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-only" }
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
