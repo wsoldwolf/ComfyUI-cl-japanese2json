@@ -25,6 +25,11 @@ LEADING_THINK_BLOCK_RE = re.compile(
     r"\A\s*<\s*think\s*>.*?<\s*/\s*think\s*>\s*",
     re.IGNORECASE | re.DOTALL,
 )
+SUBJECT_WRAPPER_RE = re.compile(r"\A<Subject ([1-9][0-9]*)> is (.+)\Z")
+SUBJECT_LABEL_RE = re.compile(
+    r"\A(?:<Subject [1-9][0-9]*>|Subject [1-9][0-9]*\b)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -246,7 +251,8 @@ def _user_payload(
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
         "A SUB marker starts a singular noun phrase ending in an ASCII period; COM and SCN markers "
         "start concise natural US English. Keep one segment after each marker and preserve the "
-        "marker order. Copy the final stop placeholder after translating the last segment. "
+        "marker order. Do not replace a SUB marker with a label, index, copula, or framing text. "
+        "Copy the final stop placeholder after translating the last segment. "
         "Emergency recovery only: if every CLJT structural marker is omitted, return exactly "
         "one blank-line-separated paragraph per source segment in the original order and keep "
         "every CLJ protected placeholder unchanged."
@@ -493,6 +499,10 @@ def _validate_translation_text(record: TranslationRecord, translated: str) -> st
     if "\n" in translated or "\r" in translated:
         raise TranslationError(f"Record {record.record_id} was split across multiple lines")
     validate_protected_translation(record.payload, translated)
+    if record.section == "Subjects" and SUBJECT_LABEL_RE.match(translated):
+        raise TranslationError(
+            f"Subject record {record.record_id} contains model-added subject framing"
+        )
     restored = restore_text(record.payload, translated)
     if record.section == "Subjects" and restored and not restored.endswith("."):
         raise TranslationError(
@@ -548,6 +558,59 @@ def _structural_pattern(stream: TranslationStream) -> re.Pattern[str]:
 
 def _normalize_segment_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _repair_leading_subject_wrappers(
+    translated_stream: str,
+    stream: TranslationStream,
+    found_structural: list[str],
+) -> str | None:
+    """Restore leading SUB markers replaced by exact numbered copula wrappers."""
+
+    if not found_structural:
+        return None
+    missing_indices = [
+        index
+        for index, stream_record in enumerate(stream.records)
+        if translated_stream.count(stream_record.marker_token) == 0
+    ]
+    if not missing_indices:
+        return None
+    missing_count = len(missing_indices)
+    if missing_indices != list(range(missing_count)):
+        return None
+    missing_records = list(stream.records[:missing_count])
+    if any(
+        stream_record.record.section != "Subjects"
+        for stream_record in missing_records
+    ):
+        return None
+
+    first_structural_position = translated_stream.index(found_structural[0])
+    prefix_lines = [
+        line.strip()
+        for line in translated_stream[:first_structural_position].splitlines()
+        if line.strip()
+    ]
+    if len(prefix_lines) != missing_count:
+        return None
+
+    repaired_lines: list[str] = []
+    for expected_number, (stream_record, line) in enumerate(
+        zip(missing_records, prefix_lines), start=1
+    ):
+        match = SUBJECT_WRAPPER_RE.fullmatch(line)
+        if match is None or int(match.group(1)) != expected_number:
+            return None
+        repaired_lines.append(f"{stream_record.marker_token} {match.group(2)}")
+
+    LOGGER.warning(
+        "[cl_japanese2json] Recovered %d leading SUB record placeholder(s) "
+        "from exact numbered subject wrapper(s)",
+        missing_count,
+    )
+    suffix = translated_stream[first_structural_position:]
+    return "\n".join([*repaired_lines, suffix])
 
 
 def _parse_markerless_values(
@@ -617,6 +680,13 @@ def _parse_stream_text_values(
     found_structural = _structural_pattern(stream).findall(translated_stream)
     if not found_structural:
         return _parse_markerless_values(translated_stream, stream)
+
+    repaired_stream = _repair_leading_subject_wrappers(
+        translated_stream, stream, found_structural
+    )
+    if repaired_stream is not None:
+        translated_stream = repaired_stream
+        found_structural = _structural_pattern(stream).findall(translated_stream)
 
     expected_set = set(structural_tokens)
     unexpected = [token for token in found_structural if token not in expected_set]

@@ -65,4 +65,6 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("CLJT...ENDX stop placeholder", prompt)
         self.assertIn("Never translate, alter, move, reorder, duplicate, or delete", prompt)
         self.assertIn("one paragraph per source segment", prompt)
+        self.assertIn("output only a singular English noun phrase", prompt)
+        self.assertNotIn("<Subject N> is", prompt)
         self.assertNotIn("photo prompt", prompt.lower())

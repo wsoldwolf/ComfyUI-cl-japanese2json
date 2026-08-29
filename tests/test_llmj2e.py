@@ -175,6 +175,57 @@ class LLMJ2ETests(unittest.TestCase):
             )
         )
 
+    def test_exact_leading_subject_wrappers_restore_missing_sub_markers(self) -> None:
+        def replace_subject_markers(kwargs):
+            records = request_records(kwargs["messages"])
+            translated = default_stream_translation(kwargs["messages"])
+            first_common = next(
+                record for record in records if record["section"] == "Common"
+            )
+            suffix_start = translated.index(first_common["marker_token"])
+            subject_records = [
+                record for record in records if record["section"] == "Subjects"
+            ]
+            wrappers = [
+                f"<Subject {index}> is {default_translation(record)}"
+                for index, record in enumerate(subject_records, start=1)
+            ]
+            return "\n".join([*wrappers, translated[suffix_start:]])
+
+        llm = FakeLLM([replace_subject_markers])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(SOURCE, llm, "sys", max_tokens=128)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIn("# Subjects\n* a referenced character", output)
+        self.assertNotIn("* <Subject 1> is", output)
+        self.assertTrue(
+            any(
+                "Recovered 1 leading SUB record placeholder" in line
+                for line in captured.output
+            )
+        )
+
+    def test_non_copula_subject_wrapper_is_not_repaired(self) -> None:
+        def replace_subject_marker(kwargs):
+            records = request_records(kwargs["messages"])
+            translated = default_stream_translation(kwargs["messages"])
+            first_common = next(
+                record for record in records if record["section"] == "Common"
+            )
+            suffix_start = translated.index(first_common["marker_token"])
+            subject = next(
+                record for record in records if record["section"] == "Subjects"
+            )
+            return (
+                f"<Subject 1> refers to {default_translation(subject)}\n"
+                + translated[suffix_start:]
+            )
+
+        llm = FakeLLM([replace_subject_marker, replace_subject_marker])
+        with self.assertRaises(errors.TranslationError):
+            llmj2e.translate_markdown(SOURCE, llm, "sys", max_tokens=128)
+        self.assertEqual(len(llm.calls), 2)
+
     def test_markerless_line_aligned_output_is_strictly_validated(self) -> None:
         def markerless_lines(kwargs):
             return "\n".join(

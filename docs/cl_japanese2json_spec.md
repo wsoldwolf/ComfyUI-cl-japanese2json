@@ -344,6 +344,7 @@ JSONファイル上では、JSONの文字列エスケープにより1個の論�
 - 入力メッセージと設定上限 `max_tokens` の合計が実効コンテキスト長へ収まる場合、区間数にかかわらず文書全体を1回の `create_chat_completion()` で翻訳する。固定の区間件数上限を設けてはならない。
 - 1回に収まらない場合だけ、文書順を保持したまま、各推論へ収まる最大数の箇条書き区間で複数ストリームへ分割する。箇条書き本文及び保護領域の途中で分割してはならない。
 - 翻訳後はすべての区間先頭プレースホルダの個数と順序、次の構造プレースホルダまでの区間対応、存在するディレクティブプレースホルダの個数と順序、ディレクティブ直後への文章追加、各区間が所有する保護プレースホルダを検証する。すべての区間先頭プレースホルダが完全一致して文書順に各1回存在し、未知又は重複した構造プレースホルダがなく、最初の構造プレースホルダより前に文章がない場合、ディレクティブプレースホルダだけの欠落を許容し、Python側に保持したブロック情報から復元してよい。
+- 先頭のSubjects区間でモデルが区間先頭プレースホルダを削除し、代わりに番号付きSubjectタグ、ASCII空白、`is`、ASCII空白、翻訳本文という完全一致形式を1区間1行で返した場合に限り、行数、1始まりの連番及び各区間の保護プレースホルダ所有関係を検証して、欠落した先頭SUBプレースホルダを復元してよい。`refers to`等の別動詞、ラベルだけ、非連番、余分な行又はSubjects以外の欠落には適用しない。
 - 検証済みの英訳を元の区間へ割り当て、Python側に保持したディレクティブ及び復元辞書を使って正規形Markdownを決定論的に再構築する。
 - 個別区間だけが検証に失敗した場合、正常な区間の翻訳を保持し、失敗区間だけを1回再試行する。構造プレースホルダが欠落しても、開始位置と直後の構造プレースホルダを確認でき、内容検証に通った区間は保持する。欠落区間及び境界を確定できない隣接区間だけを1回再試行する。説明、thinking、重複または順序変更によって安全に部分復旧できない場合は推論単位全体を1回再試行する。
 - 構造プレースホルダの一部が残る応答を、段落数又は行数だけで復旧してはならない。構造プレースホルダが完全に0件の場合に限り、翻訳対象が2区間以上、文書内に保護プレースホルダが1個以上あり、空行で区切られた非空段落数が区間数と完全一致するとき、出力段落順を区間順として検証してよい。段落数が一致しない場合は、非空出力行数が区間数と完全一致するときだけ行順で検証してよい。段落内の物理改行は空白へ正規化する。この場合も各区間が所有する保護プレースホルダ、別区間からの移動、Subject文末及び日本語残留を通常どおり検証し、1項目でも失敗すれば採用しない。診断ログには応答本文を含めず、段落数、非空行数、保護プレースホルダ検出数だけを記録する。
@@ -354,6 +355,7 @@ JSONファイル上では、JSONの文字列エスケープにより1個の論�
 
 - `<Subject N> is ` の後へ接続できる単数名詞句として翻訳する。
 - Subject番号を本文へ追加しない。
+- LLMへの指示には最終JSON側のSubject接頭辞を例示せず、SUBプレースホルダ直後から名詞句だけを出力させる。モデルが追加したSubjectラベル、番号、コピュラ、コロン又はその他の枠付けは翻訳本文として採用しない。
 - 外観参照、声質参照、衣装及び識別特徴を省略しない。
 - 文末はピリオドで終了させる。
 
@@ -396,7 +398,8 @@ Each segment ends immediately before the next structural placeholder.
 Do not add text after a directive placeholder.
 Do not translate text represented by protected placeholders.
 Preserve numbers, timing, counts, directions, left/right relationships, simultaneity, and negation.
-For a SUB segment, output a singular English noun phrase that can directly follow "<Subject N> is".
+For a SUB segment, output only a singular English noun phrase ending with an ASCII period.
+Begin directly with the noun phrase and do not prepend a label, reference, index, copula, colon, or framing text.
 For COM and SCN segments, output concise and natural US English prompt text.
 Use English outside protected placeholders.
 Copy the final CLJT...ENDX stop placeholder immediately after the final translated segment.
