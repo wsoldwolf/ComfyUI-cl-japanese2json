@@ -215,6 +215,22 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIn("previous response failed", llm.calls[1]["messages"][-1]["content"].lower())
         self.assertIn("code fence", llm.calls[1]["messages"][-1]["content"].lower())
 
+    def test_one_leading_qwen_thinking_block_is_ignored(self) -> None:
+        def leading_think(kwargs):
+            translated = default_stream_translation(kwargs["messages"])
+            return "<think>internal reasoning</think>\n\n" + translated
+
+        llm = FakeLLM([leading_think])
+        with self.assertLogs("cl_japanese2json", level="INFO") as captured:
+            output = llmj2e.translate_markdown(
+                "# シーン\n* 動作。", llm, "sys", max_tokens=64
+            )
+        self.assertIn("# Scene", output)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(
+            any("Ignored one leading Qwen thinking block" in line for line in captured.output)
+        )
+
     def test_two_invalid_responses_raise(self) -> None:
         llm = FakeLLM(["not json", "still not json"])
         with self.assertRaises(errors.TranslationError):
@@ -342,6 +358,8 @@ class LLMJ2ETests(unittest.TestCase):
             {"choices": [{"finish_reason": "stop"}]},
             {"choices": [{"message": {"content": "  "}}]},
             {"choices": [{"message": {"content": "<think>x</think>"}}]},
+            {"choices": [{"message": {"content": "<think>unclosed"}}]},
+            {"choices": [{"message": {"content": "prefix <think>x</think>"}}]},
         ]
         for bad in bad_responses:
             with self.subTest(response=bad), self.assertRaises(errors.TranslationError):

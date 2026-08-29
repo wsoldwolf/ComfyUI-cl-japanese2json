@@ -435,7 +435,7 @@ https://github.com/huchukato/ComfyUI-QwenVL-Mod/blob/main/AILab_QwenVL_GGUF_Prom
 | `n_ctx` | モデル設定値。入力と出力の合計が収まること |
 | `max_tokens` | バッチ長から算出し、設定上限以内とする |
 
-Qwen3のchat templateが対応している場合はthinkingを無効化する。対応していない場合は `/no_think` をユーザーメッセージへ追加する方式を使用してよい。ただし `/no_think` を翻訳対象本文へ混入させてはならない。
+Qwen3のchat templateが対応している場合はthinkingを無効化する。対応していない場合は `/no_think` をユーザーメッセージへ追加する方式を使用してよい。ただし `/no_think` を翻訳対象本文へ混入させてはならない。それでも応答先頭へ正常に閉じた `<think>...</think>` が1個付加された場合だけ、そのブロックを制御ラッパーとして破棄し、後続の翻訳ストリームへ通常の完全検証を行ってよい。途中にあるthinking、未閉鎖、複数ブロック及び後続翻訳が空の応答は失敗とする。
 
 ### 6.13 翻訳結果の検証
 

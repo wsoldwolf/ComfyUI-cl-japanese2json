@@ -21,6 +21,10 @@ LOGGER = logging.getLogger("cl_japanese2json")
 MAX_SEED = 4_294_967_295
 CODE_FENCE_RE = re.compile(r"```", re.IGNORECASE)
 THINK_RE = re.compile(r"<\s*/?\s*think\b", re.IGNORECASE)
+LEADING_THINK_BLOCK_RE = re.compile(
+    r"\A\s*<\s*think\s*>.*?<\s*/\s*think\s*>\s*",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 @dataclass
@@ -397,6 +401,14 @@ def _content_from_response(response: Any) -> str:
     content = message.get("content")
     if not isinstance(content, str) or content.strip() == "":
         raise TranslationError("LLM response content is empty")
+    leading_think = LEADING_THINK_BLOCK_RE.match(content)
+    if leading_think is not None:
+        content = content[leading_think.end():]
+        LOGGER.info("[cl_japanese2json] Ignored one leading Qwen thinking block")
+    if content.strip() == "":
+        raise TranslationError(
+            "LLM response contains thinking markup but no translation"
+        )
     if CODE_FENCE_RE.search(content):
         raise TranslationError("LLM response contains a Markdown code fence")
     if THINK_RE.search(content):
