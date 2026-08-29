@@ -999,7 +999,9 @@ class JSONValidationError(CLJapaneseToJSONError): ...
 [cl_japanese2json] Prepared one protected translation stream for 46 text segment(s); using 1 inference request(s)
 [cl_japanese2json] Translating batch 1/1 with 46 text segment(s)
 [cl_japanese2json] LLM tokens: prompt=4210 completion=2874 total=7084
-[cl_japanese2json] LLM omitted 4 directive placeholder(s); reconstructing document structure from 46 intact record placeholder(s)
+[cl_japanese2json] Markerless response shape: paragraphs=1 non_empty_lines=45 protected_exact=60/62 protected_occurrences=60
+[cl_japanese2json] Salvaged 42/46 markerless text segment(s) using protected-placeholder anchors
+[cl_japanese2json] LLM validation failed for batch 1; retrying 4 unresolved text segment(s) once: ...
 [cl_japanese2json] Generated 3 scene(s)
 [cl_japanese2json] Saved debug output: C:\...\ComfyUI\output\cl_japanese2json_debug\...
 [cl_japanese2json] Returning cached last JSON

@@ -347,7 +347,9 @@ JSONファイル上では、JSONの文字列エスケープにより1個の論�
 - 先頭のSubjects区間でモデルが区間先頭プレースホルダを削除し、代わりに番号付きSubjectタグ、ASCII空白、`is`、ASCII空白、翻訳本文という完全一致形式を1区間1行で返した場合に限り、行数、1始まりの連番及び各区間の保護プレースホルダ所有関係を検証して、欠落した先頭SUBプレースホルダを復元してよい。`refers to`等の別動詞、ラベルだけ、非連番、余分な行又はSubjects以外の欠落には適用しない。
 - 検証済みの英訳を元の区間へ割り当て、Python側に保持したディレクティブ及び復元辞書を使って正規形Markdownを決定論的に再構築する。
 - 個別区間だけが検証に失敗した場合、正常な区間の翻訳を保持し、失敗区間だけを1回再試行する。構造プレースホルダが欠落しても、開始位置と直後の構造プレースホルダを確認でき、内容検証に通った区間は保持する。欠落区間及び境界を確定できない隣接区間だけを1回再試行する。説明、thinking、重複または順序変更によって安全に部分復旧できない場合は推論単位全体を1回再試行する。
-- 構造プレースホルダの一部が残る応答を、段落数又は行数だけで復旧してはならない。構造プレースホルダが完全に0件の場合に限り、翻訳対象が2区間以上、文書内に保護プレースホルダが1個以上あり、空行で区切られた非空段落数が区間数と完全一致するとき、出力段落順を区間順として検証してよい。段落数が一致しない場合は、非空出力行数が区間数と完全一致するときだけ行順で検証してよい。段落内の物理改行は空白へ正規化する。この場合も各区間が所有する保護プレースホルダ、別区間からの移動、Subject文末及び日本語残留を通常どおり検証し、1項目でも失敗すれば採用しない。診断ログには応答本文を含めず、段落数、非空行数、保護プレースホルダ検出数だけを記録する。
+- 構造プレースホルダの一部が残る応答を、段落数又は行数だけで復旧してはならない。構造プレースホルダが完全に0件の場合に限り、翻訳対象が2区間以上、文書内に保護プレースホルダが1個以上あり、空行で区切られた非空段落数が区間数と完全一致するとき、出力段落順を区間順として検証してよい。段落数が一致しない場合は、非空出力行数が区間数と完全一致するときだけ行順で検証してよい。段落内の物理改行は空白へ正規化する。この場合も各区間が所有する保護プレースホルダ、別区間からの移動、Subject文末及び日本語残留を通常どおり検証し、1項目でも失敗すれば採用しない。
+- 構造プレースホルダが完全に0件で段落数及び行数も区間数と一致しない場合は、完全に検証できた保護プレースホルダを区間アンカーとして使用してよい。アンカーは応答順と原文区間順がともに厳密な昇順でなければならない。隣接アンカー間、先頭及び末尾について、応答候補数と原文区間数が完全一致する範囲だけを順番に個別検証して保持する。件数が異なる範囲、保護プレースホルダが欠落した区間及び個別検証に失敗した区間は採用せず、その区間だけを1回再試行する。この復旧で位置を推測してはならない。
+- 再試行では対象を未解決区間だけに限定し、自然な英文では主語又は参照の反復を省略できる場合でも、各CLJ保護プレースホルダを英文中へ明示するよう指示する。診断ログには応答本文を含めず、段落数、非空行数、保護プレースホルダ検出数及び安全に保持できた区間数だけを記録する。
 
 ### 6.9 セクション別翻訳規則
 
@@ -394,6 +396,7 @@ Translate only Japanese prose following each SUB, COM, or SCN segment placeholde
 Never translate, alter, move, reorder, duplicate, or delete any placeholder token.
 Preserve every protected placeholder byte-for-byte and exactly once.
 Never invent a placeholder and never move one into another segment.
+Protected placeholders are required content, not optional labels. Even when natural English could omit a repeated subject or reference, copy its placeholder and express it explicitly in that segment.
 Each segment ends immediately before the next structural placeholder.
 Do not add text after a directive placeholder.
 Do not translate text represented by protected placeholders.

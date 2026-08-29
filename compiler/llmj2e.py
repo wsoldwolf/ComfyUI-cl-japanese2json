@@ -261,7 +261,10 @@ def _user_payload(
         safe_reason = retry_reason.replace("\r", " ").replace("\n", " ")[:400]
         requirement = (
             f"The previous response failed strict validation: {safe_reason}. "
-            "Correct that exact problem and apply every constraint. "
+            "This retry stream contains only unresolved segments. Correct that exact "
+            "problem and apply every constraint. Copy every CLJ protected placeholder "
+            "even when natural English could omit a repeated subject or reference; "
+            "express that placeholder explicitly in the translated sentence. "
             + requirement
         )
     return (
@@ -672,6 +675,123 @@ def _parse_markerless_values(
     return lines
 
 
+def _markerless_candidate_groups(translated_stream: str) -> list[list[str]]:
+    """Return distinct paragraph- and line-based markerless segment candidates."""
+
+    normalized_newlines = translated_stream.replace("\r\n", "\n").replace(
+        "\r", "\n"
+    )
+    paragraphs = [
+        _normalize_segment_text(paragraph)
+        for paragraph in re.split(r"\n[ \t]*\n+", normalized_newlines.strip())
+        if paragraph.strip()
+    ]
+    lines = [
+        _normalize_segment_text(line)
+        for line in normalized_newlines.splitlines()
+        if line.strip()
+    ]
+    groups = [paragraphs]
+    if lines != paragraphs:
+        groups.append(lines)
+    return groups
+
+
+def _salvage_markerless_candidates(
+    candidates: list[str], stream: TranslationStream
+) -> dict[int, str]:
+    """Conservatively align markerless segments using intact protected tokens."""
+
+    token_owner = {
+        token: record_index
+        for record_index, stream_record in enumerate(stream.records)
+        for token in stream_record.record.payload.tokens
+    }
+    anchors: list[tuple[int, int, str]] = []
+    for candidate_index, translated in enumerate(candidates):
+        present = [token for token in stream.protected_tokens if token in translated]
+        if not present:
+            continue
+        owners = {token_owner[token] for token in present}
+        if len(owners) != 1:
+            continue
+        record_index = next(iter(owners))
+        try:
+            validated = _validate_stream_record_text(
+                stream.records[record_index], translated, stream.protected_tokens
+            )
+        except TranslationError:
+            continue
+        anchors.append((candidate_index, record_index, validated))
+
+    if not anchors:
+        return {}
+    if any(
+        next_candidate <= candidate or next_record <= record
+        for (candidate, record, _), (next_candidate, next_record, _) in zip(
+            anchors, anchors[1:]
+        )
+    ):
+        return {}
+
+    salvaged = {record_index: value for _, record_index, value in anchors}
+    boundaries = [
+        (-1, -1, ""),
+        *anchors,
+        (len(candidates), len(stream.records), ""),
+    ]
+    for (left_candidate, left_record, _), (
+        right_candidate,
+        right_record,
+        _,
+    ) in zip(boundaries, boundaries[1:]):
+        candidate_indices = range(left_candidate + 1, right_candidate)
+        record_indices = range(left_record + 1, right_record)
+        if len(candidate_indices) != len(record_indices):
+            continue
+        for candidate_index, record_index in zip(candidate_indices, record_indices):
+            try:
+                salvaged[record_index] = _validate_stream_record_text(
+                    stream.records[record_index],
+                    candidates[candidate_index],
+                    stream.protected_tokens,
+                )
+            except TranslationError:
+                continue
+    return salvaged
+
+
+def _salvage_markerless_response(
+    translated_stream: str, stream: TranslationStream
+) -> dict[int, str]:
+    if (
+        len(stream.records) < 2
+        or not stream.protected_tokens
+        or stream.prefix in translated_stream
+    ):
+        return {}
+
+    best: dict[int, str] = {}
+    for candidates in _markerless_candidate_groups(translated_stream):
+        current = _salvage_markerless_candidates(candidates, stream)
+        if len(current) > len(best):
+            best = current
+        elif len(current) == len(best) and current != best:
+            best = {
+                index: value
+                for index, value in best.items()
+                if current.get(index) == value
+            }
+    if best:
+        LOGGER.warning(
+            "[cl_japanese2json] Salvaged %d/%d markerless text segment(s) "
+            "using protected-placeholder anchors",
+            len(best),
+            len(stream.records),
+        )
+    return best
+
+
 def _parse_stream_text_values(
     content: str, stream: TranslationStream
 ) -> list[str]:
@@ -786,6 +906,8 @@ def _salvage_stream_response(
     structural_tokens = _structural_tokens(stream)
     expected_set = set(structural_tokens)
     found = _structural_pattern(stream).findall(translated_stream)
+    if not found:
+        return _salvage_markerless_response(translated_stream, stream)
     if any(token not in expected_set for token in found) or len(found) != len(set(found)):
         return {}
     expected_index = {token: index for index, token in enumerate(structural_tokens)}

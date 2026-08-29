@@ -21,9 +21,13 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(compiler_nodes), 1)
                 compiler = compiler_nodes[0]
-                self.assertEqual(compiler["inputs"][-1]["name"], "steps")
-                self.assertEqual(compiler["widgets_values"][-1], 8)
+                input_names = [item["name"] for item in compiler["inputs"]]
+                self.assertIn("steps", input_names)
                 self.assertEqual(compiler["widgets_values_named"]["steps"], 8)
+                if "save_debug_output" in input_names:
+                    self.assertFalse(
+                        compiler["widgets_values_named"]["save_debug_output"]
+                    )
 
                 for node in workflow["nodes"]:
                     for value in node.get("widgets_values", []):

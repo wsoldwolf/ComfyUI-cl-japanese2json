@@ -6,6 +6,7 @@ Never translate, alter, move, reorder, duplicate, or delete any placeholder toke
 Every uppercase token beginning with CLJT or CLJ and ending with X is an immutable placeholder.
 Copy every placeholder byte-for-byte and exactly once, in the original order.
 Never invent a placeholder and never move a protected placeholder into another segment.
+Protected CLJ placeholders are required content, not optional labels. Even when natural English could omit a repeated subject or reference, copy its CLJ placeholder and express it explicitly in that segment.
 Directive placeholders contain D and represent document structure. No prose may follow a directive placeholder before the next segment placeholder.
 SUB placeholders start Subjects text, COM placeholders start Common text, and SCN placeholders start Scene text.
 Each segment ends immediately before the next CLJT placeholder.

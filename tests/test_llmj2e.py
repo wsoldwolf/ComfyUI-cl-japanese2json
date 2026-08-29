@@ -278,6 +278,46 @@ class LLMJ2ETests(unittest.TestCase):
             any("paragraphs=3 non_empty_lines=4" in line for line in captured.output)
         )
 
+    def test_markerless_shape_failure_salvages_anchored_segments(self) -> None:
+        def damaged_markerless_response(kwargs):
+            records = request_records(kwargs["messages"])
+            translations = [default_translation(record) for record in records]
+            translations[1] = translations[1].replace(
+                records[1]["protected_placeholders"][0], ""
+            )
+            del translations[3]
+            return "\n".join(translations)
+
+        source = (
+            "# シーン\n"
+            "* <Subject 1>が動く。\n"
+            "* <Subject 2>が話す。\n"
+            "* <Subject 3>が止まる。\n"
+            "* カメラが回る。\n"
+            "* 空中で待つ。\n"
+            "* <Subject 4>が戻る。"
+        )
+        llm = FakeLLM([damaged_markerless_response])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=4096)
+
+        self.assertEqual(output.count("* "), 6)
+        self.assertEqual(len(llm.calls), 2)
+        retried = request_records(llm.calls[1]["messages"])
+        self.assertEqual(
+            [record["id"] for record in retried],
+            ["R000002", "R000004", "R000005"],
+        )
+        self.assertTrue(
+            any(
+                "Salvaged 3/6 markerless text segment" in line
+                for line in captured.output
+            )
+        )
+        retry_request = llm.calls[1]["messages"][-1]["content"]
+        self.assertIn("only unresolved segments", retry_request)
+        self.assertIn("natural English could omit", retry_request)
+
     def test_lf_crlf_and_no_final_newline_match(self) -> None:
         first = llmj2e.translate_markdown(SOURCE.rstrip("\n"), FakeLLM(), "sys", max_tokens=64)
         second = llmj2e.translate_markdown(
