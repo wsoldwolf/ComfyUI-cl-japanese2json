@@ -178,7 +178,7 @@ return (json_text,)
 
 - 1回の `create_chat_completion()` が生成できる最大トークン数を表す。
 - 最終JSONの最大長ではない。
-- LLMJ2Eは最初に、ディレクティブ、区間境界、参照タグ及び発話をプレースホルダ化した文書全体を、単一の `translation_stream` として1回の推論へ収めることを試みる。
+- LLMJ2Eは最初に、ディレクティブ、区間先頭、参照タグ及び発話をプレースホルダ化した文書全体を、単一の生テキスト翻訳ストリームとして1回の推論へ収めることを試みる。
 - 固定の区間件数上限を設けず、入力と設定上限 `max_tokens` が実効コンテキスト長へ収まる限り、文書全体を単一推論で処理する。
 - コンテキスト長のため複数推論へ分割した場合、`max_tokens` は各推論に適用する。
 - 入力トークン、system message、user message、チャットテンプレートの余白及び `max_tokens` が有効コンテキスト長へ収まらない場合は、箇条書き区間単位でバッチを縮小する。
@@ -565,7 +565,7 @@ system promptの内容は `cl_japanese2json_spec.md` の「システムプロン
 
 写真プロンプト、画像説明、創作、要約、JSON生成及びMarkdown全体の再構築を要求してはならない。
 
-system promptには、すべてのプレースホルダを翻訳せず、1バイトも改変せず、移動、並べ替え、複製または削除しないガードを明記する。LLMは `translation_stream` 内の対応する開始・終了プレースホルダ間にある通常の日本語文章だけを翻訳する。
+system promptには、すべてのプレースホルダを翻訳せず、1バイトも改変せず、移動、並べ替え、複製または削除しないガードを明記する。LLMは生テキスト翻訳ストリーム内の各 `SUB`、`COM` または `SCN` プレースホルダから次の構造プレースホルダまでにある通常の日本語文章だけを翻訳する。
 
 ## 11. llama-cpp-pythonバックエンド
 
@@ -641,7 +641,7 @@ Qwen3の推論テキストが翻訳結果へ混入しないよう、次の方針
 2. インストール済み `llama-cpp-python` が対応する場合、chat templateの `enable_thinking=False` を使用する。
 3. 対応する呼び出し形式で `reasoning=False` を指定できる場合は使用する。
 4. user messageの制御部分へ `/no_think` を追加する。
-5. `/no_think` を `translation_stream` 又は翻訳対象区間へ混入させない。
+5. `/no_think` を保護済み翻訳ストリーム又は翻訳対象区間へ混入させない。
 6. 最終的に `<think>...</think>` または裸の推論文が出現した場合は検証失敗とする。
 
 インストール済みバージョンが未対応のキーワードを拒否する場合は、`TypeError` を無条件に握り潰して全引数を削除してはならない。対応可否をシグネチャ検査または限定的なフォールバックで判定し、最低限 `/no_think` と出力検証を維持する。
@@ -663,6 +663,7 @@ response = self.llm.create_chat_completion(
     top_p=top_p,
     repeat_penalty=repetition_penalty,
     seed=batch_seed,
+    stop=[stream_stop_placeholder],
 )
 ```
 
@@ -675,11 +676,11 @@ response = self.llm.create_chat_completion(
 - LLMの生出力をそのまま最終ノード出力にしない。
 - コア仕様の構造プレースホルダ、区間ごとの保護プレースホルダ及び日本語残留検査を通す。
 
-### 11.8 JSONモード
+### 11.8 JSONモード不使用
 
-`llama-cpp-python` の `response_format={"type": "json_object"}` は最終JSON生成には使用しない。
+翻訳呼び出しでは `llama-cpp-python` の `response_format={"type": "json_object"}` を使用しない。JSON文法制約による生成負荷と、長いJSON文字列のエスケープ及び構造欠落を避ける。
 
-最終JSONはLLM出力ではなく `JSONGEN` が生成する。内部転送JSONは、文書順を保った単一の `translation_stream` 文字列と変更禁止のプレースホルダ一覧だけを入力し、LLM応答も単一の `translation` 文字列だけとする。レコード配列を入出力してはならない。コア仕様の一対一検証を必須とし、LLMがContex-Loop Plan全体を直接生成する設計へ変更してはならない。
+最終JSONはLLM出力ではなく `JSONGEN` が生成する。LLMの入力と応答は文書順を保った単一の生テキスト翻訳ストリームとし、転送用JSON、レコード配列及び重複したプレースホルダ一覧を使用してはならない。コア仕様の一対一検証を必須とし、LLMがContex-Loop Plan全体を直接生成する設計へ変更してはならない。
 
 ## 12. モデル保持と再ロード
 
@@ -974,6 +975,7 @@ LLM生出力は先頭と末尾を限定したデバッグ情報としてログ�
 [cl_japanese2json] n_ctx=16384 gpu_layers=-1 n_batch=256 flash_attn=True kv_cache=q8_0 op_offload=True
 [cl_japanese2json] Prepared one protected translation stream for 46 text segment(s); using 1 inference request(s)
 [cl_japanese2json] Translating batch 1/1 with 46 text segment(s)
+[cl_japanese2json] LLM tokens: prompt=4210 completion=2874 total=7084
 [cl_japanese2json] Generated 3 scene(s)
 [cl_japanese2json] Returning cached last JSON
 [cl_japanese2json] Unloading model
@@ -1054,7 +1056,7 @@ close呼び出し回数
 - `choices` 欠落
 - `finish_reason=length`
 - 保護トークン欠落
-- 区間境界の順序変更
+- 区間先頭プレースホルダの順序変更
 - `<think>` 混入
 - 再試行成功
 - 再試行失敗

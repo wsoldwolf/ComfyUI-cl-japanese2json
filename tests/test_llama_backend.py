@@ -48,6 +48,7 @@ class FakeLoadedLlama:
         top_p,
         repeat_penalty,
         seed,
+        stop=None,
         response_format=None,
         enable_thinking=True,
         chat_template_kwargs=None,
@@ -60,6 +61,7 @@ class FakeLoadedLlama:
             "top_p": top_p,
             "repeat_penalty": repeat_penalty,
             "seed": seed,
+            "stop": stop,
             "response_format": response_format,
             "enable_thinking": enable_thinking,
             "chat_template_kwargs": chat_template_kwargs,
@@ -163,14 +165,12 @@ class LlamaBackendTests(unittest.TestCase):
                 top_p=0.9,
                 repeat_penalty=1.05,
                 seed=1,
-                response_format={"type": "json_object"},
+                stop=["CLJT0ENDX"],
             )
             self.assertEqual(loaded.reset_count, 1)
             self.assertIs(loaded.completion_kwargs["enable_thinking"], False)
-            self.assertEqual(
-                loaded.completion_kwargs["response_format"],
-                {"type": "json_object"},
-            )
+            self.assertEqual(loaded.completion_kwargs["stop"], ["CLJT0ENDX"])
+            self.assertIsNone(loaded.completion_kwargs["response_format"])
             self.assertEqual(
                 loaded.completion_kwargs["chat_template_kwargs"],
                 {"enable_thinking": False},

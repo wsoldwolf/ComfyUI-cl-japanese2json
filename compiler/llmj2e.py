@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import json
 import logging
 import re
 from typing import Any, Iterable
@@ -22,17 +21,6 @@ LOGGER = logging.getLogger("cl_japanese2json")
 MAX_SEED = 4_294_967_295
 CODE_FENCE_RE = re.compile(r"```", re.IGNORECASE)
 THINK_RE = re.compile(r"<\s*/?\s*think\b", re.IGNORECASE)
-TRANSLATION_RESPONSE_FORMAT = {
-    "type": "json_object",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "translation": {"type": "string"},
-        },
-        "required": ["translation"],
-        "additionalProperties": False,
-    },
-}
 
 
 @dataclass
@@ -47,8 +35,7 @@ class TranslationRecord:
 @dataclass(frozen=True)
 class StreamRecord:
     record: TranslationRecord
-    start_token: str
-    end_token: str
+    marker_token: str
 
 
 @dataclass(frozen=True)
@@ -58,14 +45,13 @@ class TranslationStream:
     records: tuple[StreamRecord, ...]
     directive_tokens: tuple[str, ...]
     protected_tokens: tuple[str, ...]
+    stop_token: str
 
     @property
     def tokens(self) -> tuple[str, ...]:
         return self.directive_tokens + tuple(
-            token
-            for stream_record in self.records
-            for token in (stream_record.start_token, stream_record.end_token)
-        ) + self.protected_tokens
+            stream_record.marker_token for stream_record in self.records
+        ) + self.protected_tokens + (self.stop_token,)
 
 
 @dataclass
@@ -230,18 +216,20 @@ def _build_translation_stream(records: Iterable[TranslationRecord]) -> Translati
 
         code = SECTION_STREAM_CODES[record.section]
         number = int(record.record_id[1:])
-        start_token = f"{prefix}{code}{number}BX"
-        end_token = f"{prefix}{code}{number}EX"
-        parts.append(f"{start_token} {record.payload.text} {end_token}")
-        stream_records.append(StreamRecord(record, start_token, end_token))
+        marker_token = f"{prefix}{code}{number}X"
+        parts.append(f"{marker_token} {record.payload.text}")
+        stream_records.append(StreamRecord(record, marker_token))
         protected_tokens.extend(record.payload.tokens)
 
+    stop_token = f"{prefix}ENDX"
+    parts.append(stop_token)
     return TranslationStream(
         text="\n".join(parts),
         prefix=prefix,
         records=tuple(stream_records),
         directive_tokens=tuple(directive_tokens),
         protected_tokens=tuple(protected_tokens),
+        stop_token=stop_token,
     )
 
 
@@ -249,13 +237,12 @@ def _user_payload(
     stream: TranslationStream, *, retry_reason: str | None = None
 ) -> str:
     requirement = (
-        "Translate the Japanese prose inside the single translation_stream and return only one "
-        'JSON object with this exact schema: {"translation":"translated stream"}. '
+        "Translate the Japanese prose inside the single protected stream below. Return only the "
+        "translated raw stream, without JSON or quotes. "
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
-        "SUB record markers require a singular noun phrase ending in an ASCII period; COM and "
-        "SCN record markers require concise natural US English. Keep each marked record on one "
-        "logical line. Preserve every token in protected_tokens byte-for-byte and exactly once. "
-        "Do not add text outside record boundary markers."
+        "A SUB marker starts a singular noun phrase ending in an ASCII period; COM and SCN markers "
+        "start concise natural US English. Keep one segment after each marker and preserve the "
+        "marker order. Copy the final stop placeholder after translating the last segment."
     )
     if retry_reason is not None:
         safe_reason = retry_reason.replace("\r", " ").replace("\n", " ")[:400]
@@ -264,17 +251,9 @@ def _user_payload(
             "Correct that exact problem and apply every constraint. "
             + requirement
         )
-    data = json.dumps(
-        {
-            "translation_stream": stream.text,
-            "protected_tokens": list(stream.tokens),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
     return (
         f"{requirement}\n"
-        f"TRANSLATION_STREAM_BEGIN\n{data}\nTRANSLATION_STREAM_END\n"
+        f"TRANSLATION_STREAM_BEGIN\n{stream.text}\nTRANSLATION_STREAM_END\n"
         "/no_think"
     )
 
@@ -378,6 +357,7 @@ def _call_llm(
     top_p: float,
     repetition_penalty: float,
     seed: int,
+    stop_token: str,
 ) -> Any:
     kwargs = {
         "messages": messages,
@@ -386,7 +366,7 @@ def _call_llm(
         "top_p": top_p,
         "repeat_penalty": repetition_penalty,
         "seed": seed,
-        "response_format": TRANSLATION_RESPONSE_FORMAT,
+        "stop": [stop_token],
     }
     if hasattr(llm, "complete_chat"):
         return llm.complete_chat(**kwargs)
@@ -421,6 +401,17 @@ def _content_from_response(response: Any) -> str:
         raise TranslationError("LLM response contains a Markdown code fence")
     if THINK_RE.search(content):
         raise TranslationError("LLM response contains Qwen thinking markup")
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens", "?")
+        completion_tokens = usage.get("completion_tokens", "?")
+        total_tokens = usage.get("total_tokens", "?")
+        LOGGER.info(
+            "[cl_japanese2json] LLM tokens: prompt=%s completion=%s total=%s",
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        )
     return content
 
 
@@ -446,28 +437,50 @@ def _validate_translation_text(record: TranslationRecord, translated: str) -> st
     return restored
 
 
-def _translation_stream_from_content(content: str) -> str:
-    try:
-        document = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise TranslationError("LLM response is not the required translation-stream JSON") from exc
-    if not isinstance(document, dict) or set(document) != {"translation"}:
-        raise TranslationError("LLM response must contain only the translation string")
-    translated = document["translation"]
-    if not isinstance(translated, str) or translated.strip() == "":
+def _translation_stream_from_content(
+    content: str, stream: TranslationStream
+) -> str:
+    translated = content.strip()
+    stop_count = translated.count(stream.stop_token)
+    if stop_count > 1:
+        raise TranslationError(
+            f"Stop placeholder {stream.stop_token!r} occurred {stop_count} times"
+        )
+    if stop_count == 1:
+        before, after = translated.split(stream.stop_token, 1)
+        if after.strip():
+            raise TranslationError("LLM added text after the stop placeholder")
+        translated = before.rstrip()
+    if not translated:
         raise TranslationError("LLM translation stream is empty")
     return translated
+
+
+def _structural_tokens(stream: TranslationStream) -> list[str]:
+    return sorted(
+        [
+            *stream.directive_tokens,
+            *(stream_record.marker_token for stream_record in stream.records),
+        ],
+        key=lambda token: stream.text.index(token),
+    )
+
+
+def _structural_pattern(stream: TranslationStream) -> re.Pattern[str]:
+    return re.compile(
+        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|COM|SCN)[0-9]+)X"
+    )
+
+
+def _normalize_segment_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _parse_stream_text_values(
     content: str, stream: TranslationStream
 ) -> list[str]:
-    translated_stream = _translation_stream_from_content(content)
-    structural_tokens = [*stream.directive_tokens]
-    for stream_record in stream.records:
-        structural_tokens.extend(
-            (stream_record.start_token, stream_record.end_token)
-        )
+    translated_stream = _translation_stream_from_content(content, stream)
+    structural_tokens = _structural_tokens(stream)
 
     for token in structural_tokens:
         count = translated_stream.count(token)
@@ -476,40 +489,121 @@ def _parse_stream_text_values(
                 f"Structural placeholder {token!r} occurred {count} time(s); expected exactly once"
             )
 
-    structural_re = re.compile(
-        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|COM|SCN)[0-9]+[BE])X"
-    )
-    found_structural = structural_re.findall(translated_stream)
-    expected_structural = sorted(
-        structural_tokens, key=lambda token: stream.text.index(token)
-    )
-    if found_structural != expected_structural:
+    found_structural = _structural_pattern(stream).findall(translated_stream)
+    if found_structural != structural_tokens:
         raise TranslationError(
             "LLM changed, added, or reordered structural placeholders"
         )
 
-    translated_values: list[str] = []
-    spans: list[tuple[int, int]] = []
-    for stream_record in stream.records:
-        start = translated_stream.index(stream_record.start_token)
-        text_start = start + len(stream_record.start_token)
-        text_end = translated_stream.index(stream_record.end_token, text_start)
-        span_end = text_end + len(stream_record.end_token)
-        translated_values.append(translated_stream[text_start:text_end].strip())
-        spans.append((start, span_end))
+    positions = [translated_stream.index(token) for token in structural_tokens]
+    if translated_stream[: positions[0]].strip():
+        raise TranslationError("LLM added text before the first structural placeholder")
 
-    outside_parts: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        outside_parts.append(translated_stream[cursor:start])
-        cursor = end
-    outside_parts.append(translated_stream[cursor:])
-    outside = "".join(outside_parts)
-    for token in stream.directive_tokens:
-        outside = outside.replace(token, "")
-    if outside.strip():
-        raise TranslationError("LLM added text outside translation record markers")
-    return translated_values
+    by_marker = {
+        stream_record.marker_token: stream_record for stream_record in stream.records
+    }
+    translated_by_id: dict[str, str] = {}
+    for index, token in enumerate(structural_tokens):
+        value_start = positions[index] + len(token)
+        value_end = (
+            positions[index + 1]
+            if index + 1 < len(structural_tokens)
+            else len(translated_stream)
+        )
+        value = translated_stream[value_start:value_end]
+        stream_record = by_marker.get(token)
+        if stream_record is None:
+            if value.strip():
+                raise TranslationError(
+                    "LLM added text after a directive placeholder"
+                )
+            continue
+        translated_by_id[stream_record.record.record_id] = _normalize_segment_text(
+            value
+        )
+
+    return [
+        translated_by_id[stream_record.record.record_id]
+        for stream_record in stream.records
+    ]
+
+
+def _salvage_stream_response(
+    content: str, stream: TranslationStream
+) -> dict[int, str]:
+    """Return individually valid segments from a structurally incomplete response."""
+
+    try:
+        translated_stream = _translation_stream_from_content(content, stream)
+    except TranslationError:
+        return {}
+
+    structural_tokens = _structural_tokens(stream)
+    expected_set = set(structural_tokens)
+    found = _structural_pattern(stream).findall(translated_stream)
+    if any(token not in expected_set for token in found) or len(found) != len(set(found)):
+        return {}
+    expected_index = {token: index for index, token in enumerate(structural_tokens)}
+    found_indices = [expected_index[token] for token in found]
+    if found_indices != sorted(found_indices):
+        return {}
+
+    positions = {token: translated_stream.index(token) for token in found}
+    if found and translated_stream[: positions[found[0]]].strip():
+        return {}
+    for directive_token in stream.directive_tokens:
+        if directive_token not in positions:
+            continue
+        token_index = expected_index[directive_token]
+        if token_index + 1 >= len(structural_tokens):
+            continue
+        next_token = structural_tokens[token_index + 1]
+        if next_token not in positions:
+            continue
+        value_start = positions[directive_token] + len(directive_token)
+        if translated_stream[value_start:positions[next_token]].strip():
+            return {}
+
+    missing_directive_blocks = {
+        stream_record.record.block_index
+        for stream_record in stream.records
+        if f"{stream.prefix}D{stream_record.record.block_index}X" not in positions
+    }
+    first_record_by_block: dict[int, int] = {}
+    for record_index, stream_record in enumerate(stream.records):
+        first_record_by_block.setdefault(
+            stream_record.record.block_index, record_index
+        )
+    salvaged: dict[int, str] = {}
+    for record_index, stream_record in enumerate(stream.records):
+        if (
+            stream_record.record.block_index in missing_directive_blocks
+            and first_record_by_block[stream_record.record.block_index]
+            == record_index
+        ):
+            continue
+        token = stream_record.marker_token
+        if token not in positions:
+            continue
+        token_index = expected_index[token]
+        if token_index + 1 < len(structural_tokens):
+            next_token = structural_tokens[token_index + 1]
+            if next_token not in positions:
+                continue
+            value_end = positions[next_token]
+        else:
+            value_end = len(translated_stream)
+        value_start = positions[token] + len(token)
+        translated = _normalize_segment_text(
+            translated_stream[value_start:value_end]
+        )
+        try:
+            salvaged[record_index] = _validate_stream_record_text(
+                stream_record, translated, stream.protected_tokens
+            )
+        except TranslationError:
+            continue
+    return salvaged
 
 
 def _validate_stream_record_text(
@@ -557,6 +651,7 @@ def _translate_batch(
     validated: list[str | None] = [None] * len(records)
     retry_indices: list[int]
     first_error: TranslationError
+    content: str | None = None
 
     try:
         response = _call_llm(
@@ -567,10 +662,10 @@ def _translate_batch(
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             seed=first_seed,
+            stop_token=stream.stop_token,
         )
-        translated_values = _parse_stream_text_values(
-            _content_from_response(response), stream
-        )
+        content = _content_from_response(response)
+        translated_values = _parse_stream_text_values(content, stream)
         failures: list[tuple[int, TranslationError]] = []
         for index, (stream_record, translated) in enumerate(
             zip(stream.records, translated_values)
@@ -591,7 +686,19 @@ def _translate_batch(
             )
     except TranslationError as exc:
         first_error = exc
-        retry_indices = list(range(len(records)))
+        salvaged = (
+            _salvage_stream_response(content, stream)
+            if content is not None
+            else {}
+        )
+        for index, value in salvaged.items():
+            validated[index] = value
+        retry_indices = [
+            index for index, value in enumerate(validated) if value is None
+        ]
+
+    if not retry_indices:
+        return [value for value in validated if value is not None]
 
     retry_records = [records[index] for index in retry_indices]
     retry_stream = _build_translation_stream(retry_records)
@@ -615,6 +722,7 @@ def _translate_batch(
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             seed=retry_seed,
+            stop_token=retry_stream.stop_token,
         )
         retry_values = _parse_stream_response(
             _content_from_response(response), retry_stream

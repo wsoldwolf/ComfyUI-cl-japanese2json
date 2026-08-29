@@ -333,18 +333,19 @@ JSONファイル上では、JSONの文字列エスケープにより1個の論�
 
 - LLM呼び出し前に入力文書全体を字句解析する。
 - 認識済みディレクティブは文書順の一意なディレクティブプレースホルダへ置換する。ディレクティブ原文及び正規形はPython側に保持し、LLMへ翻訳させない。
-- 各箇条書き本文の先頭と末尾は、セクション種別を表す `SUB`、`COM` または `SCN` と出現順の番号を含む、一意な開始・終了プレースホルダへ置換する。箇条書きマーカー自体はLLMへ翻訳させない。
+- 各箇条書き本文の先頭は、セクション種別を表す `SUB`、`COM` または `SCN` と出現順の番号を含む、一意な区間プレースホルダへ置換する。区間は次の構造プレースホルダ直前までとし、区間末尾専用プレースホルダは設けない。箇条書きマーカー自体はLLMへ翻訳させない。
 - 参照タグ、既存の直接発話及び日本語鉤括弧内の発話は、一意な短い保護プレースホルダへ置換する。日本語鉤括弧内の発話は `<d>[Japanese]...</d>` へ変換した値をPython側の復元辞書に保持する。
-- ディレクティブ、区間境界、参照タグ及び発話の各プレースホルダは入力本文と衝突しないASCII文字列とする。
-- 置換後の文書は、文書順を維持した単一の `translation_stream` 文字列として表現する。LLMへレコード配列、IDと本文のオブジェクト配列、または原文断片の辞書を渡してはならない。
-- LLMへの転送JSONは、単一文字列 `translation_stream` と、変更禁止のプレースホルダ一覧 `protected_tokens` だけを含む1個のオブジェクトとする。
-- LLMの応答は、翻訳後の単一文字列を値に持つ `{"translation":"..."}` だけとする。レコード配列を返させてはならない。
+- ディレクティブ、区間先頭、参照タグ、発話及び停止用の各プレースホルダは入力本文と衝突しないASCII文字列とする。
+- 置換後の文書は、文書順を維持した単一の保護済み翻訳ストリーム文字列として表現し、末尾へ一意な `END` 停止プレースホルダを付ける。LLMへレコード配列、IDと本文のオブジェクト配列、原文断片の辞書またはプレースホルダ一覧を重複して渡してはならない。
+- LLMへのuser messageは、保護済み翻訳ストリームを `TRANSLATION_STREAM_BEGIN` と `TRANSLATION_STREAM_END` で囲んだ生テキストとする。転送用JSONへ格納してはならない。
+- LLMの応答は翻訳後の生ストリーム文字列だけとする。JSON、引用符、レコード配列及び説明文を返させてはならない。
+- `create_chat_completion()` へ `stop=[END停止プレースホルダ]` を渡す。モデルには停止プレースホルダを複写させ、llama.cppが応答へ含めず停止してよい。バックエンドが停止プレースホルダを応答へ残した場合も末尾に1回だけ存在するときは受理する。
 - 箇条書き本文は復元及び検証上の論理区間であり、1区間を複数行へ分割してはならない。ただし通常時は各区間を個別推論せず、全区間を含む単一ストリームを1回で翻訳する。
 - 入力メッセージと設定上限 `max_tokens` の合計が実効コンテキスト長へ収まる場合、区間数にかかわらず文書全体を1回の `create_chat_completion()` で翻訳する。固定の区間件数上限を設けてはならない。
 - 1回に収まらない場合だけ、文書順を保持したまま、各推論へ収まる最大数の箇条書き区間で複数ストリームへ分割する。箇条書き本文及び保護領域の途中で分割してはならない。
-- 翻訳後はすべての構造プレースホルダの個数と順序、区間の開始・終了対応、区間外への文章追加、各区間が所有する保護プレースホルダを検証する。
+- 翻訳後はすべての構造プレースホルダの個数と順序、次の構造プレースホルダまでの区間対応、ディレクティブ直後への文章追加、各区間が所有する保護プレースホルダを検証する。
 - 検証済みの英訳を元の区間へ割り当て、Python側に保持したディレクティブ及び復元辞書を使って正規形Markdownを決定論的に再構築する。
-- 個別区間だけが検証に失敗した場合、正常な区間の翻訳を保持し、失敗区間だけを1回再試行する。単一ストリーム全体の構造を検証できない場合は、その推論単位全体を1回再試行する。
+- 個別区間だけが検証に失敗した場合、正常な区間の翻訳を保持し、失敗区間だけを1回再試行する。構造プレースホルダが欠落しても、開始位置と直後の構造プレースホルダを確認でき、内容検証に通った区間は保持する。欠落区間及び境界を確定できない隣接区間だけを1回再試行する。説明、thinking、重複または順序変更によって安全に部分復旧できない場合は推論単位全体を1回再試行する。
 
 ### 6.9 セクション別翻訳規則
 
@@ -384,24 +385,23 @@ prompts/llmj2e_qwen3_8b_system_prompt.txt
 システムプロンプトには少なくとも次の規則を含める。
 
 ```text
-You are a deterministic Japanese-to-US-English translator for one MiniMax H3 translation stream.
-Translate only Japanese prose between matching record-boundary placeholders.
-Return exactly one JSON object containing only one translation string.
+You are a deterministic Japanese-to-US-English translator for one MiniMax H3 protected text stream.
+Return only the translated raw stream. Do not return JSON, quotes, Markdown fences, commentary, or explanations.
+Translate only Japanese prose following each SUB, COM, or SCN segment placeholder.
 Never translate, alter, move, reorder, duplicate, or delete any placeholder token.
 Preserve every protected placeholder byte-for-byte and exactly once.
-Never invent a placeholder and never move one into another marked record.
-Keep every matching record start/end marker pair and their order unchanged.
-Do not add text outside marked record boundaries.
+Never invent a placeholder and never move one into another segment.
+Each segment ends immediately before the next structural placeholder.
+Do not add text after a directive placeholder.
 Do not translate text represented by protected placeholders.
 Preserve numbers, timing, counts, directions, left/right relationships, simultaneity, and negation.
-For SUB records, output a singular English noun phrase that can directly follow "<Subject N> is".
-For COM and SCN records, output concise and natural US English prompt text.
+For a SUB segment, output a singular English noun phrase that can directly follow "<Subject N> is".
+For COM and SCN segments, output concise and natural US English prompt text.
 Use English outside protected placeholders.
-Do not output Markdown fences, commentary, analysis, notes, headings, or reasoning.
-Output only the requested translation-stream JSON object.
+Copy the final CLJT...ENDX stop placeholder immediately after the final translated segment.
 ```
 
-実際のシステムプロンプトには、ディレクティブプレースホルダ、区間境界プレースホルダ及び保護プレースホルダを翻訳せず、改変、移動、並べ替え、複製または削除しない規則を明示する。
+実際のシステムプロンプトには、ディレクティブプレースホルダ、区間先頭プレースホルダ、停止プレースホルダ及び保護プレースホルダを翻訳せず、改変、移動、並べ替え、複製または削除しない規則を明示する。
 
 ### 6.11 llama-cpp-python
 
@@ -443,10 +443,10 @@ LLMJ2Eは、翻訳結果を採用する前に次を検証する。
 
 - 入力本文と出力本文が一対一で対応している。
 - 本文の追加、欠落、重複及び順序変更がない。
-- すべてのディレクティブ及び区間境界プレースホルダが完全一致し、入力と同じ順序で各1回だけ出現する。
+- すべてのディレクティブ及び区間先頭プレースホルダが完全一致し、入力と同じ順序で各1回だけ出現する。
 - 各一時トークンが完全一致し、入力と同じ回数だけ出現する。
 - 別区間の保護プレースホルダが移動していない。
-- 区間境界の外へ文章が追加されていない。
+- 最初の構造プレースホルダより前及びディレクティブ直後へ文章が追加されていない。
 - 未解決の一時トークンが残っていない。
 - コードフェンス、説明、分析及び前置きが付加されていない。
 - 正規形Markdown再構築後のディレクティブ数が入力と一致する。
@@ -984,10 +984,11 @@ prompt.append("non_diegetic_music:\nN/A")
 ### 12.5 LLM出力検証
 
 1. LLMがコードフェンスを付けた場合に検証エラーになる。
-2. LLMが区間境界を追加、削除または並べ替えた場合に検証エラーになる。
+2. LLMが区間先頭プレースホルダを追加、削除または並べ替えた場合に検証エラーになる。
 3. LLMが保護トークンを変更した場合に検証エラーになる。
 4. 1回の再試行後も不正な場合は例外になり、JSONを出力しない。
 5. 通常文章は英語になり、日本語は保護された読み上げ領域内にだけ残る。
+6. 長い応答が途中で欠落した場合、検証できた区間を保持し、欠落区間及び境界未確定の隣接区間だけを再試行する。
 
 ### 12.6 JSON
 

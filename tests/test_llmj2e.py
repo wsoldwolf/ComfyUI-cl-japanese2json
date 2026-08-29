@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import unittest
 
 from .helpers import (
@@ -41,17 +40,14 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertNotIn("夜の街", result)
         self.assertEqual(llm.reset_count, 1)
         call = llm.calls[0]
-        self.assertEqual(call["response_format"]["type"], "json_object")
-        schema = call["response_format"]["schema"]
-        self.assertFalse(schema["additionalProperties"])
-        self.assertEqual(set(schema["properties"]), {"translation"})
+        self.assertNotIn("response_format", call)
+        self.assertRegex(call["stop"][0], r"CLJT\d+ENDX")
         self.assertTrue(call["messages"][-1]["content"].endswith("/no_think"))
         stream = request_stream(call["messages"])
         records = request_records(call["messages"])
-        self.assertEqual(set(stream), {"translation_stream", "protected_tokens"})
-        self.assertIsInstance(stream["translation_stream"], str)
-        self.assertNotIsInstance(stream["translation_stream"], list)
-        self.assertNotIn("/no_think", json.dumps(stream, ensure_ascii=False))
+        self.assertIsInstance(stream, str)
+        self.assertNotIn("/no_think", stream)
+        self.assertNotIn('{"translation_stream"', call["messages"][-1]["content"])
         self.assertEqual(len(records), 3)
 
     def test_stream_replaces_directives_references_and_dialogue(self) -> None:
@@ -64,9 +60,10 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertNotIn("<Subject 1>", stream.text)
         self.assertNotIn("こんにちは", stream.text)
         self.assertRegex(stream.text, r"CLJT\d+D0X")
-        self.assertRegex(stream.text, r"CLJT\d+SUB1BX")
-        self.assertRegex(stream.text, r"CLJT\d+COM2BX")
-        self.assertRegex(stream.text, r"CLJT\d+SCN3BX")
+        self.assertRegex(stream.text, r"CLJT\d+SUB1X")
+        self.assertRegex(stream.text, r"CLJT\d+COM2X")
+        self.assertRegex(stream.text, r"CLJT\d+SCN3X")
+        self.assertNotRegex(stream.text, r"CLJT\d+(?:SUB|COM|SCN)\d+EX")
         replacements = {
             value
             for record in document.records
@@ -101,7 +98,7 @@ class LLMJ2ETests(unittest.TestCase):
     def test_text_outside_record_boundaries_is_rejected(self) -> None:
         def add_outside_text(kwargs):
             translated = default_stream_translation(kwargs["messages"])
-            return {"translation": translated + " unexpected text"}
+            return "unexpected text " + translated
 
         with self.assertRaises(errors.TranslationError):
             llmj2e.translate_markdown(
@@ -120,11 +117,9 @@ class LLMJ2ETests(unittest.TestCase):
                         text = text.replace(token, "")
                 return text
 
-            return {
-                "translation": default_stream_translation(
-                    kwargs["messages"], transform=transform
-                )
-            }
+            return default_stream_translation(
+                kwargs["messages"], transform=transform
+            )
 
         source = (
             "# シーン\n"
@@ -138,6 +133,28 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertEqual(len(llm.calls), 2)
         retried = request_records(llm.calls[1]["messages"])
         self.assertEqual([record["id"] for record in retried], ["R000002"])
+
+    def test_structurally_truncated_stream_salvages_completed_segments(self) -> None:
+        def truncate_before_third_segment(kwargs):
+            records = request_records(kwargs["messages"])
+            translated = default_stream_translation(kwargs["messages"])
+            return translated[: translated.index(records[2]["marker_token"])]
+
+        source = (
+            "# シーン\n"
+            "* <Subject 1>が動く。\n"
+            "* <Subject 2>が話す。\n"
+            "* <Subject 3>が止まる。"
+        )
+        llm = FakeLLM([truncate_before_third_segment])
+        output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=4096)
+        self.assertEqual(output.count("* "), 3)
+        self.assertEqual(len(llm.calls), 2)
+        retried = request_records(llm.calls[1]["messages"])
+        self.assertEqual(
+            [record["id"] for record in retried],
+            ["R000002", "R000003"],
+        )
 
     def test_lf_crlf_and_no_final_newline_match(self) -> None:
         first = llmj2e.translate_markdown(SOURCE.rstrip("\n"), FakeLLM(), "sys", max_tokens=64)
@@ -212,10 +229,12 @@ class LLMJ2ETests(unittest.TestCase):
             translated = default_stream_translation(kwargs["messages"])
             first, second = records
             temporary = "CLJ_SWAP_TEMP_X"
-            translated = translated.replace(first["start_token"], temporary)
-            translated = translated.replace(second["start_token"], first["start_token"])
-            translated = translated.replace(temporary, second["start_token"])
-            return {"translation": translated}
+            translated = translated.replace(first["marker_token"], temporary)
+            translated = translated.replace(
+                second["marker_token"], first["marker_token"]
+            )
+            translated = translated.replace(temporary, second["marker_token"])
+            return translated
 
         llm = FakeLLM([reversed_records, reversed_records])
         with self.assertRaises(errors.TranslationError):
@@ -230,19 +249,20 @@ class LLMJ2ETests(unittest.TestCase):
                 translated = default_stream_translation(kwargs["messages"])
                 if delta < 0:
                     record = records[-1]
-                    start = translated.index(record["start_token"])
-                    end = translated.index(record["end_token"], start) + len(
-                        record["end_token"]
-                    )
-                    translated = translated[:start] + translated[end:]
+                    start = translated.index(record["marker_token"])
+                    translated = translated[:start]
                 else:
                     record = records[0]
-                    start = translated.index(record["start_token"])
-                    end = translated.index(record["end_token"], start) + len(
-                        record["end_token"]
+                    marker = record["marker_token"]
+                    start = translated.index(marker)
+                    next_marker = translated.find("CLJT", start + len(marker))
+                    snippet = (
+                        translated[start:]
+                        if next_marker < 0
+                        else translated[start:next_marker]
                     )
-                    translated += translated[start:end]
-                return {"translation": translated}
+                    translated += "\n" + snippet
+                return translated
 
             return responder
 
@@ -258,12 +278,10 @@ class LLMJ2ETests(unittest.TestCase):
 
     def test_missing_placeholder_is_rejected(self) -> None:
         def missing(kwargs):
-            return {
-                "translation": default_stream_translation(
-                    kwargs["messages"],
-                    transform=lambda _: "English without the protected tag.",
-                )
-            }
+            return default_stream_translation(
+                kwargs["messages"],
+                transform=lambda _: "English without the protected tag.",
+            )
 
         with self.assertRaises(errors.TranslationError):
             llmj2e.translate_markdown(
@@ -283,7 +301,7 @@ class LLMJ2ETests(unittest.TestCase):
             translated = translated.replace(first_token, temporary)
             translated = translated.replace(second_token, first_token)
             translated = translated.replace(temporary, second_token)
-            return {"translation": translated}
+            return translated
 
         source = "# シーン\n* <Subject 1>が動く。\n* <Subject 2>が止まる。"
         with self.assertRaises(errors.TranslationError):
@@ -296,11 +314,9 @@ class LLMJ2ETests(unittest.TestCase):
 
     def test_japanese_residue_is_rejected(self) -> None:
         def japanese(kwargs):
-            return {
-                "translation": default_stream_translation(
-                    kwargs["messages"], transform=lambda _: "まだ日本語。"
-                )
-            }
+            return default_stream_translation(
+                kwargs["messages"], transform=lambda _: "まだ日本語。"
+            )
 
         with self.assertRaises(errors.TranslationError):
             llmj2e.translate_markdown(

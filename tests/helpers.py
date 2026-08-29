@@ -19,39 +19,41 @@ def module(name: str):
     return importlib.import_module(f"{PACKAGE_NAME}.{name}")
 
 
-def request_stream(messages: list[dict[str, str]]) -> dict[str, Any]:
+def request_stream(messages: list[dict[str, str]]) -> str:
     start_marker = "TRANSLATION_STREAM_BEGIN\n"
     end_marker = "\nTRANSLATION_STREAM_END"
     user_text = messages[-1]["content"]
     start = user_text.index(start_marker) + len(start_marker)
     end = user_text.index(end_marker, start)
-    return json.loads(user_text[start:end])
+    return user_text[start:end]
 
 
-STREAM_START_RE = re.compile(r"(CLJT[0-9]+)(SUB|COM|SCN)([0-9]+)BX")
+STREAM_START_RE = re.compile(r"(CLJT[0-9]+)(SUB|COM|SCN)([0-9]+)X")
+STREAM_STRUCTURAL_RE = re.compile(
+    r"CLJT[0-9]+(?:D[0-9]+|(?:SUB|COM|SCN)[0-9]+|END)X"
+)
+PROTECTED_RE = re.compile(r"CLJ[0-9]+C[0-9]+P[0-9]+X")
 STREAM_SECTIONS = {"SUB": "Subjects", "COM": "Common", "SCN": "Scene"}
 
 
 def request_records(messages: list[dict[str, str]]) -> list[dict[str, Any]]:
-    data = request_stream(messages)
-    stream = data["translation_stream"]
-    tokens = data["protected_tokens"]
+    stream = request_stream(messages)
     records: list[dict[str, Any]] = []
     for match in STREAM_START_RE.finditer(stream):
         prefix, code, number_text = match.groups()
-        end_token = f"{prefix}{code}{number_text}EX"
-        end = stream.index(end_token, match.end())
-        body = stream[match.end():end].strip()
+        next_marker = STREAM_STRUCTURAL_RE.search(stream, match.end())
+        if next_marker is None:
+            raise AssertionError("translation stream has no following structural marker")
+        body = stream[match.end():next_marker.start()].strip()
         records.append(
             {
                 "id": f"R{int(number_text):06d}",
                 "section": STREAM_SECTIONS[code],
                 "text": body,
-                "protected_placeholders": [
-                    token for token in tokens if token in body
-                ],
-                "start_token": match.group(0),
-                "end_token": end_token,
+                "protected_placeholders": PROTECTED_RE.findall(body),
+                "marker_token": match.group(0),
+                "body_start": match.end(),
+                "body_end": next_marker.start(),
             }
         )
     return records
@@ -71,20 +73,22 @@ def default_stream_translation(
     messages: list[dict[str, str]],
     transform: Callable[[dict[str, Any]], str] = default_translation,
 ) -> str:
-    data = request_stream(messages)
-    stream = data["translation_stream"]
+    stream = request_stream(messages)
     records = request_records(messages)
     parts: list[str] = []
     cursor = 0
     for record in records:
-        start = stream.index(record["start_token"], cursor)
-        body_start = start + len(record["start_token"])
-        end = stream.index(record["end_token"], body_start)
+        body_start = record["body_start"]
+        body_end = record["body_end"]
         parts.append(stream[cursor:body_start])
         parts.append(" " + transform(record) + " ")
-        cursor = end
+        cursor = body_end
     parts.append(stream[cursor:])
-    return "".join(parts)
+    translated = "".join(parts)
+    stop_match = re.search(r"CLJT[0-9]+ENDX\s*$", translated)
+    if stop_match is not None:
+        translated = translated[:stop_match.start()].rstrip()
+    return translated
 
 
 class FakeLLM:
@@ -113,10 +117,7 @@ class FakeLLM:
                 return response
             content = response if isinstance(response, str) else json.dumps(response)
         else:
-            content = json.dumps(
-                {"translation": default_stream_translation(kwargs["messages"])},
-                ensure_ascii=False,
-            )
+            content = default_stream_translation(kwargs["messages"])
         return {
             "choices": [
                 {"message": {"content": content}, "finish_reason": "stop"}
@@ -125,12 +126,8 @@ class FakeLLM:
 
 
 def transport_response(transform: Callable[[dict[str, Any]], str] = default_translation):
-    def responder(kwargs: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "translation": default_stream_translation(
-                kwargs["messages"], transform=transform
-            )
-        }
+    def responder(kwargs: dict[str, Any]) -> str:
+        return default_stream_translation(kwargs["messages"], transform=transform)
 
     return responder
 
