@@ -53,11 +53,9 @@ AUDIO_INTRO_PATTERNS = tuple(
     )
 )
 NON_DIEGETIC_MUSIC = "non_diegetic_music:\nN/A"
-EFFECTS_ONLY_SUBJECT_BLOCK = (
+NO_ACTIVE_SUBJECT_BLOCK = (
     "subject_definitions:\n"
-    "This is an effects-only scene. No character subject or reference-image person "
-    "is active. The only active visual elements are one fast-moving mass of blue ice "
-    "and two compact blue fireballs."
+    "No character subject or reference-image person is active."
 )
 
 
@@ -133,7 +131,7 @@ def _without_audio_references(definition: str) -> str:
 def _subject_block(emd: Emd, scene: Scene, scene_number: int) -> str:
     referenced_subjects = _referenced_subjects(scene)
     if not referenced_subjects:
-        return EFFECTS_ONLY_SUBJECT_BLOCK
+        return NO_ACTIVE_SUBJECT_BLOCK
 
     definitions: list[str] = []
     keep_audio_references = _scene_requests_speech(scene)

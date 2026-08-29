@@ -117,7 +117,7 @@ LLMは箇条書き本文の日本語からUS Englishへの翻訳だけを担当�
 
 各シーンの `subject_definitions` には、そのシーンのショット本文で参照したSubjectだけが番号順に入ります。共通プロンプトだけに登場するSubjectや、そのシーンで未使用のSubjectは自動挿入されません。
 
-シーン内のショットに`<Subject N>`が一つもない場合、`subject_definitions`には人物不在のeffects-onlyシーンであることと、青い氷塊1個及び小型の青い火球2個だけが有効な視覚要素であることを示す固定英文を出力します。
+シーン内のショットに`<Subject N>`が一つもない場合、`subject_definitions`には`No character subject or reference-image person is active.`を固定で出力し、定義済み人物及び参照画像由来の人物を表示しないよう明示します。
 
 シーン内に`<d>...</d>`又は`say`、`saying`、`speak`、`whisper`、`shout`、`groan`等の発声指示が一つもない場合、そのシーンの`subject_definitions`から`<Audio N>`を含む音声参照句を自動的に削除します。無発声シーンでMiniMax H3が参照音声を契機にランダムな音声を生成することを防ぐためです。`does not speak`や`without speaking`等の否定された発声指示は無発声として扱います。一つでも発声指示があるシーンではAudio参照を維持します。
 

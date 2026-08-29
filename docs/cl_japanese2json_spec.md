@@ -803,10 +803,10 @@ if definitions:
 
 ```text
 subject_definitions:
-This is an effects-only scene. No character subject or reference-image person is active. The only active visual elements are one fast-moving mass of blue ice and two compact blue fireballs.
+No character subject or reference-image person is active.
 ```
 
-この判定は、各ショットの直接発話領域及びエスケープ文字列を除外した後、エスケープされていない `<Subject N>` が1個も抽出されない場合に適用する。CommonだけにSubjectが存在する場合も、シーンのショットにSubjectがなければeffects-only定義を使用する。ショットに未定義の `<Subject N>` が存在する場合は参照Subjectなしとは扱わず、9.10の未定義Subject処理を適用する。
+この判定は、各ショットの直接発話領域及びエスケープ文字列を除外した後、エスケープされていない `<Subject N>` が1個も抽出されない場合に適用する。CommonだけにSubjectが存在する場合も、シーンのショットにSubjectがなければ人物不在の固定定義を使用する。ショットに未定義の `<Subject N>` が存在する場合は参照Subjectなしとは扱わず、9.10の未定義Subject処理を適用する。
 
 ### 9.12 ショット文字列
 
@@ -1012,8 +1012,8 @@ prompt.append("non_diegetic_music:\nN/A")
 8. 発声指示のないシーンではSubject定義からAudio参照句が削除され、外観参照及び身体的特徴が維持される。
 9. `<d>...</d>`又は否定されていない発声動詞があるシーンではAudio参照が維持される。
 10. `does not speak`、`without speaking`及び`no one says`は発声指示として扱われない。
-11. ショットにSubject参照がないシーンでは指定されたeffects-only定義が固定出力される。
-12. 未定義Subject参照が存在するシーンをeffects-onlyとして扱わない。
+11. ショットにSubject参照がないシーンでは指定された人物不在定義が固定出力される。
+12. 未定義Subject参照が存在するシーンを人物不在として扱わない。
 
 ### 12.5 LLM出力検証
 

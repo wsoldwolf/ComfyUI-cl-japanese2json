@@ -30,10 +30,10 @@ class JSONGenerationTests(unittest.TestCase):
         )
         self.assertEqual(
             parsed["shots"][1]["prompt"][0],
-            jsongen.EFFECTS_ONLY_SUBJECT_BLOCK,
+            jsongen.NO_ACTIVE_SUBJECT_BLOCK,
         )
 
-    def test_scene_without_subject_uses_fixed_effects_only_definition(self) -> None:
+    def test_scene_without_subject_uses_fixed_no_character_definition(self) -> None:
         emd = Emd(
             subjects=["unused character."],
             scenes=[
@@ -48,8 +48,7 @@ class JSONGenerationTests(unittest.TestCase):
         self.assertEqual(
             block,
             "subject_definitions:\n"
-            "This is an effects-only scene. No character subject or reference-image person is active. "
-            "The only active visual elements are one fast-moving mass of blue ice and two compact blue fireballs.",
+            "No character subject or reference-image person is active.",
         )
 
     def test_silent_scene_removes_audio_reference_clauses(self) -> None:
@@ -130,7 +129,7 @@ class JSONGenerationTests(unittest.TestCase):
         parsed = json.loads(jsongen.generate_json(emd))
         self.assertEqual(
             parsed["shots"][0]["prompt"][0],
-            jsongen.EFFECTS_ONLY_SUBJECT_BLOCK,
+            jsongen.NO_ACTIVE_SUBJECT_BLOCK,
         )
 
     def test_undefined_subject_warns_and_remains_in_shot(self) -> None:
