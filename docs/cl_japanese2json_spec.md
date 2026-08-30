@@ -16,6 +16,7 @@
 - 不正なJSON、末尾カンマ、未エスケープ文字列の生成
 - シーンで使用していないSubject定義の混入
 - 非継続シーンに前シーンのコンテキストが継承される問題
+- 指定していない環境音、効果音又は人物音声の生成
 
 本仕様では、リポジトリ名及びノード名に合わせて `Contex-Loop` と表記する。
 
@@ -28,7 +29,7 @@
 - MiniMax H3参照タグの保持
 - 日本語読み上げ文字列の `<d>[Japanese]...</d>` 形式への変換
 - 既存のダイレクトスピーチタグの完全保持
-- 共通プロンプト、Subject定義及びシーンのパース
+- 共通プロンプト、Subject定義、シーン及びシーン別音響のパース
 - シーンごとの使用Subject定義の生成
 - Contex-Loop Plan用JSONの生成
 - LF及びCRLF入力への対応
@@ -110,12 +111,13 @@ is_blank = line.strip() == ""
 
 ### 5.1 ディレクティブ
 
-日本語入力では、次の3種類のディレクティブを使用する。
+日本語入力では、次の3種類のトップレベルディレクティブと、シーン専用のサブディレクティブを使用する。
 
 ```text
 # サブジェクト
 # 共通プロンプト
 # シーン [N秒] [継続]
+## 音響
 ```
 
 角括弧 `[]` は省略可能要素を示す仕様上の表記であり、実際の入力には記述しない。
@@ -179,7 +181,42 @@ is_blank = line.strip() == ""
 # シーン 8秒 継続
 ```
 
-### 5.5 セクションの終端
+### 5.5 音響サブディレクティブ
+
+```text
+## 音響
+```
+
+`## 音響` は直前の `# シーン` に所属するシーン専用サブディレクティブである。`# サブジェクト`、`# 共通プロンプト`又はセクション外には所属できない。各シーンで0回又は1回だけ使用し、通常のシーン箇条書きより後へ配置する。
+
+`## 音響` に所属する箇条書きは `Scene.shots` へ追加せず、当該 `scene_t` の `Scene.soundscape` へ格納する。使用できる項目は次の3種類に限定する。
+
+```text
+* 環境音: 通常の日本語文章又はなし
+* 効果音: 通常の日本語文章又はなし
+* 発声: なし又は指定台詞のみ
+```
+
+コロンはASCII `:`又は全角 `：`を受理する。各項目は0回又は1回だけ記述でき、重複、空の値、未知の項目及び未知の `##` サブディレクティブは致命的エラーとする。
+
+`環境音`及び`効果音`の本文に `<Audio N>`又は直接発話を記述してはならない。台詞とAudio参照は通常のシーン箇条書きに記述し、`発声: 指定台詞のみ`で許可する。
+
+音響は明示的な許可リストとして扱う。`## 音響`全体又は個別項目を省略した場合、その項目は無効とする。`発声`は他シーンから継承しない。`発声: 指定台詞のみ`は、同一シーンに保護済み直接発話 `<d>...</d>` が存在する場合だけ有効とする。
+
+入力例：
+
+```text
+# シーン 5秒
+* <Subject 1>は無言で草原を走る。
+* 足の接地に同期して足音を発生させる。
+
+## 音響
+* 環境音: 草原を吹く弱い風音。
+* 効果音: 草を踏む足音と衣服の擦れ音。
+* 発声: なし
+```
+
+### 5.6 セクションの終端
 
 セクションは、次のいずれかで終了する。
 
@@ -189,11 +226,12 @@ is_blank = line.strip() == ""
 
 認識済みディレクティブが空行なしで現れた場合、現在のセクションを終了し、そのディレクティブの処理へ移る。
 
-### 5.6 未知の行
+### 5.7 未知の行
 
 - セクション外の未知の行は警告して無視する。
 - セクション内で `* ` から始まらない行は警告して無視する。
 - 未知の `#` ディレクティブは警告して無視する。
+- 未知の `##` サブディレクティブは致命的エラーとする。
 - 未知の行をLLMへ渡してはならない。
 
 ## 6. LLMJ2E
@@ -225,6 +263,11 @@ LLMは通常文章の翻訳だけを担当する。次の処理はPythonコー�
 | `# シーン 5秒` | `# Scene 5sec` |
 | `# シーン 継続` | `# Scene CONTINUE` |
 | `# シーン 5秒 継続` | `# Scene 5sec CONTINUE` |
+| `## 音響` | `## Soundscape` |
+| `* 環境音: 本文` | `* Environment: TRANSLATED_TEXT` |
+| `* 効果音: 本文` | `* Sound effects: TRANSLATED_TEXT` |
+| `* 発声: なし` | `* Vocalization: NONE` |
+| `* 発声: 指定台詞のみ` | `* Vocalization: EXPLICIT_DIALOGUE_ONLY` |
 
 正規形シーンディレクティブは、次の文法に一致しなければならない。
 
@@ -480,16 +523,22 @@ LLMJ2EがMDPARSEへ渡すMarkdownは、次の形式だけを使用する。
 # Scene 5sec
 * SCENE_PROMPT
 
+## Soundscape
+* Environment: SOUND_TEXT_OR_NONE
+* Sound effects: SOUND_TEXT_OR_NONE
+* Vocalization: NONE_OR_EXPLICIT_DIALOGUE_ONLY
+
 # Scene 5sec CONTINUE
 * SCENE_PROMPT
 ```
 
-正規形ディレクティブは次の3種類とする。
+正規形トップレベルディレクティブは次の3種類とし、`## Soundscape`を`# Scene`専用サブディレクティブとする。
 
 ```text
 # Subjects
 # Common
 # Scene [Nsec] [CONTINUE]
+## Soundscape
 ```
 
 ## 8. MDPARSE
@@ -509,10 +558,18 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class Soundscape:
+    environment: str | None = None
+    sound_effects: str | None = None
+    vocalization: str | None = None
+
+
+@dataclass
 class Scene:
     duration: int = 5
     is_continue: bool = False
     shots: list[str] = field(default_factory=list)
+    soundscape: Soundscape = field(default_factory=Soundscape)
 
 
 @dataclass
@@ -527,6 +584,7 @@ Python内部の配列インデックスは0ベースとする。
 - `subjects[0]` は `<Subject 1>` に対応する。
 - `scenes[0]` はJSONの `scene_1` に対応する。
 - `shots[0]` はJSON中の `[Shot 1]` に対応する。
+- `scenes[0].soundscape` は `scene_1` の `overall_soundscape` に対応する。この `Scene` が本仕様上の `scene_t` であり、音響内容をグローバルな `Emd` へ格納してはならない。
 
 MiniMax H3向けの番号へ変換する責務はJSONGENが持つ。
 
@@ -539,6 +597,7 @@ OUTSIDE
 SUBJECTS
 COMMON
 SCENE
+SOUNDSCAPE
 ```
 
 認識済みディレクティブが現れた場合、現在の状態を終了して新しい状態へ遷移する。
@@ -588,7 +647,24 @@ Scene(duration=5, is_continue=False, shots=[])
 
 `SCENE` 状態で `* ` から始まる行を検出した場合、`* ` を除去した残りの文字列を現在の `Scene.shots` の末尾へ追加する。
 
-### 8.7 タグの扱い
+### 8.7 Soundscapeパース
+
+行頭が完全一致で `## Soundscape` の場合、直前の親ディレクティブが `# Scene` であることを検証し、`SOUNDSCAPE` 状態へ遷移する。空行が存在しても、次のトップレベルディレクティブが現れるまでは直前の `Scene` を親として保持する。
+
+正規形の音響箇条書きを次のように現在の `scene_t`へ格納する。
+
+| 正規形 | 格納先 |
+| --- | --- |
+| `* Environment: TEXT` | `Scene.soundscape.environment` |
+| `* Sound effects: TEXT` | `Scene.soundscape.sound_effects` |
+| `* Vocalization: NONE` | `Scene.soundscape.vocalization` |
+| `* Vocalization: EXPLICIT_DIALOGUE_ONLY` | `Scene.soundscape.vocalization` |
+
+`Environment`及び`Sound effects`の `NONE`はそのカテゴリを明示的に無効化する。項目省略も無効として扱う。`Vocalization`は `NONE`又は`EXPLICIT_DIALOGUE_ONLY`以外を許可しない。
+
+`## Soundscape`がシーンに所属しない場合、同じシーンで複数回現れた場合、項目が重複した場合又は未知のサブディレクティブが現れた場合は `MarkdownParseError` とする。
+
+### 8.8 タグの扱い
 
 MDPARSEはタグの内部構造を解釈しない。
 
@@ -603,7 +679,7 @@ MDPARSEはタグの内部構造を解釈しない。
 
 MDPARSEでタグ、空白、句読点及びバックスラッシュを変更してはならない。
 
-### 8.8 繰り返しディレクティブ
+### 8.9 繰り返しディレクティブ
 
 ディレクティブは任意の順序で複数回記述できる。
 
@@ -778,18 +854,22 @@ referenced_subjects = sorted(set(referenced_subjects))
 definition = f"<Subject {n}> is {emd.subjects[n - 1]}"
 ```
 
-生成前に、そのシーンの `Scene.shots` だけを検査して発声指示の有無を決定する。`emd.common_prompt` はこの判定に使用しない。
+生成前に、そのシーンの `Scene.shots` と `Scene.soundscape.vocalization` を検査して発声許可を決定する。`emd.common_prompt` はこの判定に使用しない。
 
-次のいずれかが1個以上存在するシーンは発声ありとする。
+次のいずれかが1個以上存在するシーンは発声指示ありとする。
 
 - エスケープされていない有効な `<d>...</d>` 発話領域
 - 否定されていない `say`、`says`、`said`、`saying`、`speak`、`talk`、`utter`、`whisper`、`shout`、`yell`、`murmur`、`groan`、`grumble`、`chant`、`sing`、`announce`、`exclaim`、`reply`、`respond`又は`vocalize`の活用形
 
 `does not speak`、`without speaking`、`no one says`等、発声動詞が直前の否定表現に支配される場合は発声ありとして扱わない。
 
-シーン内の全ショットに発声指示がない場合、そのシーンへ挿入する各Subject定義から、エスケープされていない `<Audio N>` とそれを含む音声参照句を削除する。外観、衣装、身体的特徴、`<Picture N>`、`<Video N>`及び`<Subject N>`の記述は保持する。音声参照以外の定義が空になった場合は `a character.` を使用する。これにより、無発声シーンでMiniMax H3がAudio参照を契機にランダムな音声を生成することを防ぐ。
+発声指示の存在だけでは発声を許可しない。発声を許可するには、同一シーンで `Scene.soundscape.vocalization == "EXPLICIT_DIALOGUE_ONLY"` を明示し、かつ1個以上の保護済み直接発話 `<d>...</d>` が存在しなければならない。
 
-シーン内に1個でも発声指示がある場合は、そのシーンのSubject定義に含まれるAudio参照を変更しない。
+発声指示があるのに音響サブディレクティブの `発声` が省略されている場合又は `NONE`の場合は致命的エラーとする。`EXPLICIT_DIALOGUE_ONLY`なのに保護済み直接発話が存在しない場合も致命的エラーとする。この検証により、ショットと音響許可が矛盾するJSONを生成しない。
+
+発声が明示的に許可されていない場合、そのシーンへ挿入する各Subject定義から、エスケープされていない `<Audio N>` とそれを含む音声参照句を削除する。外観、衣装、身体的特徴、`<Picture N>`、`<Video N>`及び`<Subject N>`の記述は保持する。音声参照以外の定義が空になった場合は `a character.` を使用する。これにより、無発声シーンでMiniMax H3がAudio参照を契機にランダムな音声を生成することを防ぐ。
+
+発声が `EXPLICIT_DIALOGUE_ONLY`として明示的に許可され、直接発話も存在する場合だけ、そのシーンのSubject定義に含まれるAudio参照を変更しない。
 
 定義の順序はSubject番号の昇順とする。
 
@@ -827,26 +907,54 @@ shot_text = f"[Shot {i + 1}] {scene.shots[i]}"
 
 `[Shot2]` のように空白を省略してはならない。
 
-### 9.13 prompt配列
+### 9.13 overall_soundscape
+
+各シーンへ `overall_soundscape:\n` で始まる要素を必ず1個生成する。入力元はそのシーンの `Scene.soundscape`だけとし、他シーン又は `emd.common_prompt`から音響を継承してはならない。
+
+音響は許可リスト方式とする。`## 音響`全体又は全項目が省略され、発声も許可されていない場合は次を固定出力する。
+
+```text
+overall_soundscape:
+Complete silence.
+```
+
+環境音又は効果音が明示された場合は、存在するカテゴリだけを次の順序で連結する。
+
+1. `Environment: ...`
+2. `Sound effects: ...`
+3. 発声許可の固定文
+4. `No other sound is present.`
+
+発声が明示的に許可された場合の固定文は次とする。台詞本文は `overall_soundscape`へ複製せず、ショット内の `<d>...</d>`だけに保持する。
+
+```text
+The only character vocalization is the exact shot-synchronized dialogue explicitly specified in this scene.
+```
+
+`Environment: NONE`、`Sound effects: NONE`、`Vocalization: NONE`及び項目省略は、そのカテゴリを出力しない。生成結果へ空のカテゴリ見出しを残してはならない。
+
+### 9.14 prompt配列
 
 各シーンの `prompt` は次の順序で構成する。
 
 1. `subject_definitions:` を含むSubject定義ブロック
 2. `[Shot 1] ` を付けた最初のショット
 3. `[Shot 2] ` 以降のショット
-4. BGM生成を無効化する固定文字列 `non_diegetic_music:\nN/A`
+4. `overall_soundscape:\n` を含む音響許可リスト
+5. BGM生成を無効化する固定文字列 `non_diegetic_music:\nN/A`
 
 ```python
 prompt = [subject_block]
 prompt.extend(numbered_shots)
+prompt.append(overall_soundscape)
 prompt.append("non_diegetic_music:\nN/A")
 ```
 
 各要素はJSON文字列としてシリアライズする。手作業でダブルクォートやバックスラッシュを追加してはならない。
 
-固定文字列はショット数や継続設定にかかわらず全シーンへ1回だけ追加し、必ず `prompt` の最終要素とする。ここでのLFはPython文字列中の改行であり、JSONシリアライズ時には `\n` として表現される。
+`overall_soundscape`は全シーンへ1回だけ追加し、必ず `prompt` の末尾から2番目とする。BGM無効化の固定文字列はショット数や継続設定にかかわらず全シーンへ1回だけ追加し、必ず `prompt` の最終要素とする。ここでのLFはPython文字列中の改行であり、JSONシリアライズ時には `\n` として表現される。
 
-### 9.14 JSONの厳格性
+### 9.15 JSONの厳格性
 
 生成JSONは次を満たさなければならない。
 
@@ -872,6 +980,8 @@ prompt.append("non_diegetic_music:\nN/A")
 - LLM出力と入力した箇条書き区間の対応を検証できない。
 - 保護トークンが欠落、重複または変更された。
 - LLM再試行後も日本語の通常文章が残っている。
+- `## 音響`がシーンに所属しない、重複する、未知である又は不正な項目を含む。
+- 発声指示と `発声: 指定台詞のみ` の許可状態が矛盾する。
 - シーン数が0または129以上である。
 - 生成結果を `json.loads()` で再読込できない。
 
@@ -879,7 +989,7 @@ prompt.append("non_diegetic_music:\nN/A")
 
 次の場合は警告を出し、定義されたフォールバックで処理を継続する。
 
-- 未知のディレクティブまたは未知の行
+- 未知のトップレベルディレクティブまたは未知の行
 - セクション内の非箇条書き行
 - 範囲外のシーン秒数：5秒へフォールバック
 - 旧形式または不正なシーンオプション：5秒・非継続へフォールバック
@@ -905,9 +1015,16 @@ prompt.append("non_diegetic_music:\nN/A")
 * <Subject 1>が回転し、「ようこそ！ミニマックス エイチスリーへ」と言う。
 * <Subject 2>が御辞儀し、「よろしくおねがいします」と言う。
 
+## 音響
+* 環境音: 近代的なオフィスビル街の環境音。
+* 発声: 指定台詞のみ
+
 # シーン 5秒 継続
 * <Subject 1>が手を上げ、「日本語で書いたら」と言う。
 * <Subject 2>が手を上げ、「楽ですね」と言う。
+
+## 音響
+* 発声: 指定台詞のみ
 ```
 
 ### 11.2 LLMJ2E正規形出力
@@ -925,9 +1042,16 @@ prompt.append("non_diegetic_music:\nN/A")
 * <Subject 1> turns around and says, <d>[Japanese]ようこそ！ミニマックス エイチスリーへ</d>.
 * <Subject 2> bows and says, <d>[Japanese]よろしくおねがいします</d>.
 
+## Soundscape
+* Environment: The ambience of a modern office-building district.
+* Vocalization: EXPLICIT_DIALOGUE_ONLY
+
 # Scene 5sec CONTINUE
 * <Subject 1> raises a hand and says, <d>[Japanese]日本語で書いたら</d>.
 * <Subject 2> raises a hand and says, <d>[Japanese]楽ですね</d>.
+
+## Soundscape
+* Vocalization: EXPLICIT_DIALOGUE_ONLY
 ```
 
 ### 11.3 JSON出力
@@ -946,6 +1070,7 @@ prompt.append("non_diegetic_music:\nN/A")
         "subject_definitions:\n<Subject 1> is a character whose appearance is based on <Picture 1> and whose voice is based on <Audio 1>.\n<Subject 2> is a character whose appearance is based on <Picture 2> and whose voice is based on <Audio 2>.",
         "[Shot 1] <Subject 1> turns around and says, <d>[Japanese]ようこそ！ミニマックス エイチスリーへ</d>.",
         "[Shot 2] <Subject 2> bows and says, <d>[Japanese]よろしくおねがいします</d>.",
+        "overall_soundscape:\nEnvironment: The ambience of a modern office-building district. The only character vocalization is the exact shot-synchronized dialogue explicitly specified in this scene. No other sound is present.",
         "non_diegetic_music:\nN/A"
       ],
       "duration_seconds": 5,
@@ -958,6 +1083,7 @@ prompt.append("non_diegetic_music:\nN/A")
         "subject_definitions:\n<Subject 1> is a character whose appearance is based on <Picture 1> and whose voice is based on <Audio 1>.\n<Subject 2> is a character whose appearance is based on <Picture 2> and whose voice is based on <Audio 2>.",
         "[Shot 1] <Subject 1> raises a hand and says, <d>[Japanese]日本語で書いたら</d>.",
         "[Shot 2] <Subject 2> raises a hand and says, <d>[Japanese]楽ですね</d>.",
+        "overall_soundscape:\nThe only character vocalization is the exact shot-synchronized dialogue explicitly specified in this scene. No other sound is present.",
         "non_diegetic_music:\nN/A"
       ],
       "duration_seconds": 5,
@@ -979,6 +1105,8 @@ prompt.append("non_diegetic_music:\nN/A")
 4. 3個以上連続する空行を1個のセクション終端として扱える。
 5. 空行なしで次の認識済みディレクティブが登場しても状態遷移できる。
 6. `Subjects`、`Common` 及び `Scene` が任意の順序で再登場しても末尾へ正しく追加される。
+7. 空行を挟んだ `## 音響` が直前の `# シーン` に所属する。
+8. `## 音響` の内容が当該 `scene_t` の `Scene.soundscape` だけへ格納される。
 
 ### 12.2 シーンオプション
 
@@ -1012,12 +1140,25 @@ prompt.append("non_diegetic_music:\nN/A")
 6. 未定義Subjectタグはショット本文へ残る。
 7. Subjects翻訳結果が `<Subject N> is ` に文法的に接続できる。
 8. 発声指示のないシーンではSubject定義からAudio参照句が削除され、外観参照及び身体的特徴が維持される。
-9. `<d>...</d>`又は否定されていない発声動詞があるシーンではAudio参照が維持される。
+9. `<d>...</d>`と `発声: 指定台詞のみ`の両方があるシーンでだけAudio参照が維持される。
 10. `does not speak`、`without speaking`及び`no one says`は発声指示として扱われない。
 11. ショットにSubject参照がないシーンでは指定された人物不在定義が固定出力される。
 12. 未定義Subject参照が存在するシーンを人物不在として扱わない。
 
-### 12.5 LLM出力検証
+### 12.5 音響
+
+1. `## 音響`をシーン以外へ置いた場合はエラーになる。
+2. 同一シーンの重複 `## 音響`、重複項目、未知の項目及び未知の `##`サブディレクティブを拒否する。
+3. `環境音`及び`効果音`の通常文章だけを英訳し、分類ラベルと固定値をPythonで決定する。
+4. `## 音響`又は全項目の省略で `overall_soundscape:\nComplete silence.`になる。
+5. 省略した環境音、効果音及び発声を生成許可へ含めない。
+6. `発声: なし`又は発声省略時にSubject定義からAudio参照を削除する。
+7. 台詞があるのに `発声: 指定台詞のみ`がない場合を拒否する。
+8. `発声: 指定台詞のみ`なのに保護済み直接発話がない場合を拒否する。
+9. `overall_soundscape`を各シーンへ正確に1回出力し、`prompt`の末尾から2番目に配置する。
+10. 環境音又は効果音の本文にある直接発話及びAudio参照を拒否する。
+
+### 12.6 LLM出力検証
 
 1. LLMがコードフェンスを付けた場合に検証エラーになる。
 2. LLMが区間先頭プレースホルダを追加、削除または並べ替えた場合に検証エラーになる。
@@ -1031,7 +1172,7 @@ prompt.append("non_diegetic_music:\nN/A")
 10. 正数の `retry_max` では最大回数まで未解決区間だけを再試行し、各試行の成功区間を保持する。
 11. `retry_max=-1`では成功まで再試行でき、初回及び各再試行のseedが異なる。
 
-### 12.6 JSON
+### 12.7 JSON
 
 1. `json.loads()` で生成JSONを再読込できる。
 2. 末尾カンマが存在しない。
@@ -1042,6 +1183,7 @@ prompt.append("non_diegetic_music:\nN/A")
 7. `duration_seconds` 及び `steps` がJSON整数になる。
 8. シーン数0及び129以上を拒否する。
 9. 各シーンの `prompt` 最終要素が `non_diegetic_music:\nN/A` になる。
+10. 各シーンの `prompt` 末尾から2番目が空でない `overall_soundscape:\n...` になる。
 
 ## 13. ログ
 

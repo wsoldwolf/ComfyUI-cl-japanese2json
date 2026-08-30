@@ -5,7 +5,14 @@ from __future__ import annotations
 import logging
 import re
 
-from .structures import Emd, Scene
+from .errors import MarkdownParseError
+from .structures import (
+    Emd,
+    SOUND_NONE,
+    VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
+    Scene,
+    Soundscape,
+)
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
@@ -14,6 +21,9 @@ VALID_SCENE_RE = re.compile(
     r"^# Scene(?: ([1-9]|[1-5][0-9]|60)sec)?(?: (CONTINUE))?$"
 )
 DEFENSIVE_SCENE_RE = re.compile(r"^# Scene(?: ([^\s]+)sec)?(?: (CONTINUE))?$")
+SOUNDSCAPE_LINE_RE = re.compile(
+    r"^\* (Environment|Sound effects|Vocalization): (.+)$"
+)
 
 
 def _parse_scene_directive(line: str) -> tuple[int, bool] | None:
@@ -42,6 +52,36 @@ def _parse_scene_directive(line: str) -> tuple[int, bool] | None:
     return duration, bool(defensive.group(2))
 
 
+def _set_soundscape_value(
+    soundscape: Soundscape,
+    line: str,
+    *,
+    line_number: int,
+) -> None:
+    match = SOUNDSCAPE_LINE_RE.fullmatch(line)
+    if match is None:
+        raise MarkdownParseError(
+            f"Invalid canonical soundscape bullet at line {line_number}"
+        )
+    label, value = match.groups()
+    if label == "Environment":
+        attribute = "environment"
+    elif label == "Sound effects":
+        attribute = "sound_effects"
+    else:
+        attribute = "vocalization"
+        if value not in {SOUND_NONE, VOCALIZATION_EXPLICIT_DIALOGUE_ONLY}:
+            raise MarkdownParseError(
+                f"Invalid canonical vocalization value at line {line_number}"
+            )
+
+    if getattr(soundscape, attribute) is not None:
+        raise MarkdownParseError(
+            f"Duplicate canonical {label} soundscape value at line {line_number}"
+        )
+    setattr(soundscape, attribute, value)
+
+
 def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Emd:
     """Parse canonical Markdown without modifying payload strings."""
 
@@ -51,23 +91,32 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
     emd = Emd()
     state = "OUTSIDE"
     current_scene: Scene | None = None
+    parent_state = "OUTSIDE"
+    parent_has_soundscape = False
+    current_soundscape: Soundscape | None = None
     directive_count = 0
 
     for line_number, line in enumerate(markdown.splitlines(), start=1):
         if line.strip() == "":
             state = "OUTSIDE"
-            current_scene = None
+            current_soundscape = None
             continue
 
         if line == "# Subjects":
             directive_count += 1
             state = "SUBJECTS"
+            parent_state = state
             current_scene = None
+            current_soundscape = None
+            parent_has_soundscape = False
             continue
         if line == "# Common":
             directive_count += 1
             state = "COMMON"
+            parent_state = state
             current_scene = None
+            current_soundscape = None
+            parent_has_soundscape = False
             continue
 
         scene_options = _parse_scene_directive(line)
@@ -82,8 +131,32 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                 )
                 scene.is_continue = False
             state = "SCENE"
+            parent_state = state
             current_scene = scene
+            current_soundscape = None
+            parent_has_soundscape = False
             continue
+
+        if line == "## Soundscape":
+            directive_count += 1
+            if parent_has_soundscape:
+                raise MarkdownParseError(
+                    f"Duplicate canonical soundscape subdirective at line {line_number}"
+                )
+            if parent_state == "SCENE" and current_scene is not None:
+                current_soundscape = current_scene.soundscape
+            else:
+                raise MarkdownParseError(
+                    f"Canonical soundscape subdirective at line {line_number} has no Scene parent"
+                )
+            state = "SOUNDSCAPE"
+            parent_has_soundscape = True
+            continue
+
+        if line.startswith("##"):
+            raise MarkdownParseError(
+                f"Unknown canonical subdirective at line {line_number}: {line}"
+            )
 
         if line.startswith("#"):
             LOGGER.warning(
@@ -92,7 +165,10 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                 line,
             )
             state = "OUTSIDE"
+            parent_state = "OUTSIDE"
             current_scene = None
+            current_soundscape = None
+            parent_has_soundscape = False
             continue
 
         if line.startswith("* "):
@@ -108,6 +184,12 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                 emd.common_prompt.append(body)
             elif state == "SCENE" and current_scene is not None:
                 current_scene.shots.append(body)
+            elif state == "SOUNDSCAPE" and current_soundscape is not None:
+                _set_soundscape_value(
+                    current_soundscape,
+                    line,
+                    line_number=line_number,
+                )
             else:
                 LOGGER.warning(
                     "[cl_japanese2json] Bullet outside a recognized section at line %d ignored",

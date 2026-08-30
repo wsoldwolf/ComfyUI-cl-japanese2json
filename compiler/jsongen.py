@@ -9,7 +9,13 @@ from typing import Any
 
 from .errors import JSONGenerationError, JSONValidationError, ProtectedTextError
 from .protected_text import remove_direct_speech
-from .structures import Emd, Scene
+from .structures import (
+    Emd,
+    SOUND_NONE,
+    VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
+    Scene,
+    Soundscape,
+)
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
@@ -53,6 +59,8 @@ AUDIO_INTRO_PATTERNS = tuple(
     )
 )
 NON_DIEGETIC_MUSIC = "non_diegetic_music:\nN/A"
+OVERALL_SOUNDSCAPE_PREFIX = "overall_soundscape:\n"
+COMPLETE_SILENCE = OVERALL_SOUNDSCAPE_PREFIX + "Complete silence."
 NO_ACTIVE_SUBJECT_BLOCK = (
     "subject_definitions:\n"
     "No character subject or reference-image person is active."
@@ -79,6 +87,84 @@ def _scene_requests_speech(scene: Scene) -> bool:
             if not NEGATED_SPEECH_PREFIX_RE.search(prefix):
                 return True
     return False
+
+
+def _scene_has_direct_speech(scene: Scene) -> bool:
+    return any(DIRECT_SPEECH_RE.search(shot) is not None for shot in scene.shots)
+
+
+def _validate_soundscape(soundscape: Soundscape, *, context: str) -> None:
+    if not isinstance(soundscape, Soundscape):
+        raise JSONGenerationError(f"{context} soundscape must be a Soundscape value")
+    for label, value in (
+        ("environment", soundscape.environment),
+        ("sound effects", soundscape.sound_effects),
+        ("vocalization", soundscape.vocalization),
+    ):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise JSONGenerationError(f"{context} {label} must be a non-empty string")
+        if label != "vocalization" and isinstance(value, str):
+            if DIRECT_SPEECH_RE.search(value) or AUDIO_REFERENCE_RE.search(value):
+                raise JSONGenerationError(
+                    f"{context} {label} cannot contain direct speech or an Audio reference"
+                )
+
+
+def _scene_allows_dialogue(scene: Scene, scene_number: int) -> bool:
+    mode = scene.soundscape.vocalization
+    requests_speech = _scene_requests_speech(scene)
+    has_direct_speech = _scene_has_direct_speech(scene)
+
+    if mode == VOCALIZATION_EXPLICIT_DIALOGUE_ONLY:
+        if not has_direct_speech:
+            raise JSONGenerationError(
+                f"Scene {scene_number} enables explicit dialogue but contains no protected direct speech"
+            )
+        return True
+    if mode not in {None, SOUND_NONE}:
+        raise JSONGenerationError(
+            f"Scene {scene_number} has an invalid vocalization mode"
+        )
+    if requests_speech:
+        raise JSONGenerationError(
+            f"Scene {scene_number} contains a speech instruction, but vocalization is not enabled; "
+            "add '* 発声: 指定台詞のみ' under '## 音響'"
+        )
+    return False
+
+
+def _sentence(value: str) -> str:
+    cleaned = value.strip()
+    return cleaned if cleaned.endswith((".", "!", "?")) else cleaned + "."
+
+
+def _overall_soundscape(scene: Scene, allows_dialogue: bool) -> str:
+    environment = (
+        []
+        if scene.soundscape.environment in {None, SOUND_NONE}
+        else [scene.soundscape.environment]
+    )
+    sound_effects = (
+        []
+        if scene.soundscape.sound_effects in {None, SOUND_NONE}
+        else [scene.soundscape.sound_effects]
+    )
+    parts: list[str] = []
+    if environment:
+        parts.append("Environment: " + " ".join(_sentence(value) for value in environment))
+    if sound_effects:
+        parts.append(
+            "Sound effects: " + " ".join(_sentence(value) for value in sound_effects)
+        )
+    if allows_dialogue:
+        parts.append(
+            "The only character vocalization is the exact shot-synchronized dialogue "
+            "explicitly specified in this scene."
+        )
+    if not parts:
+        return COMPLETE_SILENCE
+    parts.append("No other sound is present.")
+    return OVERALL_SOUNDSCAPE_PREFIX + " ".join(parts)
 
 
 def _trim_audio_clause(clause: str) -> str:
@@ -128,13 +214,18 @@ def _without_audio_references(definition: str) -> str:
     return result.rstrip(".!?") + "."
 
 
-def _subject_block(emd: Emd, scene: Scene, scene_number: int) -> str:
+def _subject_block(
+    emd: Emd,
+    scene: Scene,
+    scene_number: int,
+    *,
+    keep_audio_references: bool,
+) -> str:
     referenced_subjects = _referenced_subjects(scene)
     if not referenced_subjects:
         return NO_ACTIVE_SUBJECT_BLOCK
 
     definitions: list[str] = []
-    keep_audio_references = _scene_requests_speech(scene)
     removed_audio_references = 0
     for number in referenced_subjects:
         if number > len(emd.subjects):
@@ -169,8 +260,18 @@ def _shot_object(emd: Emd, scene: Scene, index: int) -> dict[str, Any]:
     if not 1 <= scene.duration <= 60:
         raise JSONGenerationError(f"Scene {index + 1} duration is outside 1-60 seconds")
 
-    prompt = [_subject_block(emd, scene, index + 1)]
+    _validate_soundscape(scene.soundscape, context=f"Scene {index + 1}")
+    allows_dialogue = _scene_allows_dialogue(scene, index + 1)
+    prompt = [
+        _subject_block(
+            emd,
+            scene,
+            index + 1,
+            keep_audio_references=allows_dialogue,
+        )
+    ]
     prompt.extend(f"[Shot {shot_index + 1}] {text}" for shot_index, text in enumerate(scene.shots))
+    prompt.append(_overall_soundscape(scene, allows_dialogue))
     prompt.append(NON_DIEGETIC_MUSIC)
 
     result: dict[str, Any] = {
@@ -197,7 +298,6 @@ def generate_json(emd: Emd, *, steps: int = 8) -> str:
         raise JSONGenerationError(
             f"Scene count must be between 1 and 128; got {len(emd.scenes)}"
         )
-
     plan = {
         "prompt_prefix": "\n".join(emd.common_prompt),
         "defaults": {"duration_seconds": 5, "steps": steps},
@@ -257,6 +357,15 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
             raise JSONValidationError(
                 f"Shot {index} prompt must end with the non-diegetic music disable directive"
             )
+        soundscape_items = [
+            item for item in prompt if item.startswith(OVERALL_SOUNDSCAPE_PREFIX)
+        ]
+        if len(soundscape_items) != 1 or len(prompt) < 2 or prompt[-2] != soundscape_items[0]:
+            raise JSONValidationError(
+                f"Shot {index} prompt must contain exactly one overall soundscape immediately before music"
+            )
+        if not soundscape_items[0][len(OVERALL_SOUNDSCAPE_PREFIX):].strip():
+            raise JSONValidationError(f"Shot {index} overall soundscape must not be empty")
         duration = shot.get("duration_seconds")
         if not _is_int(duration) or duration <= 0:
             raise JSONValidationError(f"Shot {index} duration_seconds must be a positive integer")

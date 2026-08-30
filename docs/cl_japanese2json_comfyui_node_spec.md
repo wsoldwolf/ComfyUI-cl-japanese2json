@@ -28,6 +28,8 @@ cl_japanese2json_spec.md
 - GGUFモデルはComfyUIの `models/LLM/GGUF` 以下を再帰走査し、ノードの選択欄へ表示する。
 - 入力は複数行のComfyUI `STRING` とする。
 - 日本語シーン見出しは `# シーン [N秒] [継続]` とし、旧形式の `N秒生成する` と `継続する` は受理しない。
+- シーン専用サブディレクティブ `## 音響`を受理し、内容を当該 `scene_t` の `Scene.soundscape`へ格納する。共通プロンプト及び他シーンへ継承しない。
+- 音響は明示的な許可リストとし、省略した環境音、効果音及び発声は無効にする。音響指定が皆無なら完全な無音へフォールバックする。
 - 出力はJSON文字列を格納したComfyUI `STRING` 1個とする。
 - システムプロンプトはカスタムノードディレクトリ内のUTF-8テキストファイルから読み込む。
 - `keep_last_prompt=True` で有効な履歴がない場合は通常処理を行い、成功したJSONを履歴として保存する。
@@ -488,7 +490,7 @@ ComfyUI-cl-japanese2json/
 | `compiler/mdparse.py` | 正規形Markdownのパース |
 | `compiler/jsongen.py` | Python構造から厳格JSON生成 |
 | `compiler/protected_text.py` | タグ、台詞、一時トークン処理 |
-| `compiler/structures.py` | `Scene`、`Emd` dataclass |
+| `compiler/structures.py` | `Soundscape`、`Scene`（`scene_t`）、`Emd` dataclass |
 | `compiler/errors.py` | 専用例外 |
 | `prompts/*.txt` | Qwen3 8B向けsystem prompt |
 
@@ -599,7 +601,7 @@ system promptの内容は `cl_japanese2json_spec.md` の「システムプロン
 
 写真プロンプト、画像説明、創作、要約、JSON生成及びMarkdown全体の再構築を要求してはならない。
 
-system promptには、すべてのプレースホルダを翻訳せず、1バイトも改変せず、移動、並べ替え、複製または削除しないガードを明記する。LLMは生テキスト翻訳ストリーム内の各 `SUB`、`COM` または `SCN` プレースホルダから次の構造プレースホルダまでにある通常の日本語文章だけを翻訳する。
+system promptには、すべてのプレースホルダを翻訳せず、1バイトも改変せず、移動、並べ替え、複製または削除しないガードを明記する。LLMは生テキスト翻訳ストリーム内の各 `SUB`、`COM`、`SCN`又は音響本文用`SND`プレースホルダから次の構造プレースホルダまでにある通常の日本語文章だけを翻訳する。音響分類ラベル、`NONE`及び`EXPLICIT_DIALOGUE_ONLY`はPythonが決定し、LLMへ翻訳させない。
 
 ## 11. llama-cpp-pythonバックエンド
 
@@ -711,7 +713,7 @@ response = self.llm.create_chat_completion(
 - LLMの生出力をそのまま最終ノード出力にしない。
 - コア仕様の構造プレースホルダ、区間ごとの保護プレースホルダ及び日本語残留検査を通す。
 - 構造プレースホルダが完全に0件の場合の段落順／行順フォールバックは、コア仕様の区間数及び保護プレースホルダ条件をすべて満たす場合だけ許可する。空行で区切られた段落を優先し、段落内の物理改行は空白へ正規化する。
-- すべての`SUB/COM/SCN`区間先頭プレースホルダが完全一致して正順に各1回残り、未知又は重複した構造プレースホルダがない場合、`D`ディレクティブプレースホルダだけの欠落を許容し、Python側のブロック情報から復元してよい。
+- すべての`SUB/COM/SCN/SND`区間先頭プレースホルダが完全一致して正順に各1回残り、未知又は重複した構造プレースホルダがない場合、`D`ディレクティブプレースホルダだけの欠落を許容し、Python側のブロック情報から復元してよい。
 - 先頭SUBプレースホルダが番号付きSubjectタグと`is`の完全一致形式へ置換された場合の限定復旧は、コア仕様の連番、行数及び保護プレースホルダ検証をすべて満たす場合だけ許可する。それ以外のモデル追加Subject表現を受理しない。
 
 ### 11.8 JSONモード不使用
@@ -912,6 +914,7 @@ parsed = json.loads(json_text)
 - 各shotが辞書である。
 - 各shotの `id` が一意の文字列である。
 - 各shotの `prompt` が文字列配列である。
+- 各shotの `prompt` に `overall_soundscape:\n` で始まる空でない要素が正確に1個あり、末尾から2番目である。
 - 各shotの `prompt` 最終要素が `non_diegetic_music:\nN/A` である。
 - 各shotの `duration_seconds` が正の整数である。
 - `continuation_mode` が存在する場合は `guide` である。
@@ -1082,7 +1085,7 @@ class JSONValidationError(CLJapaneseToJSONError): ...
 
 `cl_japanese2json_spec.md` 第12章の全受入テストを実装する。
 
-特にJSONGENについて、無発声シーンからAudio参照句が除去されること、発声シーンでは維持されること、否定された発声動詞を無発声として扱うこと、Subject参照のないシーンへ人物不在の固定定義が出力されることをテストする。
+特にJSONGENについて、`## 音響`の内容が当該`scene_t`だけへ格納されること、音響項目省略時に無音方向へフォールバックすること、`overall_soundscape`が固定位置へ出力されること、発声省略又は`発声: なし`のシーンからAudio参照句が除去されること、保護済み台詞と`発声: 指定台詞のみ`の両方があるシーンだけで維持されること、両者の矛盾を拒否すること、Subject参照のないシーンへ人物不在の固定定義が出力されることをテストする。
 
 ### 18.2 Llamaモックテスト
 
@@ -1136,6 +1139,9 @@ close呼び出し回数
 - 複数シーン
 - Subject 1～4
 - 日本語台詞を含むシーン
+- `## 音響`を省略した完全無音シーン
+- 環境音及び効果音を許可したシーン
+- `発声: 指定台詞のみ`を指定した台詞シーン
 - 既存の `<d>[Japanese]...</d>`
 - LF及びCRLF
 - `n_ctx=0`

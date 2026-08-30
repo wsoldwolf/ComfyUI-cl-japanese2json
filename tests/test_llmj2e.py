@@ -367,6 +367,52 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertEqual(output.count("# Scene"), 1)
         self.assertEqual(output.count("* "), 3)
 
+    def test_scene_soundscape_subdirective_translates_only_audio_values(self) -> None:
+        source = (
+            "# シーン 5秒\n"
+            "* <Subject 1>が無言で走る。\n\n"
+            "## 音響\n"
+            "* 環境音: 草原の弱い風音。\n"
+            "* 効果音：足音と衣服の擦れ音。\n"
+            "* 発声: なし"
+        )
+        llm = FakeLLM()
+        output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=128)
+        self.assertIn("## Soundscape", output)
+        self.assertIn("* Environment: A defined audible sound", output)
+        self.assertIn("* Sound effects: A defined audible sound", output)
+        self.assertIn("* Vocalization: NONE", output)
+        self.assertEqual(len(request_records(llm.calls[0]["messages"])), 3)
+        self.assertTrue(
+            any(
+                record["section"] == "Soundscape"
+                for record in request_records(llm.calls[0]["messages"])
+            )
+        )
+
+    def test_fixed_soundscape_values_require_no_llm_record(self) -> None:
+        source = (
+            "# シーン\n* 動作。\n## 音響\n"
+            "* 環境音: なし\n* 効果音: なし\n* 発声: 指定台詞のみ"
+        )
+        output = llmj2e.translate_markdown(source, FakeLLM(), "sys", max_tokens=64)
+        self.assertIn("* Environment: NONE", output)
+        self.assertIn("* Sound effects: NONE", output)
+        self.assertIn("* Vocalization: EXPLICIT_DIALOGUE_ONLY", output)
+
+    def test_soundscape_is_scene_only_and_rejects_invalid_bullets(self) -> None:
+        invalid_documents = (
+            "# 共通プロンプト\n* 共通。\n## 音響\n* 環境音: 風音。",
+            "# シーン\n* 動作。\n## 音響\n* 発声: 自動",
+            "# シーン\n* 動作。\n## 音響\n* 不明: 音。",
+            "# シーン\n* 動作。\n## 響き\n* 環境音: 音。",
+        )
+        for text in invalid_documents:
+            with self.subTest(text=text), self.assertRaises(
+                errors.TranslationError
+            ):
+                llmj2e.translate_markdown(text, FakeLLM(), "sys", max_tokens=64)
+
     def test_code_fence_causes_one_retry_then_success(self) -> None:
         llm = FakeLLM(["```json\n{}\n```"])
         output = llmj2e.translate_markdown(

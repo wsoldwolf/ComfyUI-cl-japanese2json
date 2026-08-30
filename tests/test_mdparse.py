@@ -6,6 +6,7 @@ from .helpers import module
 
 
 parse_markdown = module("compiler.mdparse").parse_markdown
+errors = module("compiler.errors")
 
 
 CANONICAL = """# Subjects
@@ -79,3 +80,29 @@ class MarkdownParserTests(unittest.TestCase):
             emd = parse_markdown(text)
         self.assertEqual(len(emd.subjects), 5)
         self.assertEqual(len(emd.scenes), 1)
+
+    def test_scene_soundscape_is_stored_on_scene_across_blank_line(self) -> None:
+        emd = parse_markdown(
+            "# Scene 5sec\n* Action.\n\n## Soundscape\n"
+            "* Environment: Soft wind.\n"
+            "* Sound effects: Footsteps.\n"
+            "* Vocalization: NONE"
+        )
+        soundscape = emd.scenes[0].soundscape
+        self.assertEqual(soundscape.environment, "Soft wind.")
+        self.assertEqual(soundscape.sound_effects, "Footsteps.")
+        self.assertEqual(soundscape.vocalization, "NONE")
+        self.assertEqual(emd.scenes[0].shots, ["Action."])
+
+    def test_soundscape_requires_scene_parent_and_unique_fields(self) -> None:
+        invalid_documents = (
+            "# Common\n* Setting.\n## Soundscape\n* Environment: Wind.",
+            "## Soundscape\n* Environment: Wind.",
+            "# Scene\n* Action.\n## Soundscape\n* Environment: Wind.\n* Environment: Rain.",
+            "# Scene\n* Action.\n## Unknown\n* Environment: Wind.",
+        )
+        for text in invalid_documents:
+            with self.subTest(text=text), self.assertRaises(
+                errors.MarkdownParseError
+            ):
+                parse_markdown(text)

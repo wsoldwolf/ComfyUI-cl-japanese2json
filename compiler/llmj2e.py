@@ -38,7 +38,8 @@ class TranslationRecord:
     record_id: str
     section: str
     block_index: int
-    payload: ProtectedPayload
+    payload: ProtectedPayload | None
+    output_prefix: str = "* "
     translated: str | None = None
 
 
@@ -79,7 +80,22 @@ class LexicalDocument:
 
     @property
     def records(self) -> list[TranslationRecord]:
-        return [record for block in self.blocks for record in block.records]
+        return [
+            record
+            for block in self.blocks
+            for record in block.records
+            if record.payload is not None
+        ]
+
+
+SOUNDSCAPE_PREFIXES = {
+    "環境音": "* Environment: ",
+    "効果音": "* Sound effects: ",
+}
+SOUNDSCAPE_FIXED_VALUES = {
+    "なし": "NONE",
+    "指定台詞のみ": "EXPLICIT_DIALOGUE_ONLY",
+}
 
 
 def _canonical_scene_directive(line: str, line_number: int) -> str:
@@ -132,6 +148,8 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
     record_number = 0
     directive_count = 0
     bullet_count = 0
+    parent_section: str | None = None
+    parent_has_soundscape = False
 
     for line_number, line in enumerate(plain_text.lstrip("\ufeff").splitlines(), start=1):
         if line.strip() == "":
@@ -151,7 +169,29 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             current = LexicalBlock(canonical, section)
             blocks.append(current)
             directive_count += 1
+            parent_section = section
+            parent_has_soundscape = False
             continue
+
+        if line == "## 音響":
+            if parent_section != "Scene":
+                raise TranslationError(
+                    f"Soundscape subdirective at line {line_number} must belong to Scene"
+                )
+            if parent_has_soundscape:
+                raise TranslationError(
+                    f"Duplicate soundscape subdirective at line {line_number}"
+                )
+            current = LexicalBlock("## Soundscape", "Soundscape")
+            blocks.append(current)
+            directive_count += 1
+            parent_has_soundscape = True
+            continue
+
+        if line.startswith("##"):
+            raise TranslationError(
+                f"Unknown subdirective at line {line_number}: {line}"
+            )
 
         if line.startswith("#"):
             LOGGER.warning(
@@ -160,6 +200,8 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 line,
             )
             current = None
+            parent_section = None
+            parent_has_soundscape = False
             continue
 
         if line.startswith("* "):
@@ -172,6 +214,52 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             record_number += 1
             bullet_count += 1
             record_id = f"R{record_number:06d}"
+            if current.section == "Soundscape":
+                match = re.fullmatch(r"(環境音|効果音|発声)\s*[:：]\s*(.*)", line[2:])
+                if match is None:
+                    raise TranslationError(
+                        f"Invalid soundscape bullet at line {line_number}; expected Environment, Sound effects, or Vocalization"
+                    )
+                label, raw_value = match.groups()
+                value = raw_value.strip()
+                if not value:
+                    raise TranslationError(
+                        f"Soundscape value at line {line_number} must not be empty"
+                    )
+                used_prefixes = {record.output_prefix for record in current.records}
+                output_prefix = (
+                    "* Vocalization: "
+                    if label == "発声"
+                    else SOUNDSCAPE_PREFIXES[label]
+                )
+                if output_prefix in used_prefixes:
+                    raise TranslationError(
+                        f"Duplicate {label} soundscape bullet at line {line_number}"
+                    )
+                if label == "発声":
+                    if value not in SOUNDSCAPE_FIXED_VALUES:
+                        raise TranslationError(
+                            f"Invalid vocalization value at line {line_number}; use なし or 指定台詞のみ"
+                        )
+                    translated = SOUNDSCAPE_FIXED_VALUES[value]
+                    payload = None
+                elif value == "なし":
+                    translated = "NONE"
+                    payload = None
+                else:
+                    translated = None
+                    payload = protect_text(value, namespace=record_id)
+                current.records.append(
+                    TranslationRecord(
+                        record_id=record_id,
+                        section=current.section,
+                        block_index=len(blocks) - 1,
+                        payload=payload,
+                        output_prefix=output_prefix,
+                        translated=translated,
+                    )
+                )
+                continue
             record = TranslationRecord(
                 record_id=record_id,
                 section=current.section,
@@ -193,19 +281,31 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 current.section,
             )
 
+    translatable_count = sum(
+        record.payload is not None
+        for block in blocks
+        for record in block.records
+    )
     LOGGER.info(
         "[cl_japanese2json] Read %d directive(s) and %d translatable text segment(s)",
         directive_count,
-        bullet_count,
+        translatable_count,
     )
     return LexicalDocument(blocks, directive_count, bullet_count)
 
 
-SECTION_STREAM_CODES = {"Subjects": "SUB", "Common": "COM", "Scene": "SCN"}
+SECTION_STREAM_CODES = {
+    "Subjects": "SUB",
+    "Common": "COM",
+    "Scene": "SCN",
+    "Soundscape": "SND",
+}
 
 
 def _build_translation_stream(records: Iterable[TranslationRecord]) -> TranslationStream:
     selected = list(records)
+    if any(record.payload is None for record in selected):
+        raise TranslationError("Translation stream contains a fixed soundscape record")
     combined = "\n".join(record.payload.text for record in selected)
     prefix_number = 0
     while f"CLJT{prefix_number}" in combined:
@@ -250,8 +350,8 @@ def _user_payload(
         "Translate the Japanese prose inside the single protected stream below. Return only the "
         "translated raw stream, without JSON or quotes. "
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
-        "A SUB marker starts a singular noun phrase ending in an ASCII period; COM and SCN markers "
-        "start concise natural US English. Keep one segment after each marker and preserve the "
+        "A SUB marker starts a singular noun phrase ending in an ASCII period; COM, SCN, and SND "
+        "markers start concise natural US English. Keep one segment after each marker and preserve the "
         "marker order. Do not replace a SUB marker with a label, index, copula, or framing text. "
         "Copy the final stop placeholder after translating the last segment. "
         "Emergency recovery only: if every CLJT structural marker is omitted, return exactly "
@@ -500,6 +600,8 @@ def _content_from_response(response: Any) -> str:
 
 
 def _validate_translation_text(record: TranslationRecord, translated: str) -> str:
+    if record.payload is None:
+        raise TranslationError(f"Record {record.record_id} has no translatable payload")
     if "\n" in translated or "\r" in translated:
         raise TranslationError(f"Record {record.record_id} was split across multiple lines")
     validate_protected_translation(record.payload, translated)
@@ -556,7 +658,7 @@ def _structural_tokens(stream: TranslationStream) -> list[str]:
 
 def _structural_pattern(stream: TranslationStream) -> re.Pattern[str]:
     return re.compile(
-        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|COM|SCN)[0-9]+)X"
+        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|COM|SCN|SND)[0-9]+)X"
     )
 
 
@@ -1199,7 +1301,7 @@ def _rebuild(document: LexicalDocument) -> str:
         for record in block.records:
             if record.translated is None:
                 raise TranslationError(f"Record {record.record_id} has no validated translation")
-            lines.append(f"* {record.translated}")
+            lines.append(f"{record.output_prefix}{record.translated}")
         sections.append("\n".join(lines))
     canonical = "\n\n".join(sections)
     if canonical:
@@ -1208,7 +1310,8 @@ def _rebuild(document: LexicalDocument) -> str:
     directive_count = sum(
         1
         for line in canonical.splitlines()
-        if line in {"# Subjects", "# Common"} or line.startswith("# Scene")
+        if line in {"# Subjects", "# Common", "## Soundscape"}
+        or line.startswith("# Scene")
     )
     bullet_count = sum(1 for line in canonical.splitlines() if line.startswith("* "))
     if directive_count != document.directive_count or bullet_count != document.bullet_count:

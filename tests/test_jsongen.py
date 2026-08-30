@@ -9,7 +9,8 @@ from .helpers import module
 jsongen = module("compiler.jsongen")
 structures = module("compiler.structures")
 errors = module("compiler.errors")
-Emd, Scene = structures.Emd, structures.Scene
+Emd, Scene, Soundscape = structures.Emd, structures.Scene, structures.Soundscape
+EXPLICIT_DIALOGUE_ONLY = structures.VOCALIZATION_EXPLICIT_DIALOGUE_ONLY
 
 
 class JSONGenerationTests(unittest.TestCase):
@@ -83,22 +84,59 @@ class JSONGenerationTests(unittest.TestCase):
             any("removed 3 Audio reference(s)" in line for line in captured.output)
         )
 
-    def test_positive_speech_cues_and_direct_speech_keep_audio_references(self) -> None:
+    def test_explicit_direct_speech_permission_keeps_audio_references(self) -> None:
         definition = (
             "a character based on <Picture 1> whose voice is based on <Audio 1>."
         )
-        cues = (
-            "<Subject 1> says hello.",
-            "<Subject 1> is saying hello.",
-            "<Subject 1> whispers softly.",
-            "<Subject 1> groans audibly.",
-            "<Subject 1> moves their mouth: <d>[Japanese]こんにちは</d>.",
+        emd = Emd(
+            subjects=[definition],
+            scenes=[
+                Scene(
+                    shots=[
+                        "<Subject 1> says <d>[Japanese]こんにちは</d>."
+                    ],
+                    soundscape=Soundscape(
+                        vocalization=EXPLICIT_DIALOGUE_ONLY
+                    ),
+                )
+            ],
         )
-        for shot in cues:
-            with self.subTest(shot=shot):
-                emd = Emd(subjects=[definition], scenes=[Scene(shots=[shot])])
-                block = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][0]
-                self.assertIn("<Audio 1>", block)
+        parsed = json.loads(jsongen.generate_json(emd))
+        self.assertIn("<Audio 1>", parsed["shots"][0]["prompt"][0])
+        self.assertIn(
+            "exact shot-synchronized dialogue",
+            parsed["shots"][0]["prompt"][-2],
+        )
+
+    def test_speech_requires_explicit_permission_and_protected_dialogue(self) -> None:
+        missing_permission = Emd(
+            scenes=[Scene(shots=["A voice says <d>[Japanese]こんにちは</d>."])]
+        )
+        permission_without_dialogue = Emd(
+            scenes=[
+                Scene(
+                    shots=["A silent action."],
+                    soundscape=Soundscape(
+                        vocalization=EXPLICIT_DIALOGUE_ONLY
+                    ),
+                )
+            ]
+        )
+        unprotected_speech = Emd(
+            scenes=[
+                Scene(
+                    shots=["A character says hello."],
+                    soundscape=Soundscape(
+                        vocalization=EXPLICIT_DIALOGUE_ONLY
+                    ),
+                )
+            ]
+        )
+        for emd in (missing_permission, permission_without_dialogue, unprotected_speech):
+            with self.subTest(emd=emd), self.assertRaises(
+                errors.JSONGenerationError
+            ):
+                jsongen.generate_json(emd)
 
     def test_negated_speech_cues_do_not_keep_audio_references(self) -> None:
         definition = (
@@ -122,7 +160,10 @@ class JSONGenerationTests(unittest.TestCase):
                 Scene(
                     shots=[
                         r"<d>[Japanese]<Subject 1></d> and \<Subject 2\> are literal."
-                    ]
+                    ],
+                    soundscape=Soundscape(
+                        vocalization=EXPLICIT_DIALOGUE_ONLY
+                    ),
                 )
             ],
         )
@@ -154,11 +195,67 @@ class JSONGenerationTests(unittest.TestCase):
         parsed = jsongen.validate_final_json(jsongen.generate_json(emd))
         for shot in parsed["shots"]:
             self.assertEqual(shot["prompt"][-1], "non_diegetic_music:\nN/A")
+            self.assertTrue(shot["prompt"][-2].startswith("overall_soundscape:\n"))
+
+    def test_omitted_soundscape_falls_back_to_complete_silence(self) -> None:
+        emd = Emd(
+            subjects=["a character with voice reference <Audio 1>."],
+            scenes=[Scene(shots=["<Subject 1> moves silently."])],
+        )
+        prompt = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"]
+        self.assertEqual(prompt[-2], "overall_soundscape:\nComplete silence.")
+        self.assertNotIn("<Audio 1>", prompt[0])
+
+    def test_soundscape_is_an_explicit_allowlist(self) -> None:
+        scene = Scene(
+            shots=["An effects-only action occurs."],
+            soundscape=Soundscape(
+                environment="Soft grassland wind.",
+                sound_effects="Footsteps and clothing rustle.",
+            ),
+        )
+        prompt = json.loads(jsongen.generate_json(Emd(scenes=[scene])))["shots"][0]["prompt"]
+        self.assertEqual(
+            prompt[-2],
+            "overall_soundscape:\n"
+            "Environment: Soft grassland wind. "
+            "Sound effects: Footsteps and clothing rustle. "
+            "No other sound is present.",
+        )
+
+    def test_explicit_none_disables_each_sound_category(self) -> None:
+        scene = Scene(
+            soundscape=Soundscape(
+                environment=structures.SOUND_NONE,
+                sound_effects=structures.SOUND_NONE,
+                vocalization=structures.SOUND_NONE,
+            )
+        )
+        prompt = json.loads(jsongen.generate_json(Emd(scenes=[scene])))["shots"][0]["prompt"]
+        self.assertEqual(prompt[-2], jsongen.COMPLETE_SILENCE)
+
+    def test_soundscape_text_cannot_bypass_vocalization_policy(self) -> None:
+        for soundscape in (
+            Soundscape(environment="Reference <Audio 1>."),
+            Soundscape(sound_effects="Play <d>[Japanese]こんにちは</d>."),
+        ):
+            with self.subTest(soundscape=soundscape), self.assertRaises(
+                errors.JSONGenerationError
+            ):
+                jsongen.generate_json(
+                    Emd(scenes=[Scene(soundscape=soundscape)])
+                )
 
     def test_ids_shots_integers_and_json_escaping(self) -> None:
         emd = Emd(
             scenes=[
-                Scene(duration=60, shots=[r"<d>[Japanese]\<x\></d>", "second"])
+                Scene(
+                    duration=60,
+                    shots=[r"<d>[Japanese]\<x\></d>", "second"],
+                    soundscape=Soundscape(
+                        vocalization=EXPLICIT_DIALOGUE_ONLY
+                    ),
+                )
             ]
         )
         text = jsongen.generate_json(emd)
@@ -204,3 +301,11 @@ class JSONGenerationTests(unittest.TestCase):
         )
         with self.assertRaises(errors.JSONValidationError):
             jsongen.validate_final_json(missing_music)
+
+        misplaced = json.loads(jsongen.generate_json(Emd(scenes=[Scene()])))
+        prompt = misplaced["shots"][0]["prompt"]
+        prompt.insert(0, prompt.pop(-2))
+        with self.assertRaises(errors.JSONValidationError):
+            jsongen.validate_final_json(
+                json.dumps(misplaced, ensure_ascii=False, indent=2) + "\n"
+            )
