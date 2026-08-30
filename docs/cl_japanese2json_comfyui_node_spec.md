@@ -150,7 +150,8 @@ return (json_text,)
 14. `seed`
 15. `keep_last_prompt`
 16. `steps`
-17. `save_debug_output`（任意入力）
+17. `retry_max`
+18. `save_debug_output`（任意入力）
 
 ### 5.2 パラメータ定義
 
@@ -172,6 +173,7 @@ return (json_text,)
 | `seed` | `INT` | `1` | 1～4294967295 | 不要 |
 | `keep_last_prompt` | `BOOLEAN` | `False` | True / False | 不要 |
 | `steps` | `INT` | `8` | 1～10000、step 1 | 不要 |
+| `retry_max` | `INT` | `3` | -1～100、step 1 | 不要 |
 | `save_debug_output` | `BOOLEAN` | `False` | True / False | 不要 |
 
 「再ロード」は、既に保持している `Llama` インスタンスを破棄し、モデルを再ロードする必要がある設定変更を示す。
@@ -287,7 +289,8 @@ Llama(
 - `create_chat_completion()` の `seed` へ渡す。
 - 同一入力、同一モデル、同一system prompt及び同一生成パラメータでは、可能な範囲で再現可能な翻訳を生成する。
 - バッチごとに異なる決定論的seedを使用する場合は、`seed + batch_index` とする。
-- 再試行では元バッチと衝突しない決定論的な値を使用する。
+- 再試行番号を1始まりの `retry_number` とし、再試行では `seed + batch_index + retry_number * 1000003` を1～4294967295へ正規化した値を使用する。
+- 同一バッチ内の初回推論及び各再試行でseedを変える。再試行対象が減っても、再試行番号を巻き戻さない。
 - 32bit範囲を超える加算結果は、1～4294967295の範囲へ正規化する。
 
 ### 5.13 keep_last_prompt
@@ -329,7 +332,17 @@ Llama(
 - LLMの翻訳生成パラメータではなく、変更時にGGUFモデルを再ロードしない。
 - 既存ワークフローのウィジェット位置を変えないため、入力一覧の末尾へ追加する。
 
-### 5.15 save_debug_output
+### 5.15 retry_max
+
+- 初回翻訳が検証に失敗した後に許可する最大再試行回数を表し、初回推論自体は回数へ含めない。
+- 既定値は`3`、UI指定範囲は`-1`～`100`とする。Boolean及び整数以外の値を許可しない。
+- `0`は再試行を行わず、初回検証失敗をそのままノードエラーにする。
+- 正数`N`は最大`N`回再試行するため、最大LLM呼び出し回数は初回を含む`N + 1`回となる。
+- `-1`は検証成功又はComfyUIからの中断まで上限なく再試行する。推論例外やユーザー中断を捕捉して再試行へ変換してはならない。
+- 各試行で検証成功した区間を保持し、次回は未解決区間だけを一つの保護済みストリームとして送信する。
+- `retry_max`変更時にGGUFモデルを再ロードしない。
+
+### 5.16 save_debug_output
 
 - 既定値は`False`とし、既存ワークフローとの互換性を維持するため`optional`入力として追加する。
 - `True`では成功・失敗を問わず、実行ごとの専用ディレクトリを `folder_paths.get_output_directory()/cl_japanese2json_debug/` 以下へ作成する。
@@ -407,6 +420,10 @@ def INPUT_TYPES(cls):
             "steps": (
                 "INT",
                 {"default": 8, "min": 1, "max": 10000, "step": 1},
+            ),
+            "retry_max": (
+                "INT",
+                {"default": 3, "min": -1, "max": 100, "step": 1},
             ),
         },
         "optional": {
@@ -762,6 +779,7 @@ keep_model_loaded
 seed
 keep_last_prompt
 steps
+retry_max
 save_debug_output
 system prompt本文
 ```
@@ -853,6 +871,7 @@ def compile_json(...):
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
                 seed=seed,
+                retry_max=retry_max,
             )
 
             emd = mdparse.parse(canonical_markdown)
@@ -1001,7 +1020,8 @@ class JSONValidationError(CLJapaneseToJSONError): ...
 [cl_japanese2json] LLM tokens: prompt=4210 completion=2874 total=7084
 [cl_japanese2json] Markerless response shape: paragraphs=1 non_empty_lines=45 protected_exact=60/62 protected_occurrences=60
 [cl_japanese2json] Salvaged 42/46 markerless text segment(s) using protected-placeholder anchors
-[cl_japanese2json] LLM validation failed for batch 1; retrying 4 unresolved text segment(s) once: ...
+[cl_japanese2json] LLM validation failed for batch 1; retry 1/3 for 4 unresolved text segment(s) with a new seed: ...
+[cl_japanese2json] LLM validation failed for batch 1; retry 2/3 for 1 unresolved text segment(s) with a new seed: ...
 [cl_japanese2json] Generated 3 scene(s)
 [cl_japanese2json] Saved debug output: C:\...\ComfyUI\output\cl_japanese2json_debug\...
 [cl_japanese2json] Returning cached last JSON
@@ -1090,8 +1110,12 @@ close呼び出し回数
 - `<think>` 混入
 - 再試行成功
 - 再試行失敗
-- 再試行後に直接発話プレースホルダだけが欠落した場合の辞書復旧
-- 再試行後のSubject、Picture、Video又はAudioプレースホルダ欠落拒否
+- `retry_max=0`で初回失敗後にLLMを再呼び出ししない
+- 正数の`retry_max`まで未解決区間だけを再試行する
+- `retry_max=-1`で成功まで再試行し、各試行のseedが異なる
+- 再試行ごとに成功区間を保持し、次回の送信対象から除外する
+- 各再試行後に直接発話プレースホルダだけが欠落した場合の辞書復旧
+- 各再試行後のSubject、Picture、Video又はAudioプレースホルダ欠落拒否
 - `json.loads()` 失敗
 
 ### 18.3 ComfyUI統合テスト
@@ -1121,6 +1145,7 @@ close呼び出し回数
 - `gpu_layers=-1`
 - `keep_model_loaded=True/False`
 - `keep_last_prompt=True/False`
+- `retry_max=0/3/-1`
 - `save_debug_output=True/False`
 
 ## 19. README要件
@@ -1140,8 +1165,9 @@ READMEには最低限次を記載する。
 11. `keep_last_prompt` の初回動作
 12. Contex-Loop Planへの接続方法
 13. 主なエラーと対処方法
-14. `save_debug_output`の保存先、保存内容及び機密性の注意
-15. GPL-3.0及び参考元の表示
+14. `retry_max`の回数定義、`0`及び`-1`の意味
+15. `save_debug_output`の保存先、保存内容及び機密性の注意
+16. GPL-3.0及び参考元の表示
 
 ## 20. ライセンス
 
@@ -1206,7 +1232,7 @@ Codexは次の順序で実装する。
 1. `ComfyUI-cl-japanese2json` が `QwenVL-Mod` なしでimportできる。
 2. `CL Japanese to JSON (GGUF)` がComfyUIのノード一覧へ表示される。
 3. `models/LLM/GGUF` のGGUFを選択できる。
-4. 指定された16個の必須入力と1個の任意入力がすべて存在する。
+4. 指定された17個の必須入力と1個の任意入力がすべて存在する。
 5. `op_offload` がBooleanである。
 6. `kv_cache_type` がK及びVのキャッシュ型へ反映される。
 7. ロード時設定変更でモデルが正しく再ロードされる。

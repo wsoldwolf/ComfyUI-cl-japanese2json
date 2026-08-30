@@ -105,6 +105,16 @@ class CLJapaneseToJSONGGUF:
                     "INT",
                     {"default": 8, "min": 1, "max": 10000, "step": 1},
                 ),
+                "retry_max": (
+                    "INT",
+                    {
+                        "default": 3,
+                        "min": -1,
+                        "max": 100,
+                        "step": 1,
+                        "tooltip": "Maximum validation retries after the initial translation. 0 disables retries; -1 retries until success or interruption.",
+                    },
+                ),
             },
             "optional": {
                 "save_debug_output": (
@@ -153,6 +163,7 @@ class CLJapaneseToJSONGGUF:
         seed: int,
         keep_last_prompt: bool,
         steps: int,
+        retry_max: int,
         save_debug_output: bool,
     ) -> None:
         if not isinstance(plain_text, str) or plain_text.strip() == "":
@@ -165,6 +176,7 @@ class CLJapaneseToJSONGGUF:
             "n_ctx": (n_ctx, 0, 131072),
             "seed": (seed, 1, 4294967295),
             "steps": (steps, 1, 10000),
+            "retry_max": (retry_max, -1, 100),
         }
         for name, (value, minimum, maximum) in integer_ranges.items():
             if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
@@ -248,6 +260,7 @@ class CLJapaneseToJSONGGUF:
         seed: int,
         keep_last_prompt: bool,
         steps: int = 8,
+        retry_max: int = 3,
         save_debug_output: bool = False,
     ) -> tuple[str]:
         with self._lock:
@@ -274,6 +287,7 @@ class CLJapaneseToJSONGGUF:
                 "seed": seed,
                 "keep_last_prompt": keep_last_prompt,
                 "steps": steps,
+                "retry_max": retry_max,
                 "save_debug_output": save_debug_output,
             }
             try:
@@ -293,6 +307,7 @@ class CLJapaneseToJSONGGUF:
                     seed=seed,
                     keep_last_prompt=keep_last_prompt,
                     steps=steps,
+                    retry_max=retry_max,
                     save_debug_output=save_debug_output,
                 )
                 system_prompt = load_system_prompt()
@@ -315,6 +330,7 @@ class CLJapaneseToJSONGGUF:
                     top_p=float(top_p),
                     repetition_penalty=float(repetition_penalty),
                     seed=seed,
+                    retry_max=retry_max,
                     debug_events=(
                         debug_events if save_debug_output is True else None
                     ),

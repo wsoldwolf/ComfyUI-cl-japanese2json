@@ -19,6 +19,7 @@ from .protected_text import (
 
 LOGGER = logging.getLogger("cl_japanese2json")
 MAX_SEED = 4_294_967_295
+RETRY_SEED_STRIDE = 1_000_003
 CODE_FENCE_RE = re.compile(r"```", re.IGNORECASE)
 THINK_RE = re.compile(r"<\s*/?\s*think\b", re.IGNORECASE)
 LEADING_THINK_BLOCK_RE = re.compile(
@@ -1006,7 +1007,7 @@ def _repair_retry_dialogue_placeholders(
     translated: str,
     all_protected_tokens: tuple[str, ...],
 ) -> str | None:
-    """Restore only omitted direct-speech values after the single LLM retry."""
+    """Restore only omitted direct-speech values after an LLM retry."""
 
     record = stream_record.record
     if record.section != "Scene" or not re.search(r"[A-Za-z]", translated):
@@ -1057,143 +1058,138 @@ def _translate_batch(
     top_p: float,
     repetition_penalty: float,
     seed: int,
+    retry_max: int,
     batch_index: int,
     debug_events: list[dict[str, Any]] | None,
 ) -> list[str]:
-    first_seed = _normalize_seed(seed + batch_index)
-    stream = _build_translation_stream(records)
     validated: list[str | None] = [None] * len(records)
-    retry_indices: list[int]
-    first_error: TranslationError
-    content: str | None = None
-    first_event: dict[str, Any] | None = None
+    unresolved_indices = list(range(len(records)))
+    retry_number = 0
+    first_error: TranslationError | None = None
+    last_error: TranslationError | None = None
 
-    try:
-        first_messages = _messages(system_prompt, stream)
-        first_event = _start_debug_event(
-            debug_events,
-            batch_index=batch_index,
-            attempt=1,
-            stream=stream,
-            messages=first_messages,
+    while unresolved_indices:
+        attempt_indices = unresolved_indices
+        attempt_records = [records[index] for index in attempt_indices]
+        stream = _build_translation_stream(attempt_records)
+        attempt_seed = _normalize_seed(
+            seed + batch_index + retry_number * RETRY_SEED_STRIDE
         )
-        response = _call_llm(
-            llm,
-            first_messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            seed=first_seed,
-            stop_token=stream.stop_token,
-        )
-        _capture_debug_response(first_event, response)
-        content = _content_from_response(response)
-        translated_values = _parse_stream_text_values(content, stream)
-        failures: list[tuple[int, TranslationError]] = []
-        for index, (stream_record, translated) in enumerate(
-            zip(stream.records, translated_values)
-        ):
-            try:
-                validated[index] = _validate_stream_record_text(
-                    stream_record, translated, stream.protected_tokens
-                )
-            except TranslationError as exc:
-                failures.append((index, exc))
-        if not failures:
-            _set_debug_result(first_event, "validated")
-            return [value for value in validated if value is not None]
-        retry_indices = [index for index, _ in failures]
-        first_error = failures[0][1]
-        if len(failures) > 1:
-            first_error = TranslationError(
-                f"{len(failures)} text segment(s) failed; first error: {first_error}"
+        content: str | None = None
+        event: dict[str, Any] | None = None
+        attempt_error: TranslationError | None = None
+
+        try:
+            messages = _messages(
+                system_prompt,
+                stream,
+                retry_reason=(
+                    str(last_error) if retry_number > 0 and last_error else None
+                ),
             )
-        _set_debug_result(first_event, first_error)
-    except TranslationError as exc:
-        first_error = exc
-        _set_debug_result(first_event, exc)
-        salvaged = (
-            _salvage_stream_response(content, stream)
-            if content is not None
-            else {}
-        )
-        for index, value in salvaged.items():
-            validated[index] = value
-        retry_indices = [
+            event = _start_debug_event(
+                debug_events,
+                batch_index=batch_index,
+                attempt=retry_number + 1,
+                stream=stream,
+                messages=messages,
+            )
+            response = _call_llm(
+                llm,
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                seed=attempt_seed,
+                stop_token=stream.stop_token,
+            )
+            _capture_debug_response(event, response)
+            content = _content_from_response(response)
+            translated_values = _parse_stream_text_values(content, stream)
+            failures: list[TranslationError] = []
+            for original_index, stream_record, translated in zip(
+                attempt_indices, stream.records, translated_values
+            ):
+                try:
+                    value = _validate_stream_record_text(
+                        stream_record, translated, stream.protected_tokens
+                    )
+                except TranslationError as exc:
+                    value = (
+                        _repair_retry_dialogue_placeholders(
+                            stream_record, translated, stream.protected_tokens
+                        )
+                        if retry_number > 0
+                        else None
+                    )
+                    if value is None:
+                        failures.append(exc)
+                        continue
+                validated[original_index] = value
+
+            if failures:
+                attempt_error = failures[0]
+                if len(failures) > 1:
+                    attempt_error = TranslationError(
+                        f"{len(failures)} text segment(s) failed; "
+                        f"first error: {attempt_error}"
+                    )
+                _set_debug_result(event, attempt_error)
+            else:
+                _set_debug_result(event, "validated")
+        except TranslationError as exc:
+            attempt_error = exc
+            salvaged = (
+                _salvage_stream_response(content, stream)
+                if content is not None
+                else {}
+            )
+            for local_index, value in salvaged.items():
+                validated[attempt_indices[local_index]] = value
+            _set_debug_result(event, exc)
+
+        unresolved_indices = [
             index for index, value in enumerate(validated) if value is None
         ]
+        if not unresolved_indices:
+            return [value for value in validated if value is not None]
+        if attempt_error is None:
+            attempt_error = TranslationError(
+                "LLM retry did not resolve every failed text segment"
+            )
+        if first_error is None:
+            first_error = attempt_error
+        last_error = attempt_error
 
-    if not retry_indices:
-        return [value for value in validated if value is not None]
+        if retry_max != -1 and retry_number >= retry_max:
+            if retry_max == 0:
+                message = (
+                    f"Batch {batch_index + 1} failed validation and "
+                    f"retry_max=0: {last_error}"
+                )
+            else:
+                message = (
+                    f"Batch {batch_index + 1} failed validation after "
+                    f"{retry_max} retry attempt(s): {last_error}"
+                )
+            raise TranslationError(message) from first_error
 
-    retry_records = [records[index] for index in retry_indices]
-    retry_stream = _build_translation_stream(retry_records)
-    LOGGER.warning(
-        "[cl_japanese2json] LLM validation failed for batch %d; retrying %d unresolved text segment(s) once: %s",
-        batch_index + 1,
-        len(retry_records),
-        first_error,
+        retry_number += 1
+        retry_limit = "unlimited" if retry_max == -1 else str(retry_max)
+        LOGGER.warning(
+            "[cl_japanese2json] LLM validation failed for batch %d; "
+            "retry %d/%s for %d unresolved text segment(s) with a new seed: %s",
+            batch_index + 1,
+            retry_number,
+            retry_limit,
+            len(unresolved_indices),
+            last_error,
+        )
+
+    raise TranslationError(
+        f"Batch {batch_index + 1} ended without validated translations"
     )
-    retry_seed = _normalize_seed(seed + batch_index + 1_000_003)
-    retry_event: dict[str, Any] | None = None
-    try:
-        retry_messages = _messages(
-            system_prompt,
-            retry_stream,
-            retry_reason=str(first_error),
-        )
-        retry_event = _start_debug_event(
-            debug_events,
-            batch_index=batch_index,
-            attempt=2,
-            stream=retry_stream,
-            messages=retry_messages,
-        )
-        response = _call_llm(
-            llm,
-            retry_messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            seed=retry_seed,
-            stop_token=retry_stream.stop_token,
-        )
-        _capture_debug_response(retry_event, response)
-        retry_content = _content_from_response(response)
-        retry_translated_values = _parse_stream_text_values(
-            retry_content, retry_stream
-        )
-        retry_values: list[str] = []
-        for stream_record, translated in zip(
-            retry_stream.records, retry_translated_values
-        ):
-            try:
-                value = _validate_stream_record_text(
-                    stream_record, translated, retry_stream.protected_tokens
-                )
-            except TranslationError:
-                value = _repair_retry_dialogue_placeholders(
-                    stream_record, translated, retry_stream.protected_tokens
-                )
-                if value is None:
-                    raise
-            retry_values.append(value)
-        _set_debug_result(retry_event, "validated")
-    except TranslationError as exc:
-        _set_debug_result(retry_event, exc)
-        raise TranslationError(
-            f"Batch {batch_index + 1} failed validation after one retry: {exc}"
-        ) from first_error
-
-    for index, value in zip(retry_indices, retry_values):
-        validated[index] = value
-    if any(value is None for value in validated):
-        raise TranslationError(
-            f"Batch {batch_index + 1} retry did not resolve every failed record"
-        )
-    return [value for value in validated if value is not None]
 
 
 def _rebuild(document: LexicalDocument) -> str:
@@ -1230,9 +1226,17 @@ def translate_markdown(
     top_p: float = 0.9,
     repetition_penalty: float = 1.05,
     seed: int = 1,
+    retry_max: int = 1,
     debug_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """Translate Japanese bullet payloads and rebuild canonical Markdown."""
+
+    if (
+        not isinstance(retry_max, int)
+        or isinstance(retry_max, bool)
+        or retry_max < -1
+    ):
+        raise TranslationError("retry_max must be -1 or a non-negative integer")
 
     document = lex_japanese_markdown(plain_text)
     records = document.records
@@ -1259,6 +1263,7 @@ def translate_markdown(
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
                 seed=seed,
+                retry_max=retry_max,
                 batch_index=batch_index,
                 debug_events=debug_events,
             )

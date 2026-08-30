@@ -31,6 +31,7 @@ def arguments(**overrides):
         "seed": 1,
         "keep_last_prompt": False,
         "steps": 8,
+        "retry_max": 3,
     }
     values.update(overrides)
     return values
@@ -46,7 +47,7 @@ class NodeIntegrationTests(unittest.TestCase):
         self.assertEqual(cls.FUNCTION, "compile_json")
         self.assertFalse(cls.OUTPUT_NODE)
 
-    def test_input_types_have_all_sixteen_required_inputs_in_order(self) -> None:
+    def test_input_types_have_all_seventeen_required_inputs_in_order(self) -> None:
         with patch.object(
             nodes.CLJapaneseToJSONGGUF,
             "discover_model_names",
@@ -73,11 +74,14 @@ class NodeIntegrationTests(unittest.TestCase):
                 "seed",
                 "keep_last_prompt",
                 "steps",
+                "retry_max",
             ],
         )
         self.assertEqual(required["model_name"][1]["default"], "model.gguf")
         self.assertEqual(required["op_offload"][0], "BOOLEAN")
         self.assertEqual(required["steps"][1]["default"], 8)
+        self.assertEqual(required["retry_max"][1]["default"], 3)
+        self.assertEqual(required["retry_max"][1]["min"], -1)
         self.assertEqual(
             input_types["optional"]["save_debug_output"][1]["default"], False
         )
@@ -113,6 +117,22 @@ class NodeIntegrationTests(unittest.TestCase):
             ):
                 result = node.compile_json(**arguments(steps=12))
             self.assertEqual(json.loads(result[0])["defaults"]["steps"], 12)
+
+    def test_retry_max_is_forwarded_and_default_allows_three_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "model.gguf"
+            model.write_bytes(b"x")
+            node = nodes.CLJapaneseToJSONGGUF()
+            backend = FakeBackend(["bad 1", "bad 2", "bad 3"])
+            node._backend = backend
+            with patch.object(
+                nodes, "resolve_model_name", return_value=model
+            ), patch.object(nodes, "load_system_prompt", return_value="system"):
+                result = node.compile_json(**arguments())
+
+            self.assertEqual(json.loads(result[0])["shots"][0]["id"], "scene_1")
+            self.assertEqual(len(backend.calls), 4)
+            self.assertEqual(len({call["seed"] for call in backend.calls}), 4)
 
     def test_keep_last_with_history_bypasses_all_current_inputs(self) -> None:
         node = nodes.CLJapaneseToJSONGGUF()
@@ -176,7 +196,7 @@ class NodeIntegrationTests(unittest.TestCase):
             with patch.object(nodes, "resolve_model_name", return_value=model), patch.object(
                 nodes, "load_system_prompt", return_value="system"
             ), self.assertRaises(errors.TranslationError):
-                node.compile_json(**arguments())
+                node.compile_json(**arguments(retry_max=1))
             self.assertIsNone(backend.llm)
             self.assertEqual(node.last_json_text, "old-valid-json\n")
 
@@ -195,7 +215,9 @@ class NodeIntegrationTests(unittest.TestCase):
             ), patch.object(
                 nodes, "save_debug_bundle", return_value=debug_path
             ) as save, self.assertRaises(errors.TranslationError):
-                node.compile_json(**arguments(save_debug_output=True))
+                node.compile_json(
+                    **arguments(save_debug_output=True, retry_max=1)
+                )
             saved = save.call_args.kwargs
             self.assertEqual(saved["plain_text"], arguments()["plain_text"])
             self.assertIsInstance(saved["error"], errors.TranslationError)
@@ -270,6 +292,9 @@ class NodeIntegrationTests(unittest.TestCase):
             {"seed": 0},
             {"steps": 0},
             {"steps": True},
+            {"retry_max": -2},
+            {"retry_max": 101},
+            {"retry_max": True},
             {"save_debug_output": 1},
         ]
         for override in bad_values:

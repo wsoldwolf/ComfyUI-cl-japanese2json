@@ -628,3 +628,111 @@ class LLMJ2ETests(unittest.TestCase):
         )
         self.assertEqual(len(llm.calls), 2)
         self.assertNotEqual(llm.calls[0]["seed"], llm.calls[1]["seed"])
+
+    def test_retry_max_allows_multiple_retries_with_distinct_seeds(self) -> None:
+        llm = FakeLLM(["invalid first", "invalid second", "invalid third"])
+        output = llmj2e.translate_markdown(
+            "# シーン\n* 動作。",
+            llm,
+            "sys",
+            max_tokens=64,
+            seed=17,
+            retry_max=3,
+        )
+        self.assertIn("# Scene", output)
+        self.assertEqual(len(llm.calls), 4)
+        self.assertEqual(
+            [call["seed"] for call in llm.calls],
+            [17, 1_000_020, 2_000_023, 3_000_026],
+        )
+
+    def test_retry_max_zero_disables_retries(self) -> None:
+        llm = FakeLLM(["invalid"])
+        with self.assertRaisesRegex(errors.TranslationError, "retry_max=0"):
+            llmj2e.translate_markdown(
+                "# シーン\n* 動作。",
+                llm,
+                "sys",
+                max_tokens=64,
+                retry_max=0,
+            )
+        self.assertEqual(len(llm.calls), 1)
+
+    def test_retry_max_minus_one_retries_until_success(self) -> None:
+        llm = FakeLLM(["bad 1", "bad 2", "bad 3", "bad 4"])
+        output = llmj2e.translate_markdown(
+            "# シーン\n* 動作。",
+            llm,
+            "sys",
+            max_tokens=64,
+            retry_max=-1,
+        )
+        self.assertIn("# Scene", output)
+        self.assertEqual(len(llm.calls), 5)
+        self.assertEqual(len({call["seed"] for call in llm.calls}), 5)
+
+    def test_unlimited_retry_does_not_swallow_backend_errors(self) -> None:
+        def backend_error(_):
+            raise RuntimeError("backend interrupted")
+
+        llm = FakeLLM([backend_error])
+        with self.assertRaisesRegex(RuntimeError, "backend interrupted"):
+            llmj2e.translate_markdown(
+                "# シーン\n* 動作。",
+                llm,
+                "sys",
+                max_tokens=64,
+                retry_max=-1,
+            )
+        self.assertEqual(len(llm.calls), 1)
+
+    def test_each_retry_keeps_successes_and_sends_only_unresolved_records(self) -> None:
+        def fail_both(kwargs):
+            return default_stream_translation(
+                kwargs["messages"],
+                transform=lambda _: "English without a protected placeholder.",
+            )
+
+        def resolve_first_only(kwargs):
+            def transform(record):
+                if record["id"] == "R000002":
+                    return "English without a protected placeholder."
+                return default_translation(record)
+
+            return default_stream_translation(kwargs["messages"], transform=transform)
+
+        source = (
+            "# シーン\n"
+            "* <Subject 1>が動く。\n"
+            "* <Subject 2>が止まる。"
+        )
+        llm = FakeLLM([fail_both, resolve_first_only])
+        output = llmj2e.translate_markdown(
+            source, llm, "sys", max_tokens=128, retry_max=2
+        )
+
+        self.assertEqual(output.count("* "), 2)
+        self.assertEqual(len(llm.calls), 3)
+        self.assertEqual(
+            [record["id"] for record in request_records(llm.calls[1]["messages"])],
+            ["R000001", "R000002"],
+        )
+        self.assertEqual(
+            [record["id"] for record in request_records(llm.calls[2]["messages"])],
+            ["R000002"],
+        )
+
+    def test_invalid_retry_max_is_rejected_before_inference(self) -> None:
+        for invalid in (-2, True, 1.5):
+            llm = FakeLLM()
+            with self.subTest(invalid=invalid), self.assertRaises(
+                errors.TranslationError
+            ):
+                llmj2e.translate_markdown(
+                    "# シーン\n* 動作。",
+                    llm,
+                    "sys",
+                    max_tokens=64,
+                    retry_max=invalid,
+                )
+            self.assertEqual(llm.calls, [])
