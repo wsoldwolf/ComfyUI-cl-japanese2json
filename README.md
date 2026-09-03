@@ -14,6 +14,39 @@ LLMは箇条書き本文の日本語からUS Englishへの翻訳だけを担当�
 
 `llama-cpp-python` が未導入でもカスタムノードのimportと登録は行えます。ノード実行時に手動導入を案内するエラーになります。
 
+## Windows: llama-cpp-python の必須ビルド
+
+Windowsでこのノードを使用する前に、ComfyUIが使用する仮想環境へCUDA対応の `llama-cpp-python` wheelを**必ず手動ビルドして導入**してください。本ノードは、この処理を自動実行しません。
+
+以下はCUDA 13.0、Visual Studio 2022、RTX 4070 Ti（Compute Capability 8.9）およびRTX 5090（12.0）向けの例です。`GGML_NATIVE=OFF` とAVX-512無効化により、9950Xでビルドしたwheelを5900XTのようなAVX-512非対応CPUへ持ち込んだ場合にも動作する、移植可能なCPUバックエンドを生成します。
+
+「x64 Native Tools Command Prompt for VS 2022」で実行してください。
+
+```bat
+cd /d C:\Software\ComfyUI
+venv\Scripts\activate
+
+set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0"
+set "PATH=%CUDA_PATH%\bin;%CUDA_PATH%\lib\x64;%PATH%"
+
+set "CMAKE_GENERATOR=Visual Studio 17 2022"
+set "CMAKE_GENERATOR_PLATFORM=x64"
+set "CMAKE_ARGS=-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89;120 -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF -DGGML_AMX_TILE=OFF -DGGML_AMX_INT8=OFF -DGGML_AMX_BF16=OFF"
+set "FORCE_CMAKE=1"
+
+python -m pip install --upgrade pip setuptools wheel
+
+if not exist dist mkdir dist
+python -m pip -vvv wheel "llama-cpp-python==0.3.34" --no-deps --no-cache-dir --no-binary=llama-cpp-python -w dist
+python -m pip install --force-reinstall --no-deps dist\llama_cpp_python-0.3.34-*.whl
+```
+
+ビルド後は、次のコマンドでCUDAバックエンドとCPU機能を確認できます。
+
+```bat
+python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama_print_system_info().decode())"
+```
+
 ## 導入
 
 1. このディレクトリ全体を次の位置へ配置します。
