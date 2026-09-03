@@ -10,16 +10,27 @@ errors = module("compiler.errors")
 
 
 CANONICAL = """# Subjects
-* a person.
+* a person from <Picture 1>.
 
-# Common
-* Common setting.
+# Retention
+* <Subject 1> fully_preserved: Preserve the defined appearance.
 
 # Scene 8sec
-* Action one.
+* A clean anime style.
+
+## Shot
+* <Subject 1> acts.
+
+## Shot 3.25sec
+* <Subject 1> stops.
+
+## Soundscape
+* Environment: Soft wind.
+* Vocalization: NONE
 
 # Scene 5sec CONTINUE
-* Action two."""
+## Shot
+* An effect fades."""
 
 
 class MarkdownParserTests(unittest.TestCase):
@@ -29,61 +40,66 @@ class MarkdownParserTests(unittest.TestCase):
         self.assertEqual(lf, crlf)
         self.assertEqual(len(lf.scenes), 2)
 
-    def test_blank_runs_and_directive_without_blank_transition(self) -> None:
-        text = "# Subjects\n* one.\n\n\n\n# Common\n* common.\n# Scene\n* shot."
-        emd = parse_markdown(text)
-        self.assertEqual(emd.subjects, ["one."])
-        self.assertEqual(emd.common_prompt, ["common."])
-        self.assertEqual(emd.scenes[0].shots, ["shot."])
+    def test_new_structure_is_stored_without_modifying_payloads(self) -> None:
+        emd = parse_markdown(CANONICAL)
+        self.assertEqual(emd.subjects, ["a person from <Picture 1>."])
+        self.assertEqual(len(emd.retention_rules), 1)
+        rule = emd.retention_rules[0]
+        self.assertEqual(rule.subject_number, 1)
+        self.assertEqual(rule.relationship, "fully_preserved")
+        self.assertEqual(emd.scenes[0].preamble, ["A clean anime style."])
+        self.assertEqual([shot.start_ms for shot in emd.scenes[0].shots], [0, 3250])
+        self.assertEqual(emd.scenes[0].shots[0].lines, ["<Subject 1> acts."])
 
-    def test_repeated_sections_append(self) -> None:
-        text = (
-            "# Common\n* a\n# Subjects\n* s1.\n# Scene\n* x\n"
-            "# Subjects\n* s2.\n# Common\n* b\n# Scene 2sec CONTINUE\n* y"
+    def test_attribute_transfer_requires_a_different_target(self) -> None:
+        valid = parse_markdown(
+            "# Subjects\n* one.\n* two.\n# Retention\n"
+            "* <Subject 1> attribute_transfer -> <Subject 2>: Transfer style.\n"
+            "# Scene\n## Shot\n* <Subject 1> affects <Subject 2>."
         )
-        emd = parse_markdown(text)
-        self.assertEqual(emd.common_prompt, ["a", "b"])
-        self.assertEqual(emd.subjects, ["s1.", "s2."])
-        self.assertEqual([scene.duration for scene in emd.scenes], [5, 2])
-        self.assertTrue(emd.scenes[1].is_continue)
+        self.assertEqual(valid.retention_rules[0].target_subject_number, 2)
+        for line in (
+            "* <Subject 1> attribute_transfer: Missing target.",
+            "* <Subject 1> attribute_transfer -> <Subject 1>: Same target.",
+            "* <Subject 1> fully_preserved -> <Subject 2>: Invalid target.",
+        ):
+            with self.subTest(line=line), self.assertRaises(errors.MarkdownParseError):
+                parse_markdown(
+                    f"# Subjects\n* one.\n* two.\n# Retention\n{line}\n"
+                    "# Scene\n## Shot\n* action."
+                )
 
-    def test_scene_one_continue_is_reset(self) -> None:
+    def test_scene_one_continue_is_reset_unless_external_context_exists(self) -> None:
+        source = "# Scene CONTINUE\n## Shot\n* action."
         with self.assertLogs("cl_japanese2json", level="WARNING"):
-            emd = parse_markdown("# Scene CONTINUE\n* x")
-        self.assertFalse(emd.scenes[0].is_continue)
-
-    def test_external_scene_one_continue_is_retained(self) -> None:
-        emd = parse_markdown(
-            "# Scene CONTINUE\n* x", external_first_context=True
-        )
-        self.assertTrue(emd.scenes[0].is_continue)
+            local = parse_markdown(source)
+        external = parse_markdown(source, external_first_context=True)
+        self.assertFalse(local.scenes[0].is_continue)
+        self.assertTrue(external.scenes[0].is_continue)
 
     def test_defensive_invalid_durations_fall_back(self) -> None:
         for value in ("0", "61", "abc"):
             with self.subTest(value=value), self.assertLogs(
                 "cl_japanese2json", level="WARNING"
             ):
-                emd = parse_markdown(f"# Scene {value}sec\n* x")
+                emd = parse_markdown(f"# Scene {value}sec\n## Shot\n* action.")
             self.assertEqual(emd.scenes[0].duration, 5)
 
-    def test_payload_is_not_modified(self) -> None:
-        body = r"<d>[Japanese]\<x\></d> punctuation  "
-        emd = parse_markdown(f"# Scene\n* {body}")
-        self.assertEqual(emd.scenes[0].shots[0], body)
-
-    def test_fifth_subject_and_unknown_lines_warn_but_continue(self) -> None:
-        text = (
-            "# Subjects\n* 1.\n* 2.\n* 3.\n* 4.\n* 5.\n"
-            "not a bullet\n# Unknown\nignored\n# Scene\n* shot"
+    def test_shot_times_are_strict_and_within_scene(self) -> None:
+        invalid = (
+            "# Scene 5sec\n## Shot 1sec\n* action.",
+            "# Scene 5sec\n## Shot\n* a.\n## Shot\n* b.",
+            "# Scene 5sec\n## Shot\n* a.\n## Shot 5sec\n* b.",
+            "# Scene 5sec\n## Shot\n* a.\n## Shot 3sec\n* b.\n## Shot 2sec\n* c.",
+            "# Scene 5sec\n## Shot\n## Soundscape\n* Environment: Wind.",
         )
-        with self.assertLogs("cl_japanese2json", level="WARNING"):
-            emd = parse_markdown(text)
-        self.assertEqual(len(emd.subjects), 5)
-        self.assertEqual(len(emd.scenes), 1)
+        for text in invalid:
+            with self.subTest(text=text), self.assertRaises(errors.MarkdownParseError):
+                parse_markdown(text)
 
-    def test_scene_soundscape_is_stored_on_scene_across_blank_line(self) -> None:
+    def test_soundscape_is_scene_local_and_follows_shots(self) -> None:
         emd = parse_markdown(
-            "# Scene 5sec\n* Action.\n\n## Soundscape\n"
+            "# Scene 5sec\n## Shot\n* Action.\n\n## Soundscape\n"
             "* Environment: Soft wind.\n"
             "* Sound effects: Footsteps.\n"
             "* Vocalization: NONE"
@@ -92,17 +108,27 @@ class MarkdownParserTests(unittest.TestCase):
         self.assertEqual(soundscape.environment, "Soft wind.")
         self.assertEqual(soundscape.sound_effects, "Footsteps.")
         self.assertEqual(soundscape.vocalization, "NONE")
-        self.assertEqual(emd.scenes[0].shots, ["Action."])
 
-    def test_soundscape_requires_scene_parent_and_unique_fields(self) -> None:
-        invalid_documents = (
-            "# Common\n* Setting.\n## Soundscape\n* Environment: Wind.",
-            "## Soundscape\n* Environment: Wind.",
-            "# Scene\n* Action.\n## Soundscape\n* Environment: Wind.\n* Environment: Rain.",
-            "# Scene\n* Action.\n## Unknown\n* Environment: Wind.",
+    def test_empty_soundscape_is_rejected(self) -> None:
+        with self.assertRaises(errors.MarkdownParseError):
+            parse_markdown("# Scene\n## Shot\n* Action.\n## Soundscape")
+
+    def test_removed_common_and_implicit_shot_syntax_are_rejected(self) -> None:
+        invalid = (
+            "# Common\n* setting.\n# Scene\n## Shot\n* action.",
+            "# Scene\n* former implicit shot.",
+            "# Scene\n## Soundscape\n* Environment: Wind.",
         )
-        for text in invalid_documents:
-            with self.subTest(text=text), self.assertRaises(
-                errors.MarkdownParseError
-            ):
+        for text in invalid:
+            with self.subTest(text=text), self.assertRaises(errors.MarkdownParseError):
+                parse_markdown(text)
+
+    def test_duplicate_or_misordered_top_level_sections_are_rejected(self) -> None:
+        invalid = (
+            "# Subjects\n* one.\n# Subjects\n* two.\n# Scene\n## Shot\n* x.",
+            "# Scene\n## Shot\n* x.\n# Retention\n* <Subject 1> fully_preserved: x.",
+            "# Retention\n* <Subject 1> fully_preserved: x.\n# Retention\n* <Subject 2> fully_preserved: y.\n# Scene\n## Shot\n* x.",
+        )
+        for text in invalid:
+            with self.subTest(text=text), self.assertRaises(errors.MarkdownParseError):
                 parse_markdown(text)

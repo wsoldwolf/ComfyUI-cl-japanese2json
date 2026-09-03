@@ -1,27 +1,37 @@
-"""Strict MiniMax H3 Contex-Loop Plan JSON generation."""
+"""Strict MiniMax H3 full-reference Contex-Loop Plan JSON generation."""
 
 from __future__ import annotations
 
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Iterable
 
 from .errors import JSONGenerationError, JSONValidationError, ProtectedTextError
 from .protected_text import remove_direct_speech
 from .structures import (
     Emd,
+    RETENTION_ATTRIBUTE_TRANSFER,
+    RETENTION_FULLY_PRESERVED,
+    RETENTION_RELATIONSHIPS,
     SOUND_NONE,
     VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
+    RetentionRule,
     Scene,
+    Shot,
     Soundscape,
 )
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
+
 SUBJECT_RE = re.compile(r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>")
 AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
 DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
+SPEAKER_ID_RE = re.compile(r"(?<!\\)\(S([1-9][0-9]*)\)")
+SPEAKER_PAIR_RE = re.compile(
+    r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>[ \t]*\(S([1-9][0-9]*)\)"
+)
 SPEECH_CUE_RE = re.compile(
     r"\b(?:say|says|said|saying|speak|speaks|spoke|spoken|speaking|"
     r"talk|talks|talked|talking|utter|utters|uttered|uttering|"
@@ -58,39 +68,112 @@ AUDIO_INTRO_PATTERNS = tuple(
         r"\b(?:an?\s+)?(?:voice|audio)(?:\s+quality)?(?:\s+(?:reference|source))?[^,;]*$",
     )
 )
-NON_DIEGETIC_MUSIC = "non_diegetic_music:\nN/A"
+
+SUBJECT_DEFINITIONS_PREFIX = "subject_definitions:\n"
+SUMMARY_PREFIX = "summary:\n"
+RETENTION_ANALYSIS_PREFIX = "retention_analysis:\n"
+DETAILED_DESCRIPTION_PREFIX = "detailed_description:\n"
 OVERALL_SOUNDSCAPE_PREFIX = "overall_soundscape:\n"
+NON_DIEGETIC_MUSIC = "non_diegetic_music:\nN/A"
 COMPLETE_SILENCE = OVERALL_SOUNDSCAPE_PREFIX + "Complete silence."
 NO_ACTIVE_SUBJECT_BLOCK = (
-    "subject_definitions:\n"
-    "No character subject or reference-image person is active."
+    SUBJECT_DEFINITIONS_PREFIX
+    + "No character subject or reference-image person is active."
 )
+NO_ACTIVE_RETENTION = (
+    RETENTION_ANALYSIS_PREFIX + "No reference labels are active in this scene."
+)
+
+
+def _scene_lines(scene: Scene) -> Iterable[str]:
+    yield from scene.preamble
+    for shot in scene.shots:
+        yield from shot.lines
+
+
+def _searchable(value: str, *, context: str) -> str:
+    try:
+        return remove_direct_speech(value)
+    except ProtectedTextError as exc:
+        raise JSONGenerationError(f"Invalid direct-speech tag in {context}") from exc
 
 
 def _referenced_subjects(scene: Scene) -> list[int]:
     referenced: set[int] = set()
-    for shot in scene.shots:
-        try:
-            searchable = remove_direct_speech(shot)
-        except ProtectedTextError as exc:
-            raise JSONGenerationError("Invalid direct-speech tag in scene shot") from exc
+    for line in _scene_lines(scene):
+        searchable = _searchable(line, context="scene description")
         referenced.update(int(match.group(1)) for match in SUBJECT_RE.finditer(searchable))
     return sorted(referenced)
 
 
+def _shot_subject_locations(scene: Scene, subject_number: int) -> list[int]:
+    locations: list[int] = []
+    for shot_number, shot in enumerate(scene.shots, start=1):
+        if any(
+            any(int(match.group(1)) == subject_number for match in SUBJECT_RE.finditer(
+                _searchable(line, context=f"Shot {shot_number}")
+            ))
+            for line in shot.lines
+        ):
+            locations.append(shot_number)
+    return locations
+
+
 def _scene_requests_speech(scene: Scene) -> bool:
-    for shot in scene.shots:
-        if DIRECT_SPEECH_RE.search(shot):
+    for line in _scene_lines(scene):
+        if DIRECT_SPEECH_RE.search(line):
             return True
-        for match in SPEECH_CUE_RE.finditer(shot):
-            prefix = shot[max(0, match.start() - 80):match.start()]
+        for match in SPEECH_CUE_RE.finditer(line):
+            prefix = line[max(0, match.start() - 80):match.start()]
             if not NEGATED_SPEECH_PREFIX_RE.search(prefix):
                 return True
     return False
 
 
 def _scene_has_direct_speech(scene: Scene) -> bool:
-    return any(DIRECT_SPEECH_RE.search(shot) is not None for shot in scene.shots)
+    return any(DIRECT_SPEECH_RE.search(line) is not None for line in _scene_lines(scene))
+
+
+def _validate_scene_structure(scene: Scene, scene_number: int) -> None:
+    if not isinstance(scene.duration, int) or isinstance(scene.duration, bool):
+        raise JSONGenerationError(f"Scene {scene_number} duration must be an integer")
+    if not 1 <= scene.duration <= 60:
+        raise JSONGenerationError(
+            f"Scene {scene_number} duration is outside 1-60 seconds"
+        )
+    if not scene.shots:
+        raise JSONGenerationError(f"Scene {scene_number} must contain at least one Shot")
+    previous_start = -1
+    for shot_number, shot in enumerate(scene.shots, start=1):
+        if not isinstance(shot, Shot):
+            raise JSONGenerationError(
+                f"Scene {scene_number} Shot {shot_number} must be a Shot value"
+            )
+        if not isinstance(shot.start_ms, int) or isinstance(shot.start_ms, bool):
+            raise JSONGenerationError(
+                f"Scene {scene_number} Shot {shot_number} start_ms must be an integer"
+            )
+        if shot_number == 1 and shot.start_ms != 0:
+            raise JSONGenerationError(
+                f"Scene {scene_number} first Shot must start at 0 milliseconds"
+            )
+        if shot.start_ms <= previous_start or shot.start_ms >= scene.duration * 1000:
+            raise JSONGenerationError(
+                f"Scene {scene_number} Shot {shot_number} has an invalid start time"
+            )
+        if not shot.lines or any(not isinstance(line, str) or not line.strip() for line in shot.lines):
+            raise JSONGenerationError(
+                f"Scene {scene_number} Shot {shot_number} must contain non-empty text"
+            )
+        previous_start = shot.start_ms
+    if any(not isinstance(line, str) or not line.strip() for line in scene.preamble):
+        raise JSONGenerationError(
+            f"Scene {scene_number} preamble must contain only non-empty strings"
+        )
+    if any(DIRECT_SPEECH_RE.search(line) for line in scene.preamble):
+        raise JSONGenerationError(
+            f"Scene {scene_number} direct speech must be written inside a Shot"
+        )
 
 
 def _validate_soundscape(soundscape: Soundscape, *, context: str) -> None:
@@ -115,6 +198,15 @@ def _scene_allows_dialogue(scene: Scene, scene_number: int) -> bool:
     requests_speech = _scene_requests_speech(scene)
     has_direct_speech = _scene_has_direct_speech(scene)
 
+    for line_number, line in enumerate(_scene_lines(scene), start=1):
+        has_line_dialogue = DIRECT_SPEECH_RE.search(line) is not None
+        for match in SPEECH_CUE_RE.finditer(line):
+            prefix = line[max(0, match.start() - 80):match.start()]
+            if not NEGATED_SPEECH_PREFIX_RE.search(prefix) and not has_line_dialogue:
+                raise JSONGenerationError(
+                    f"Scene {scene_number} line {line_number} contains a speech instruction without protected direct speech"
+                )
+
     if mode == VOCALIZATION_EXPLICIT_DIALOGUE_ONLY:
         if not has_direct_speech:
             raise JSONGenerationError(
@@ -131,6 +223,68 @@ def _scene_allows_dialogue(scene: Scene, scene_number: int) -> bool:
             "add '* 発声: 指定台詞のみ' under '## 音響'"
         )
     return False
+
+
+def _speaker_bindings(emd: Emd) -> tuple[dict[int, int], list[dict[int, int]]]:
+    subject_to_speaker: dict[int, int] = {}
+    speaker_to_subject: dict[int, int] = {}
+    scene_bindings: list[dict[int, int]] = []
+    next_new_speaker = 1
+
+    for scene_number, scene in enumerate(emd.scenes, start=1):
+        current_scene: dict[int, int] = {}
+        for shot_number, shot in enumerate(scene.shots, start=1):
+            for line_number, line in enumerate(shot.lines, start=1):
+                dialogues = list(DIRECT_SPEECH_RE.finditer(line))
+                pairs = list(SPEAKER_PAIR_RE.finditer(line))
+                speaker_ids = list(SPEAKER_ID_RE.finditer(line))
+                for speaker in speaker_ids:
+                    # SPEAKER_PAIR_RE captures only the digits, while SPEAKER_ID_RE
+                    # spans the complete marker. Compare values and containment.
+                    if not any(
+                        pair.start() <= speaker.start() and speaker.end() <= pair.end()
+                        for pair in pairs
+                    ):
+                        raise JSONGenerationError(
+                            f"Scene {scene_number} Shot {shot_number} line {line_number} has a speaker ID that is not immediately paired with <Subject N>"
+                        )
+                if not dialogues:
+                    if speaker_ids:
+                        raise JSONGenerationError(
+                            f"Scene {scene_number} Shot {shot_number} line {line_number} uses a speaker ID without direct speech"
+                        )
+                    continue
+
+                for dialogue in dialogues:
+                    preceding = [pair for pair in pairs if pair.end() <= dialogue.start()]
+                    if not preceding:
+                        raise JSONGenerationError(
+                            f"Scene {scene_number} Shot {shot_number} line {line_number} direct speech requires '<Subject N> (Sx)' before the dialogue"
+                        )
+                    pair = preceding[-1]
+                    subject = int(pair.group(1))
+                    speaker = int(pair.group(2))
+                    existing_speaker = subject_to_speaker.get(subject)
+                    if existing_speaker is not None and existing_speaker != speaker:
+                        raise JSONGenerationError(
+                            f"<Subject {subject}> is assigned to both (S{existing_speaker}) and (S{speaker})"
+                        )
+                    existing_subject = speaker_to_subject.get(speaker)
+                    if existing_subject is not None and existing_subject != subject:
+                        raise JSONGenerationError(
+                            f"(S{speaker}) is assigned to both <Subject {existing_subject}> and <Subject {subject}>"
+                        )
+                    if existing_speaker is None:
+                        if speaker != next_new_speaker:
+                            raise JSONGenerationError(
+                                f"New speaker IDs must follow first-vocal-event order; expected (S{next_new_speaker}), got (S{speaker})"
+                            )
+                        subject_to_speaker[subject] = speaker
+                        speaker_to_subject[speaker] = subject
+                        next_new_speaker += 1
+                    current_scene[subject] = speaker
+        scene_bindings.append(current_scene)
+    return subject_to_speaker, scene_bindings
 
 
 def _sentence(value: str) -> str:
@@ -214,68 +368,288 @@ def _without_audio_references(definition: str) -> str:
     return result.rstrip(".!?") + "."
 
 
+def _active_audio_bindings(
+    emd: Emd,
+    scene_number: int,
+    active_subjects: list[int],
+    scene_speakers: dict[int, int],
+    *,
+    allows_dialogue: bool,
+) -> dict[int, tuple[int, int]]:
+    if not allows_dialogue:
+        return {}
+    bindings: dict[int, tuple[int, int]] = {}
+    for subject in active_subjects:
+        speaker = scene_speakers.get(subject)
+        if speaker is None:
+            continue
+        definition = emd.subjects[subject - 1]
+        for match in AUDIO_REFERENCE_RE.finditer(definition):
+            audio = int(match.group(1))
+            previous = bindings.get(audio)
+            if previous is not None and previous != (subject, speaker):
+                raise JSONGenerationError(
+                    f"Scene {scene_number} maps <Audio {audio}> to multiple speakers"
+                )
+            bindings[audio] = (subject, speaker)
+    return bindings
+
+
 def _subject_block(
     emd: Emd,
-    scene: Scene,
     scene_number: int,
-    *,
-    keep_audio_references: bool,
+    active_subjects: list[int],
+    active_audio: dict[int, tuple[int, int]],
 ) -> str:
-    referenced_subjects = _referenced_subjects(scene)
-    if not referenced_subjects:
+    if not active_subjects:
         return NO_ACTIVE_SUBJECT_BLOCK
 
     definitions: list[str] = []
-    removed_audio_references = 0
-    for number in referenced_subjects:
+    for number in active_subjects:
         if number > len(emd.subjects):
-            LOGGER.warning(
-                "[cl_japanese2json] Scene %d references undefined <Subject %d>; definition skipped",
-                scene_number,
-                number,
+            raise JSONGenerationError(
+                f"Scene {scene_number} references undefined <Subject {number}>"
             )
-            continue
-        definition = emd.subjects[number - 1]
-        if not keep_audio_references:
-            removed_audio_references += len(AUDIO_REFERENCE_RE.findall(definition))
-            definition = _without_audio_references(definition)
+        definition = _without_audio_references(emd.subjects[number - 1])
         definitions.append(f"<Subject {number}> is {definition}")
+    for audio, (subject, speaker) in sorted(active_audio.items()):
+        definitions.append(
+            f"<Audio {audio}> is the voice-timbre reference for "
+            f"<Subject {subject}> (S{speaker})."
+        )
+    return SUBJECT_DEFINITIONS_PREFIX + "\n".join(definitions)
 
-    if removed_audio_references:
-        LOGGER.info(
-            "[cl_japanese2json] Scene %d has no speech instruction; removed %d Audio reference(s) from subject definitions",
-            scene_number,
-            removed_audio_references,
+
+def _summary_block(
+    scene: Scene,
+    active_subjects: list[int],
+    active_audio: dict[int, tuple[int, int]],
+) -> str:
+    task_types = ["reference generation"]
+    if active_audio:
+        task_types.append("audio reference")
+    prefix = "[" + " + ".join(task_types) + "]"
+    if active_subjects:
+        labels = [f"<Subject {number}>" for number in active_subjects]
+        if len(labels) == 1:
+            subject_text = labels[0]
+        elif len(labels) == 2:
+            subject_text = f"{labels[0]} and {labels[1]}"
+        else:
+            subject_text = ", ".join(labels[:-1]) + f", and {labels[-1]}"
+        body = (
+            f"The target video uses {subject_text} in a "
+            f"{len(scene.shots)}-shot scene."
+        )
+    else:
+        body = (
+            "The target video is an effects-only scene with no active character "
+            "subject or reference-image person."
+        )
+    if scene.is_continue:
+        body += " The scene continues the preceding generated scene."
+    if active_audio:
+        audio_labels = ", ".join(f"<Audio {number}>" for number in sorted(active_audio))
+        body += (
+            f" {audio_labels} is referenced only for the explicitly specified dialogue."
+            if len(active_audio) == 1
+            else f" {audio_labels} are referenced only for the explicitly specified dialogue."
+        )
+    return SUMMARY_PREFIX + prefix + " " + body
+
+
+def _shot_list_text(numbers: list[int]) -> str:
+    return ", ".join(f"[Shot {number}]" for number in numbers)
+
+
+def _retention_block(
+    emd: Emd,
+    scene: Scene,
+    active_subjects: list[int],
+    active_audio: dict[int, tuple[int, int]],
+) -> str:
+    if not active_subjects and not active_audio:
+        return NO_ACTIVE_RETENTION
+
+    rules = {rule.subject_number: rule for rule in emd.retention_rules}
+    lines: list[str] = []
+    active_set = set(active_subjects)
+    for subject in active_subjects:
+        rule = rules.get(subject)
+        if rule is None:
+            rule = RetentionRule(
+                subject,
+                RETENTION_FULLY_PRESERVED,
+                "the defined identity and visual characteristics are preserved.",
+            )
+        if rule.relationship not in RETENTION_RELATIONSHIPS:
+            raise JSONGenerationError(
+                f"<Subject {subject}> has an invalid retention relationship"
+            )
+        locations = _shot_subject_locations(scene, subject)
+        if rule.relationship == RETENTION_ATTRIBUTE_TRANSFER:
+            target = rule.target_subject_number
+            if target is None or target not in active_set:
+                raise JSONGenerationError(
+                    f"Active attribute-transfer source <Subject {subject}> requires its target Subject to be active in the same scene"
+                )
+            target_locations = _shot_subject_locations(scene, target)
+            applied_locations = sorted(set(locations) | set(target_locations))
+            where = (
+                f"applied to <Subject {target}> in {_shot_list_text(applied_locations)}"
+                if applied_locations
+                else f"applied to <Subject {target}> throughout the scene"
+            )
+        else:
+            where = (
+                f"used in {_shot_list_text(locations)}"
+                if locations
+                else "applies throughout the scene"
+            )
+        lines.append(
+            f"<Subject {subject}> ({where}): {rule.relationship} - "
+            f"{_sentence(rule.description)}"
         )
 
-    block = "subject_definitions:"
-    if definitions:
-        block += "\n" + "\n".join(definitions)
-    return block
+    for audio, (subject, _speaker) in sorted(active_audio.items()):
+        lines.append(
+            f"<Audio {audio}>: reference - only the voice timbre and delivery are "
+            f"referenced for <Subject {subject}>; the source signal and "
+            "its original speech are not copied."
+        )
+    return RETENTION_ANALYSIS_PREFIX + "\n".join(lines)
 
 
-def _shot_object(emd: Emd, scene: Scene, index: int) -> dict[str, Any]:
-    if not isinstance(scene.duration, int) or isinstance(scene.duration, bool):
-        raise JSONGenerationError(f"Scene {index + 1} duration must be an integer")
-    if not 1 <= scene.duration <= 60:
-        raise JSONGenerationError(f"Scene {index + 1} duration is outside 1-60 seconds")
+def _format_timestamp(milliseconds: int) -> str:
+    minutes, remainder = divmod(milliseconds, 60_000)
+    seconds, millis = divmod(remainder, 1000)
+    return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
 
-    _validate_soundscape(scene.soundscape, context=f"Scene {index + 1}")
-    allows_dialogue = _scene_allows_dialogue(scene, index + 1)
+
+def _shot_dialogue_subjects(shot: Shot) -> set[int]:
+    subjects: set[int] = set()
+    for line in shot.lines:
+        pairs = list(SPEAKER_PAIR_RE.finditer(line))
+        for dialogue in DIRECT_SPEECH_RE.finditer(line):
+            preceding = [pair for pair in pairs if pair.end() <= dialogue.start()]
+            if preceding:
+                subjects.add(int(preceding[-1].group(1)))
+    return subjects
+
+
+def _detailed_description_block(
+    scene: Scene,
+    active_audio: dict[int, tuple[int, int]],
+) -> str:
+    parts = [_sentence(line) for line in scene.preamble]
+    audio_by_subject: dict[int, list[tuple[int, int]]] = {}
+    for audio, (subject, speaker) in active_audio.items():
+        audio_by_subject.setdefault(subject, []).append((audio, speaker))
+
+    for shot_number, shot in enumerate(scene.shots, start=1):
+        body = " ".join(_sentence(line) for line in shot.lines)
+        present_audio = {
+            int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(body)
+        }
+        for subject in sorted(_shot_dialogue_subjects(shot)):
+            for audio, speaker in sorted(audio_by_subject.get(subject, [])):
+                if audio not in present_audio:
+                    body += (
+                        f" For <Subject {subject}> (S{speaker})'s explicitly specified "
+                        f"dialogue in this shot, use <Audio {audio}> only as a voice-timbre "
+                        "and delivery reference; do not copy or introduce any other speech "
+                        "from the source audio."
+                    )
+        if shot_number == 1:
+            parts.append(f"[Shot 1] {body}")
+        else:
+            parts.append(
+                f"[Shot {shot_number}] At {_format_timestamp(shot.start_ms)}, {body}"
+            )
+    return DETAILED_DESCRIPTION_PREFIX + "\n".join(parts)
+
+
+def _validate_retention_rules(emd: Emd) -> None:
+    seen: set[int] = set()
+    for rule in emd.retention_rules:
+        if not isinstance(rule, RetentionRule):
+            raise JSONGenerationError("retention_rules must contain RetentionRule values")
+        if rule.subject_number in seen:
+            raise JSONGenerationError(
+                f"Duplicate retention rule for <Subject {rule.subject_number}>"
+            )
+        seen.add(rule.subject_number)
+        if not 1 <= rule.subject_number <= len(emd.subjects):
+            raise JSONGenerationError(
+                f"Retention rule references undefined <Subject {rule.subject_number}>"
+            )
+        if rule.relationship not in RETENTION_RELATIONSHIPS:
+            raise JSONGenerationError(
+                f"Retention rule for <Subject {rule.subject_number}> has an invalid relationship"
+            )
+        if not isinstance(rule.description, str) or not rule.description.strip():
+            raise JSONGenerationError("Retention descriptions must be non-empty strings")
+        target = rule.target_subject_number
+        if rule.relationship == RETENTION_ATTRIBUTE_TRANSFER:
+            if target is None or target == rule.subject_number:
+                raise JSONGenerationError(
+                    "attribute_transfer requires a different target Subject"
+                )
+            if not 1 <= target <= len(emd.subjects):
+                raise JSONGenerationError(
+                    f"Retention rule references undefined target <Subject {target}>"
+                )
+        elif target is not None:
+            raise JSONGenerationError(
+                "Only attribute_transfer accepts a target Subject"
+            )
+
+
+def _shot_object(
+    emd: Emd,
+    scene: Scene,
+    index: int,
+    scene_speakers: dict[int, int],
+) -> dict[str, Any]:
+    scene_number = index + 1
+    _validate_scene_structure(scene, scene_number)
+    _validate_soundscape(scene.soundscape, context=f"Scene {scene_number}")
+    allows_dialogue = _scene_allows_dialogue(scene, scene_number)
+    active_subjects = _referenced_subjects(scene)
+    for subject in active_subjects:
+        if subject > len(emd.subjects):
+            raise JSONGenerationError(
+                f"Scene {scene_number} references undefined <Subject {subject}>"
+            )
+    active_audio = _active_audio_bindings(
+        emd,
+        scene_number,
+        active_subjects,
+        scene_speakers,
+        allows_dialogue=allows_dialogue,
+    )
+    detailed = _detailed_description_block(scene, active_audio)
+    detailed_audio = {
+        int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(detailed)
+    }
+    unexpected_audio = detailed_audio - set(active_audio)
+    if unexpected_audio:
+        labels = ", ".join(f"<Audio {number}>" for number in sorted(unexpected_audio))
+        raise JSONGenerationError(
+            f"Scene {scene_number} uses Audio reference(s) without an active Subject voice binding: {labels}"
+        )
+
     prompt = [
-        _subject_block(
-            emd,
-            scene,
-            index + 1,
-            keep_audio_references=allows_dialogue,
-        )
+        _subject_block(emd, scene_number, active_subjects, active_audio),
+        _summary_block(scene, active_subjects, active_audio),
+        _retention_block(emd, scene, active_subjects, active_audio),
+        detailed,
+        _overall_soundscape(scene, allows_dialogue),
+        NON_DIEGETIC_MUSIC,
     ]
-    prompt.extend(f"[Shot {shot_index + 1}] {text}" for shot_index, text in enumerate(scene.shots))
-    prompt.append(_overall_soundscape(scene, allows_dialogue))
-    prompt.append(NON_DIEGETIC_MUSIC)
 
     result: dict[str, Any] = {
-        "id": f"scene_{index + 1}",
+        "id": f"scene_{scene_number}",
         "prompt": prompt,
         "duration_seconds": scene.duration,
     }
@@ -298,10 +672,15 @@ def generate_json(emd: Emd, *, steps: int = 8) -> str:
         raise JSONGenerationError(
             f"Scene count must be between 1 and 128; got {len(emd.scenes)}"
         )
+    _validate_retention_rules(emd)
+    _, scene_speakers = _speaker_bindings(emd)
     plan = {
-        "prompt_prefix": "\n".join(emd.common_prompt),
+        "prompt_prefix": "",
         "defaults": {"duration_seconds": 5, "steps": steps},
-        "shots": [_shot_object(emd, scene, index) for index, scene in enumerate(emd.scenes)],
+        "shots": [
+            _shot_object(emd, scene, index, scene_speakers[index])
+            for index, scene in enumerate(emd.scenes)
+        ],
     }
     try:
         json_text = json.dumps(plan, ensure_ascii=False, indent=2) + "\n"
@@ -316,7 +695,7 @@ def _is_int(value: object) -> bool:
 
 
 def validate_final_json(json_text: str) -> dict[str, Any]:
-    """Validate the Contex-Loop subset returned by the node."""
+    """Validate the full-reference Contex-Loop subset returned by the node."""
 
     if not isinstance(json_text, str):
         raise JSONValidationError("Final JSON output must be a string")
@@ -328,8 +707,8 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
         raise JSONValidationError("Final output is not valid JSON") from exc
     if not isinstance(parsed, dict):
         raise JSONValidationError("Final JSON root must be an object")
-    if not isinstance(parsed.get("prompt_prefix"), str):
-        raise JSONValidationError("prompt_prefix must be a string")
+    if parsed.get("prompt_prefix") != "":
+        raise JSONValidationError("prompt_prefix must be an empty string")
 
     defaults = parsed.get("defaults")
     if not isinstance(defaults, dict):
@@ -343,6 +722,13 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
     if not isinstance(shots, list) or not 1 <= len(shots) <= 128:
         raise JSONValidationError("shots must contain between 1 and 128 entries")
     seen_ids: set[str] = set()
+    expected_prefixes = (
+        SUBJECT_DEFINITIONS_PREFIX,
+        SUMMARY_PREFIX,
+        RETENTION_ANALYSIS_PREFIX,
+        DETAILED_DESCRIPTION_PREFIX,
+        OVERALL_SOUNDSCAPE_PREFIX,
+    )
     for index, shot in enumerate(shots, start=1):
         if not isinstance(shot, dict):
             raise JSONValidationError(f"Shot {index} must be an object")
@@ -353,22 +739,36 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
         prompt = shot.get("prompt")
         if not isinstance(prompt, list) or not all(isinstance(item, str) for item in prompt):
             raise JSONValidationError(f"Shot {index} prompt must be a string array")
-        if not prompt or prompt[-1] != NON_DIEGETIC_MUSIC:
+        if len(prompt) != 6:
+            raise JSONValidationError(
+                f"Shot {index} prompt must contain exactly six full-reference sections"
+            )
+        for position, prefix in enumerate(expected_prefixes):
+            if not prompt[position].startswith(prefix):
+                raise JSONValidationError(
+                    f"Shot {index} prompt section {position + 1} has the wrong type or order"
+                )
+            if not prompt[position][len(prefix):].strip():
+                raise JSONValidationError(
+                    f"Shot {index} prompt section {position + 1} must not be empty"
+                )
+        if prompt[-1] != NON_DIEGETIC_MUSIC:
             raise JSONValidationError(
                 f"Shot {index} prompt must end with the non-diegetic music disable directive"
             )
-        soundscape_items = [
-            item for item in prompt if item.startswith(OVERALL_SOUNDSCAPE_PREFIX)
-        ]
-        if len(soundscape_items) != 1 or len(prompt) < 2 or prompt[-2] != soundscape_items[0]:
+        if not prompt[1][len(SUMMARY_PREFIX):].startswith("["):
+            raise JSONValidationError(f"Shot {index} summary must begin with a task type")
+        detailed = prompt[3][len(DETAILED_DESCRIPTION_PREFIX):]
+        shot_numbers = [int(value) for value in re.findall(r"\[Shot ([1-9][0-9]*)\]", detailed)]
+        if not shot_numbers or shot_numbers != list(range(1, len(shot_numbers) + 1)):
             raise JSONValidationError(
-                f"Shot {index} prompt must contain exactly one overall soundscape immediately before music"
+                f"Shot {index} detailed description must contain sequential Shot labels"
             )
-        if not soundscape_items[0][len(OVERALL_SOUNDSCAPE_PREFIX):].strip():
-            raise JSONValidationError(f"Shot {index} overall soundscape must not be empty")
         duration = shot.get("duration_seconds")
-        if not _is_int(duration) or duration <= 0:
-            raise JSONValidationError(f"Shot {index} duration_seconds must be a positive integer")
+        if not _is_int(duration) or not 1 <= duration <= 60:
+            raise JSONValidationError(
+                f"Shot {index} duration_seconds must be an integer between 1 and 60"
+            )
 
         continuation = shot.get("continuation_mode")
         if continuation is not None:

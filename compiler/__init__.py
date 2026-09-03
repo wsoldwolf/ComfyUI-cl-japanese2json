@@ -3,11 +3,13 @@
 from .jsongen import generate_json, validate_final_json
 from .llmj2e import translate_markdown
 from .mdparse import parse_markdown
-from .structures import Emd, Scene, Soundscape
+from .structures import Emd, RetentionRule, Scene, Shot, Soundscape
 
 __all__ = [
     "Emd",
+    "RetentionRule",
     "Scene",
+    "Shot",
     "Soundscape",
     "generate_json",
     "parse_markdown",

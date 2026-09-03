@@ -15,7 +15,7 @@ errors = module("compiler.errors")
 
 def arguments(**overrides):
     values = {
-        "plain_text": "# シーン\n* 動作。",
+        "plain_text": "# シーン\n## ショット\n* 動作。",
         "model_name": "model.gguf",
         "max_tokens": 64,
         "temperature": 0.1,

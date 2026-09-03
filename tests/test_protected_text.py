@@ -19,6 +19,23 @@ class ProtectedTextTests(unittest.TestCase):
         self.assertNotIn("<Picture", payload.text)
         self.assertEqual(protected.restore_text(payload, payload.text), source)
 
+    def test_speaker_ids_are_protected_and_restored_exactly(self) -> None:
+        source = "<Subject 1> (S1)が「こんにちは」と言う。"
+        payload = protected.protect_text(source)
+        self.assertNotIn("(S1)", payload.text)
+        self.assertIn("<Subject 1> (S1)", payload.replacements.values())
+        self.assertEqual(
+            protected.restore_text(payload, payload.text),
+            "<Subject 1> (S1)が<d>[Japanese]こんにちは</d>と言う。",
+        )
+
+    def test_subject_speaker_pair_is_one_placeholder_with_or_without_space(self) -> None:
+        for pair in ("<Subject 1> (S1)", "<Subject 1>(S1)"):
+            with self.subTest(pair=pair):
+                payload = protected.protect_text(f"{pair}が話す。")
+                self.assertEqual(tuple(payload.replacements.values()), (pair,))
+                self.assertEqual(protected.restore_text(payload, payload.text), f"{pair}が話す。")
+
     def test_out_of_range_reference_is_still_protected(self) -> None:
         with self.assertLogs("cl_japanese2json", level="WARNING"):
             payload = protected.protect_text("<Subject 5>")

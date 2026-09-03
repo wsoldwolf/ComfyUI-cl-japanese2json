@@ -17,18 +17,22 @@ class CoreIntegrationTests(unittest.TestCase):
 * <Picture 1>と<Audio 1>を参照する人物。
 * <Picture 2>を参照する人物。
 
-# 共通プロンプト
-* <Subject 1>と<Subject 2>はオフィスにいる。
+# 保持分析
+* <Subject 1> 完全に保持: 外観を維持する。
+* <Subject 2> 完全に保持: 外観を維持する。
 
 # シーン 5秒
-* <Subject 2>が「よろしく」と言う。
+* 二人はオフィスにいる。
+## ショット
+* <Subject 2> (S1)が「よろしく」と言う。
 * <Subject 1>が手を上げる。
 ## 音響
 * 環境音: 静かな室内音。
 * 発声: 指定台詞のみ
 
 # シーン 5秒 継続
-* <Subject 1>が「次です」と言う。
+## ショット
+* <Subject 1> (S2)が「次です」と言う。
 ## 音響
 * 発声: 指定台詞のみ"""
         canonical = llmj2e.translate_markdown(
@@ -44,7 +48,11 @@ class CoreIntegrationTests(unittest.TestCase):
         self.assertIn("<Subject 2>", parsed["shots"][0]["prompt"][0])
         self.assertNotIn("<Subject 2>", parsed["shots"][1]["prompt"][0])
         self.assertIn("よろしく", text)
+        self.assertEqual(len(parsed["shots"][0]["prompt"]), 6)
         self.assertTrue(
-            parsed["shots"][0]["prompt"][-2].startswith("overall_soundscape:\n")
+            parsed["shots"][0]["prompt"][3].startswith("detailed_description:\n")
+        )
+        self.assertTrue(
+            parsed["shots"][0]["prompt"][4].startswith("overall_soundscape:\n")
         )
         self.assertEqual(json.loads(text), parsed)

@@ -96,10 +96,28 @@ SOUNDSCAPE_FIXED_VALUES = {
     "なし": "NONE",
     "指定台詞のみ": "EXPLICIT_DIALOGUE_ONLY",
 }
+RETENTION_MARKERS = {
+    "完全に保持": "fully_preserved",
+    "部分的に保持": "partially_preserved",
+    "属性転送": "attribute_transfer",
+    "弱い参照": "weak_reference",
+}
+JAPANESE_RETENTION_RE = re.compile(
+    r"<Subject ([1-9][0-9]*)>\s*"
+    r"(完全に保持|部分的に保持|属性転送|弱い参照)"
+    r"(?:\s*->\s*<Subject ([1-9][0-9]*)>)?\s*[:：]\s*(.+)"
+)
+JAPANESE_SHOT_RE = re.compile(
+    r"## ショット(?: ((?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)秒)?"
+)
 
 
 def _canonical_scene_directive(line: str, line_number: int) -> str:
     options = line[len("# シーン") :]
+    if "生成する" in options or "継続する" in options:
+        raise TranslationError(
+            f"Legacy Scene syntax at line {line_number}; use '# シーン N秒 [継続]'"
+        )
     if options == "":
         return "# Scene"
     if not options.startswith(" "):
@@ -137,6 +155,75 @@ def _canonical_scene_directive(line: str, line_number: int) -> str:
     return f"# Scene {duration}sec{suffix}"
 
 
+def _canonical_shot_directive(line: str, line_number: int) -> str:
+    match = JAPANESE_SHOT_RE.fullmatch(line)
+    if match is None:
+        raise TranslationError(
+            f"Invalid Shot subdirective at line {line_number}; use '## ショット' or '## ショット N秒'"
+        )
+    raw_start = match.group(1)
+    return "## Shot" if raw_start is None else f"## Shot {raw_start}sec"
+
+
+def _seconds_text_to_ms(value: str) -> int:
+    whole, dot, fraction = value.partition(".")
+    milliseconds = int(whole) * 1000
+    if dot:
+        milliseconds += int(fraction.ljust(3, "0"))
+    return milliseconds
+
+
+def _retention_record(
+    body: str,
+    *,
+    line_number: int,
+    record_id: str,
+    block_index: int,
+) -> TranslationRecord:
+    match = JAPANESE_RETENTION_RE.fullmatch(body)
+    if match is None:
+        raise TranslationError(
+            f"Invalid retention bullet at line {line_number}"
+        )
+    source_text, japanese_marker, target_text, description = match.groups()
+    source = int(source_text)
+    if not 1 <= source <= 4 or source_text != str(source):
+        raise TranslationError(
+            f"Retention Subject at line {line_number} must be in the canonical Subject 1-4 range"
+        )
+    relationship = RETENTION_MARKERS[japanese_marker]
+    target: int | None = None
+    if target_text is not None:
+        target = int(target_text)
+        if not 1 <= target <= 4 or target_text != str(target):
+            raise TranslationError(
+                f"Retention target at line {line_number} must be in the canonical Subject 1-4 range"
+            )
+    if relationship == "attribute_transfer":
+        if target is None:
+            raise TranslationError(
+                f"Attribute transfer at line {line_number} requires '-> <Subject N>'"
+            )
+        if target == source:
+            raise TranslationError(
+                f"Attribute transfer source and target must differ at line {line_number}"
+            )
+    elif target is not None:
+        raise TranslationError(
+            f"Only attribute transfer accepts '-> <Subject N>' at line {line_number}"
+        )
+    target_suffix = f" -> <Subject {target}>" if target is not None else ""
+    return TranslationRecord(
+        record_id=record_id,
+        section="Retention",
+        block_index=block_index,
+        payload=protect_text(description, namespace=record_id),
+        output_prefix=(
+            f"* <Subject {source}> {relationship}{target_suffix}: "
+        ),
+    )
+
+
 def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
     """Recognize directives and protect only valid bullet payloads."""
 
@@ -150,27 +237,124 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
     bullet_count = 0
     parent_section: str | None = None
     parent_has_soundscape = False
+    parent_has_shot = False
+    parent_duration_ms = 5_000
+    parent_last_shot_ms: int | None = None
+    seen_subjects = False
+    seen_retention = False
+    seen_scene = False
 
     for line_number, line in enumerate(plain_text.lstrip("\ufeff").splitlines(), start=1):
         if line.strip() == "":
             current = None
             continue
 
-        canonical: str | None = None
-        section: str | None = None
         if line == "# サブジェクト":
-            canonical, section = "# Subjects", "Subjects"
-        elif line == "# 共通プロンプト":
-            canonical, section = "# Common", "Common"
-        elif line == "# シーン" or line.startswith("# シーン "):
-            canonical, section = _canonical_scene_directive(line, line_number), "Scene"
-
-        if canonical is not None and section is not None:
-            current = LexicalBlock(canonical, section)
+            if seen_subjects or seen_retention or seen_scene:
+                raise TranslationError(
+                    f"# サブジェクト must appear exactly once before retention and scenes (line {line_number})"
+                )
+            seen_subjects = True
+            current = LexicalBlock("# Subjects", "Subjects")
             blocks.append(current)
             directive_count += 1
-            parent_section = section
+            parent_section = "Subjects"
             parent_has_soundscape = False
+            parent_has_shot = False
+            parent_last_shot_ms = None
+            continue
+
+        if line == "# 共通プロンプト":
+            raise TranslationError(
+                f"# 共通プロンプト was removed from the draft syntax (line {line_number}); move its content into each Scene preamble or a reusable Subject"
+            )
+
+        if line == "# 保持分析":
+            if seen_retention or seen_scene:
+                raise TranslationError(
+                    f"# 保持分析 must appear at most once before scenes (line {line_number})"
+                )
+            seen_retention = True
+            current = LexicalBlock("# Retention", "Retention")
+            blocks.append(current)
+            directive_count += 1
+            parent_section = "Retention"
+            parent_has_soundscape = False
+            parent_has_shot = False
+            parent_last_shot_ms = None
+            continue
+
+        if line == "# シーン" or line.startswith("# シーン "):
+            if parent_section == "Scene" and not parent_has_shot:
+                raise TranslationError(
+                    f"Previous Scene must contain at least one ## ショット before line {line_number}"
+                )
+            if blocks and blocks[-1].section == "Shot" and not blocks[-1].records:
+                raise TranslationError(
+                    f"Previous Shot must contain at least one bullet before line {line_number}"
+                )
+            if blocks and blocks[-1].section == "Soundscape" and not blocks[-1].records:
+                raise TranslationError(
+                    f"Previous Soundscape must contain at least one bullet before line {line_number}"
+                )
+            seen_scene = True
+            canonical_scene = _canonical_scene_directive(line, line_number)
+            current = LexicalBlock(
+                canonical_scene, "ScenePreamble"
+            )
+            blocks.append(current)
+            directive_count += 1
+            parent_section = "Scene"
+            parent_has_soundscape = False
+            parent_has_shot = False
+            duration_match = re.search(r" ([1-9][0-9]*)sec", canonical_scene)
+            parent_duration_ms = (
+                int(duration_match.group(1)) * 1000 if duration_match else 5_000
+            )
+            parent_last_shot_ms = None
+            continue
+
+        if line == "## ショット" or line.startswith("## ショット "):
+            if parent_section != "Scene":
+                raise TranslationError(
+                    f"Shot subdirective at line {line_number} must belong to Scene"
+                )
+            if parent_has_soundscape:
+                raise TranslationError(
+                    f"Shot subdirective at line {line_number} cannot follow Soundscape"
+                )
+            canonical = _canonical_shot_directive(line, line_number)
+            has_start_time = canonical != "## Shot"
+            if not parent_has_shot and has_start_time:
+                raise TranslationError(
+                    f"The first Shot must not specify a start time at line {line_number}"
+                )
+            if parent_has_shot and not has_start_time:
+                raise TranslationError(
+                    f"Every Shot after the first requires a start time at line {line_number}"
+                )
+            if has_start_time:
+                raw_start = canonical[len("## Shot ") : -len("sec")]
+                start_ms = _seconds_text_to_ms(raw_start)
+                if parent_last_shot_ms is not None and start_ms <= parent_last_shot_ms:
+                    raise TranslationError(
+                        f"Shot start times must increase at line {line_number}"
+                    )
+                if start_ms >= parent_duration_ms:
+                    raise TranslationError(
+                        f"Shot start time must be earlier than the Scene duration at line {line_number}"
+                    )
+            else:
+                start_ms = 0
+            if blocks and blocks[-1].section == "Shot" and not blocks[-1].records:
+                raise TranslationError(
+                    f"Previous Shot must contain at least one bullet before line {line_number}"
+                )
+            current = LexicalBlock(canonical, "Shot")
+            blocks.append(current)
+            directive_count += 1
+            parent_has_shot = True
+            parent_last_shot_ms = start_ms
             continue
 
         if line == "## 音響":
@@ -178,9 +362,17 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 raise TranslationError(
                     f"Soundscape subdirective at line {line_number} must belong to Scene"
                 )
+            if not parent_has_shot:
+                raise TranslationError(
+                    f"Soundscape subdirective at line {line_number} must follow at least one Shot"
+                )
             if parent_has_soundscape:
                 raise TranslationError(
                     f"Duplicate soundscape subdirective at line {line_number}"
+                )
+            if blocks and blocks[-1].section == "Shot" and not blocks[-1].records:
+                raise TranslationError(
+                    f"Previous Shot must contain at least one bullet before line {line_number}"
                 )
             current = LexicalBlock("## Soundscape", "Soundscape")
             blocks.append(current)
@@ -194,26 +386,28 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             )
 
         if line.startswith("#"):
-            LOGGER.warning(
-                "[cl_japanese2json] Unknown directive at line %d ignored: %s",
-                line_number,
-                line,
+            raise TranslationError(
+                f"Unknown or removed directive at line {line_number}: {line}"
             )
-            current = None
-            parent_section = None
-            parent_has_soundscape = False
-            continue
 
         if line.startswith("* "):
             if current is None:
-                LOGGER.warning(
-                    "[cl_japanese2json] Bullet outside a recognized section at line %d ignored",
-                    line_number,
+                raise TranslationError(
+                    f"Bullet outside a recognized section at line {line_number}"
                 )
-                continue
             record_number += 1
             bullet_count += 1
             record_id = f"R{record_number:06d}"
+            if current.section == "Retention":
+                current.records.append(
+                    _retention_record(
+                        line[2:],
+                        line_number=line_number,
+                        record_id=record_id,
+                        block_index=len(blocks) - 1,
+                    )
+                )
+                continue
             if current.section == "Soundscape":
                 match = re.fullmatch(r"(環境音|効果音|発声)\s*[:：]\s*(.*)", line[2:])
                 if match is None:
@@ -269,17 +463,16 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             current.records.append(record)
             continue
 
-        if current is None:
-            LOGGER.warning(
-                "[cl_japanese2json] Unknown line %d outside a section ignored",
-                line_number,
-            )
-        else:
-            LOGGER.warning(
-                "[cl_japanese2json] Non-bullet line %d inside %s ignored",
-                line_number,
-                current.section,
-            )
+        raise TranslationError(f"Expected a bullet at line {line_number}: {line}")
+
+    if parent_section == "Scene" and not parent_has_shot:
+        raise TranslationError("Final Scene must contain at least one ## ショット")
+    if blocks and blocks[-1].section == "Shot" and not blocks[-1].records:
+        raise TranslationError("Final Shot must contain at least one bullet")
+    if blocks and blocks[-1].section == "Soundscape" and not blocks[-1].records:
+        raise TranslationError("Final Soundscape must contain at least one bullet")
+    if not seen_scene:
+        raise TranslationError("At least one # シーン directive is required")
 
     translatable_count = sum(
         record.payload is not None
@@ -296,8 +489,9 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
 
 SECTION_STREAM_CODES = {
     "Subjects": "SUB",
-    "Common": "COM",
-    "Scene": "SCN",
+    "Retention": "RET",
+    "ScenePreamble": "SCN",
+    "Shot": "SCN",
     "Soundscape": "SND",
 }
 
@@ -350,8 +544,9 @@ def _user_payload(
         "Translate the Japanese prose inside the single protected stream below. Return only the "
         "translated raw stream, without JSON or quotes. "
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
-        "A SUB marker starts a singular noun phrase ending in an ASCII period; COM, SCN, and SND "
-        "markers start concise natural US English. Keep one segment after each marker and preserve the "
+        "A SUB marker starts a singular noun phrase ending in an ASCII period; RET, SCN, and SND "
+        "markers start concise natural US English. RET translates only a retention explanation. "
+        "Keep one segment after each marker and preserve the "
         "marker order. Do not replace a SUB marker with a label, index, copula, or framing text. "
         "Copy the final stop placeholder after translating the last segment. "
         "Emergency recovery only: if every CLJT structural marker is omitted, return exactly "
@@ -658,7 +853,7 @@ def _structural_tokens(stream: TranslationStream) -> list[str]:
 
 def _structural_pattern(stream: TranslationStream) -> re.Pattern[str]:
     return re.compile(
-        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|COM|SCN|SND)[0-9]+)X"
+        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|RET|SCN|SND)[0-9]+)X"
     )
 
 
@@ -1112,7 +1307,7 @@ def _repair_retry_dialogue_placeholders(
     """Restore only omitted direct-speech values after an LLM retry."""
 
     record = stream_record.record
-    if record.section != "Scene" or not re.search(r"[A-Za-z]", translated):
+    if record.section != "Shot" or not re.search(r"[A-Za-z]", translated):
         return None
 
     missing_dialogue: list[str] = []
@@ -1310,8 +1505,9 @@ def _rebuild(document: LexicalDocument) -> str:
     directive_count = sum(
         1
         for line in canonical.splitlines()
-        if line in {"# Subjects", "# Common", "## Soundscape"}
+        if line in {"# Subjects", "# Retention", "## Shot", "## Soundscape"}
         or line.startswith("# Scene")
+        or line.startswith("## Shot ")
     )
     bullet_count = sum(1 for line in canonical.splitlines() if line.startswith("* "))
     if directive_count != document.directive_count or bullet_count != document.bullet_count:

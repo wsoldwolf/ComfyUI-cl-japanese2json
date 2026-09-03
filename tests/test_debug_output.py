@@ -16,7 +16,7 @@ class DebugOutputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             output_directory = Path(temp)
             target = debug_output.save_debug_bundle(
-                plain_text="# シーン\n* 動作。",
+                plain_text="# シーン\n## ショット\n* 動作。",
                 system_prompt="system",
                 model_name="model.gguf",
                 settings={"seed": 1},
@@ -39,7 +39,7 @@ class DebugOutputTests(unittest.TestCase):
             self.assertEqual(target.parent, output_directory / "cl_japanese2json_debug")
             self.assertEqual(
                 (target / "source.md").read_text(encoding="utf-8"),
-                "# シーン\n* 動作。",
+                "# シーン\n## ショット\n* 動作。",
             )
             self.assertEqual(
                 (target / "event_01_batch_01_attempt_01_response.txt").read_text(

@@ -28,14 +28,14 @@ def request_stream(messages: list[dict[str, str]]) -> str:
     return user_text[start:end]
 
 
-STREAM_START_RE = re.compile(r"(CLJT[0-9]+)(SUB|COM|SCN|SND)([0-9]+)X")
+STREAM_START_RE = re.compile(r"(CLJT[0-9]+)(SUB|RET|SCN|SND)([0-9]+)X")
 STREAM_STRUCTURAL_RE = re.compile(
-    r"CLJT[0-9]+(?:D[0-9]+|(?:SUB|COM|SCN|SND)[0-9]+|END)X"
+    r"CLJT[0-9]+(?:D[0-9]+|(?:SUB|RET|SCN|SND)[0-9]+|END)X"
 )
 PROTECTED_RE = re.compile(r"CLJ[0-9]+C[0-9]+P[0-9]+X")
 STREAM_SECTIONS = {
     "SUB": "Subjects",
-    "COM": "Common",
+    "RET": "Retention",
     "SCN": "Scene",
     "SND": "Soundscape",
 }
@@ -69,8 +69,6 @@ def default_translation(record: dict[str, str]) -> str:
     protected = " ".join(tokens)
     if record["section"] == "Subjects":
         return f"a referenced character {protected}.".replace("  ", " ")
-    if record["section"] == "Common":
-        return f"A shared setting {protected}.".replace("  ", " ")
     if record["section"] == "Soundscape":
         return f"A defined audible sound {protected}.".replace("  ", " ")
     return f"The action occurs {protected}.".replace("  ", " ")

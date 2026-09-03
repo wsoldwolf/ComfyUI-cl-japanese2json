@@ -13,6 +13,10 @@ LOGGER = logging.getLogger("cl_japanese2json")
 
 REFERENCE_RE = re.compile(r"<(Picture|Video|Audio|Subject) ([0-9]+)>")
 COMPACT_REFERENCE_RE = re.compile(r"<(Picture|Video|Audio|Subject)([0-9]+)>")
+SPEAKER_ID_RE = re.compile(r"\(S([1-9][0-9]*)\)")
+SPEAKER_PAIR_RE = re.compile(
+    r"<Subject ([0-9]+)>[ \t]*\(S([1-9][0-9]*)\)"
+)
 JAPANESE_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
 
 REFERENCE_LIMITS = {
@@ -110,6 +114,28 @@ def _protect_references(text: str, store: _TokenStore) -> str:
     return REFERENCE_RE.sub(replace, text)
 
 
+def _protect_speaker_pairs(text: str, store: _TokenStore) -> str:
+    def replace(match: re.Match[str]) -> str:
+        subject_number_text = match.group(1)
+        subject_number = int(subject_number_text)
+        lower, upper = REFERENCE_LIMITS["Subject"]
+        if (
+            subject_number_text != str(subject_number)
+            or not lower <= subject_number <= upper
+        ):
+            LOGGER.warning(
+                "[cl_japanese2json] Out-of-range or non-canonical Subject/speaker pair preserved: %s",
+                match.group(0),
+            )
+        return store.add(match.group(0))
+
+    return SPEAKER_PAIR_RE.sub(replace, text)
+
+
+def _protect_speaker_ids(text: str, store: _TokenStore) -> str:
+    return SPEAKER_ID_RE.sub(lambda match: store.add(match.group(0)), text)
+
+
 def escape_dialogue_text(text: str) -> str:
     """Escape only currently unescaped MiniMax direct-speech metacharacters."""
 
@@ -147,7 +173,9 @@ def protect_text(text: str, *, namespace: str | None = None) -> ProtectedPayload
 
     store = _TokenStore(text, namespace=namespace)
     protected = _protect_existing_direct_speech(text, store)
+    protected = _protect_speaker_pairs(protected, store)
     protected = _protect_references(protected, store)
+    protected = _protect_speaker_ids(protected, store)
     protected = _protect_japanese_dialogue(protected, store)
     return ProtectedPayload(protected, dict(store.replacements))
 
