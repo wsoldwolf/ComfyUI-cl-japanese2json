@@ -21,10 +21,14 @@ class CoreIntegrationTests(unittest.TestCase):
 * <Subject 1> 完全に保持: 外観を維持する。
 * <Subject 2> 完全に保持: 外観を維持する。
 
+# 共通プロンプト
+* 明るいアニメ調にする。
+* <Subject 1>と<Subject 2>を混同しない。
+
 # シーン 5秒
 * 二人はオフィスにいる。
 ## ショット
-* <Subject 2> (S1)が「よろしく」と言う。
+* <Subject 2>が「よろしく」と言う。
 * <Subject 1>が手を上げる。
 ## 音響
 * 環境音: 静かな室内音。
@@ -32,7 +36,7 @@ class CoreIntegrationTests(unittest.TestCase):
 
 # シーン 5秒 継続
 ## ショット
-* <Subject 1> (S2)が「次です」と言う。
+* <Subject 1>が「次です」と言う。
 ## 音響
 * 発声: 指定台詞のみ"""
         canonical = llmj2e.translate_markdown(
@@ -48,6 +52,13 @@ class CoreIntegrationTests(unittest.TestCase):
         self.assertIn("<Subject 2>", parsed["shots"][0]["prompt"][0])
         self.assertNotIn("<Subject 2>", parsed["shots"][1]["prompt"][0])
         self.assertIn("よろしく", text)
+        self.assertIn("<Subject 2> (S2)", parsed["shots"][0]["prompt"][3])
+        self.assertIn("<Subject 1> (S1)", parsed["shots"][1]["prompt"][3])
+        self.assertIn(
+            "The action occurs <Subject 1> <Subject 2>.",
+            parsed["shots"][0]["prompt"][3],
+        )
+        self.assertNotIn("<Subject 2>", parsed["shots"][1]["prompt"][3])
         self.assertEqual(len(parsed["shots"][0]["prompt"]), 6)
         self.assertTrue(
             parsed["shots"][0]["prompt"][3].startswith("detailed_description:\n")

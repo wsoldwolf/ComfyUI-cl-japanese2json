@@ -15,6 +15,10 @@ CANONICAL = """# Subjects
 # Retention
 * <Subject 1> fully_preserved: Preserve the defined appearance.
 
+# Common
+* A clean global visual style.
+* Keep <Subject 1> sharply rendered.
+
 # Scene 8sec
 * A clean anime style.
 
@@ -47,6 +51,10 @@ class MarkdownParserTests(unittest.TestCase):
         rule = emd.retention_rules[0]
         self.assertEqual(rule.subject_number, 1)
         self.assertEqual(rule.relationship, "fully_preserved")
+        self.assertEqual(
+            emd.common_prompt,
+            ["A clean global visual style.", "Keep <Subject 1> sharply rendered."],
+        )
         self.assertEqual(emd.scenes[0].preamble, ["A clean anime style."])
         self.assertEqual([shot.start_ms for shot in emd.scenes[0].shots], [0, 3250])
         self.assertEqual(emd.scenes[0].shots[0].lines, ["<Subject 1> acts."])
@@ -113,9 +121,8 @@ class MarkdownParserTests(unittest.TestCase):
         with self.assertRaises(errors.MarkdownParseError):
             parse_markdown("# Scene\n## Shot\n* Action.\n## Soundscape")
 
-    def test_removed_common_and_implicit_shot_syntax_are_rejected(self) -> None:
+    def test_implicit_shot_syntax_is_rejected(self) -> None:
         invalid = (
-            "# Common\n* setting.\n# Scene\n## Shot\n* action.",
             "# Scene\n* former implicit shot.",
             "# Scene\n## Soundscape\n* Environment: Wind.",
         )
@@ -128,6 +135,19 @@ class MarkdownParserTests(unittest.TestCase):
             "# Subjects\n* one.\n# Subjects\n* two.\n# Scene\n## Shot\n* x.",
             "# Scene\n## Shot\n* x.\n# Retention\n* <Subject 1> fully_preserved: x.",
             "# Retention\n* <Subject 1> fully_preserved: x.\n# Retention\n* <Subject 2> fully_preserved: y.\n# Scene\n## Shot\n* x.",
+            "# Common\n* one.\n# Common\n* two.\n# Scene\n## Shot\n* x.",
+            "# Common\n* global.\n# Retention\n* <Subject 1> fully_preserved: x.\n# Scene\n## Shot\n* x.",
+        )
+        for text in invalid:
+            with self.subTest(text=text), self.assertRaises(errors.MarkdownParseError):
+                parse_markdown(text)
+
+    def test_common_restrictions_and_empty_section_are_rejected(self) -> None:
+        invalid = (
+            "# Common\n# Scene\n## Shot\n* Action.",
+            "# Common\n* Use <Audio 1>.\n# Scene\n## Shot\n* Action.",
+            "# Common\n* Someone says <d>[Japanese]x</d>.\n# Scene\n## Shot\n* Action.",
+            "# Scene\n## Shot\n* <Subject 1> (S1) says <d>[Japanese]x</d>.",
         )
         for text in invalid:
             with self.subTest(text=text), self.assertRaises(errors.MarkdownParseError):

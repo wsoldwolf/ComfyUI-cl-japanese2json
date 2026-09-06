@@ -121,7 +121,7 @@ class JSONGenerationTests(unittest.TestCase):
                 Scene(
                     shots=[
                         make_shot(
-                            "<Subject 1> (S1) says <d>[Japanese]こんにちは</d>."
+                            "<Subject 1> says <d>[Japanese]こんにちは</d>."
                         )
                     ],
                     soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
@@ -139,28 +139,39 @@ class JSONGenerationTests(unittest.TestCase):
         self.assertIn("use <Audio 1> only as a voice-timbre", prompt[3])
         self.assertIn("exact shot-synchronized dialogue", prompt[4])
 
-    def test_subject_speaker_pair_accepts_no_intervening_space(self) -> None:
+    def test_speaker_id_is_generated_from_subject_number(self) -> None:
         emd = Emd(
             subjects=["a character whose voice is based on <Audio 1>."],
             scenes=[
                 Scene(
                     shots=[
                         make_shot(
-                            "<Subject 1>(S1) says <d>[Japanese]こんにちは</d>."
+                            "<Subject 1> says <d>[Japanese]こんにちは</d>."
                         )
                     ],
                     soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
                 )
             ],
         )
-        jsongen.generate_json(emd)
+        prompt = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"]
+        self.assertIn("<Subject 1> (S1) says", prompt[3])
+        self.assertIn("<Subject 1> (S1).", prompt[0])
 
-    def test_speech_requires_permission_direct_speech_and_speaker_pair(self) -> None:
+    def test_speaker_id_is_not_added_to_non_dialogue_subject_references(self) -> None:
+        emd = Emd(
+            subjects=["one."],
+            scenes=[Scene(shots=[make_shot("<Subject 1> turns around.")])],
+        )
+        prompt = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"]
+        self.assertIn("<Subject 1> turns around.", prompt[3])
+        self.assertNotIn("(S1)", prompt[3])
+
+    def test_speech_requires_permission_direct_speech_and_subject(self) -> None:
         invalid = (
             Emd(
                 subjects=["one."],
                 scenes=[
-                    Scene(shots=[make_shot("<Subject 1> (S1) says <d>[Japanese]x</d>.")])
+                    Scene(shots=[make_shot("<Subject 1> says <d>[Japanese]x</d>.")])
                 ],
             ),
             Emd(
@@ -175,7 +186,7 @@ class JSONGenerationTests(unittest.TestCase):
                 subjects=["one."],
                 scenes=[
                     Scene(
-                        shots=[make_shot("<Subject 1> says <d>[Japanese]x</d>.")],
+                        shots=[make_shot("Someone says <d>[Japanese]x</d>.")],
                         soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
                     )
                 ],
@@ -202,7 +213,7 @@ class JSONGenerationTests(unittest.TestCase):
                     shots=[
                         make_shot(
                             "<Subject 1> speaks softly.",
-                            "<Subject 1> (S1) says <d>[Japanese]はい</d>.",
+                            "<Subject 1> says <d>[Japanese]はい</d>.",
                         )
                     ],
                     soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
@@ -212,21 +223,23 @@ class JSONGenerationTests(unittest.TestCase):
         with self.assertRaises(errors.JSONGenerationError):
             jsongen.generate_json(emd)
 
-    def test_speaker_ids_are_global_unique_and_follow_vocal_event_order(self) -> None:
+    def test_speaker_ids_equal_subject_numbers_independent_of_vocal_order(self) -> None:
         valid = Emd(
             subjects=["one.", "two."],
             scenes=[
                 Scene(
-                    shots=[make_shot("<Subject 2> (S1) says <d>[Japanese]a</d>.")],
+                    shots=[make_shot("<Subject 2> says <d>[Japanese]a</d>.")],
                     soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
                 ),
                 Scene(
-                    shots=[make_shot("<Subject 1> (S2) says <d>[Japanese]b</d>.")],
+                    shots=[make_shot("<Subject 1> says <d>[Japanese]b</d>.")],
                     soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
                 ),
             ],
         )
-        jsongen.generate_json(valid)
+        parsed = json.loads(jsongen.generate_json(valid))
+        self.assertIn("<Subject 2> (S2) says", parsed["shots"][0]["prompt"][3])
+        self.assertIn("<Subject 1> (S1) says", parsed["shots"][1]["prompt"][3])
 
         invalid = (
             Emd(
@@ -244,8 +257,8 @@ class JSONGenerationTests(unittest.TestCase):
                     Scene(
                         shots=[
                             make_shot(
-                                "<Subject 1> (S1) says <d>[Japanese]a</d>.",
-                                "<Subject 2> (S1) says <d>[Japanese]b</d>.",
+                                "<Subject 1> says <d>[Japanese]a</d>.",
+                                "<Subject 2> (S2) says <d>[Japanese]b</d>.",
                             )
                         ],
                         soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
@@ -256,6 +269,63 @@ class JSONGenerationTests(unittest.TestCase):
         for emd in invalid:
             with self.subTest(emd=emd), self.assertRaises(errors.JSONGenerationError):
                 jsongen.generate_json(emd)
+
+    def test_common_prompt_is_filtered_without_activating_subjects(self) -> None:
+        emd = Emd(
+            subjects=["one.", "two."],
+            common_prompt=[
+                "A clean global visual style.",
+                "Do not merge <Subject 1> and <Subject 2>.",
+                "Keep <Subject 1> sharply rendered.",
+            ],
+            scenes=[
+                Scene(shots=[make_shot("<Subject 1> acts alone.")]),
+                Scene(shots=[make_shot("<Subject 1> and <Subject 2> interact.")]),
+                Scene(shots=[make_shot("A blue light crosses the frame.")]),
+            ],
+        )
+        parsed = json.loads(jsongen.generate_json(emd))
+        first = parsed["shots"][0]["prompt"][3]
+        second = parsed["shots"][1]["prompt"][3]
+        third = parsed["shots"][2]["prompt"][3]
+        self.assertIn("A clean global visual style.", first)
+        self.assertIn("Keep <Subject 1> sharply rendered.", first)
+        self.assertNotIn("Do not merge <Subject 1> and <Subject 2>.", first)
+        self.assertIn("Do not merge <Subject 1> and <Subject 2>.", second)
+        self.assertEqual(parsed["shots"][2]["prompt"][0], jsongen.NO_ACTIVE_SUBJECT_BLOCK)
+        self.assertIn("A clean global visual style.", third)
+        self.assertNotIn("<Subject 1>", third)
+
+    def test_common_prompt_precedes_scene_preamble_and_first_shot(self) -> None:
+        emd = Emd(
+            common_prompt=["Global style."],
+            scenes=[
+                Scene(
+                    preamble=["Scene-specific setting."],
+                    shots=[make_shot("The action occurs.")],
+                )
+            ],
+        )
+        detailed = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][3]
+        self.assertLess(detailed.index("Global style."), detailed.index("Scene-specific setting."))
+        self.assertLess(detailed.index("Scene-specific setting."), detailed.index("[Shot 1]"))
+
+    def test_invalid_common_prompt_content_is_rejected(self) -> None:
+        for line in (
+            "Use <Audio 1>.",
+            "Someone says <d>[Japanese]x</d>.",
+            "Use (S1).",
+            "A character speaks loudly.",
+            "Keep <Subject 2> visible.",
+        ):
+            with self.subTest(line=line), self.assertRaises(errors.JSONGenerationError):
+                jsongen.generate_json(
+                    Emd(
+                        subjects=["one."],
+                        common_prompt=[line],
+                        scenes=[Scene(shots=[make_shot("<Subject 1> acts.")])],
+                    )
+                )
 
     def test_negated_speech_cues_remain_silent(self) -> None:
         definition = "a character whose voice is based on <Audio 1>."

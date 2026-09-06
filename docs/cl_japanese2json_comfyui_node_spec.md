@@ -4,7 +4,7 @@
 
 本書は`cl_japanese2json`コンパイラを独立したComfyUI V1カスタムノードとして提供する実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`である。
 
-本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、話者ID、Retention及びFull-Reference 6セクションだけを対象とする。
+本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、条件付きCommon、Python生成の話者ID、Retention及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
@@ -186,7 +186,7 @@ prompts/llmj2e_qwen3_8b_system_prompt.txt
 - 内容変更時は同一プロセスでも再読込する。
 - 文書構造又はPythonコードへ埋め込まない。
 
-プロンプトはLLMを生テキスト翻訳器に限定し、`SUB/RET/SCN/SND`構造プレースホルダ、参照、`(Sx)`、ダイレクトスピーチの改変を禁止する。
+プロンプトはLLMを生テキスト翻訳器に限定し、`SUB/RET/COM/SCN/SND`構造プレースホルダ、参照及びダイレクトスピーチの改変を禁止する。話者IDは翻訳ストリームへ含めず、JSONGENが生成する。
 
 ## 8. コンパイラ実行フロー
 
@@ -242,36 +242,46 @@ with instance_lock:
 ```text
 # サブジェクト
 # 保持分析
+# 共通プロンプト
 # シーン [1～60秒] [継続]
 ## ショット [開始秒]
 ## 音響
 ```
 
-旧`# 共通プロンプト`、暗黙Shot、`生成する`、`継続する`は即時エラーにする。
+トップレベルはSubject、Retention、Common、Sceneの順とし、前3者は任意かつ各1回までとする。暗黙Shot、`生成する`、`継続する`は即時エラーにする。
 
-### 9.2 Shot
+### 9.2 Common
+
+Commonは`Emd.common_prompt`へ文書順で保存する。JSONGENはScene preamble及びShot本文だけからアクティブSubjectを確定してから、Commonの各行を次のように選択する。
+
+- Subject参照のない行は全Sceneへ適用する。
+- Subject参照がある行は、その全SubjectがSceneでアクティブな場合だけ適用する。
+- Commonの参照だけでSubjectをアクティブにしない。
+- 未定義Subject、Audio参照、ダイレクトスピーチ、肯定的な発声指示又はユーザー入力の`(Sx)`を含むCommonはエラー。
+
+選択したCommon行は`detailed_description`内でScene preambleより前に出す。
+
+### 9.3 Shot
 
 各Sceneは`preamble`と`shots`を別に保持する。最初のShotは0ms固定、2個目以降は1～3桁の小数を含む開始秒をmsへ変換する。
 
 不正時刻はLLMロード後であっても推論前の日本語字句解析で検出し、MDPARSEでも防御的に再検証する。
 
-### 9.3 Retention
+### 9.4 Retention
 
 `# 保持分析`の関係語はPythonが固定マーカーへ変換し、説明部分だけを翻訳する。属性転送の転送先は構造として保持する。JSONGENは各SceneのアクティブSubjectへ規則をフィルタする。
 
-### 9.4 話者ID
+### 9.5 話者ID
 
-`<Subject N> (Sx)`又は空白なしの`<Subject N>(Sx)`は、Subject参照と話者IDを合わせた1個の不可分プレースホルダとして保護する。これによりLLMが両者の間へ翻訳語句を挿入できない。ペアになっていない`(Sx)`も単独でプレースホルダ保護する。JSONGENはShot本文を再走査し、次を検証する。
+ユーザー入力及び正規形Markdownの`(Sx)`はエラーとする。JSONGENはShot本文を再走査し、各ダイレクトスピーチより前の同じ行にある最も近い`<Subject N>`を話者として、話者ID`(SN)`を生成する。
 
-- ダイレクトスピーチより前の同じ行に`<Subject N> (Sx)`がある。
-- ID単独行がない。
-- 同一SubjectのIDが不変。
-- 同一IDのSubjectが不変。
-- 新規IDが実発声順の連番。
+- 話者ID番号はSubject番号と同一であり、発声順に依存しない。
+- 同じ行で台詞より前にSubject参照がなければエラー。
+- 通常動作だけのSubject参照へは話者IDを付けない。
 
-`(Sx)`は`subject_definitions`内のAudio定義と`detailed_description`へ出力する。MiniMax公式ガイドに従い`retention_analysis`へは出力しない。
+`(SN)`は実際の台詞位置、`subject_definitions`内のAudio定義及び`detailed_description`内のAudio利用説明へ出力する。MiniMax公式ガイドに従い`retention_analysis`へは出力しない。
 
-### 9.5 Soundscape
+### 9.6 Soundscape
 
 Soundscapeは各Sceneの`Soundscape`値へ保存する。発声省略又は`なし`は無発声である。Environment、Sound effects、Vocalizationの全省略は完全無音である。
 
@@ -290,7 +300,7 @@ non_diegetic_music:
 
 ### 10.1 subject_definitions
 
-Scene preamble及びShot本文で参照したSubjectだけを定義する。未定義Subjectはエラー。無Subject Sceneは次の固定文とする。
+Scene preamble及びShot本文で参照したSubjectだけを定義する。Commonだけの参照はアクティブ化に使わない。未定義Subjectはエラー。無Subject Sceneは次の固定文とする。
 
 ```text
 subject_definitions:
@@ -315,10 +325,11 @@ Audio声質参照は`reference`を使い、元信号及び元発話をコピー�
 
 ### 10.4 detailed_description
 
-Scene preambleを冒頭へ置き、次に明示Shotを順に出す。
+そのSceneへ適用されるCommon、Scene preamble、明示Shotの順に出す。
 
 ```text
 detailed_description:
+Applicable global style and constraints.
 Scene-wide style and premise.
 [Shot 1] Opening action.
 [Shot 2] At 00:03.250, next action.
@@ -346,10 +357,10 @@ H3のランダムBGMを無効化し、Suno等で生成した音楽を後編集�
 発声は次の三重条件を満たす場合だけ有効である。
 
 1. Shot本文に`<d>...</d>`がある。
-2. 同じ行で台詞より前に`<Subject N> (Sx)`がある。
+2. 同じ行で台詞より前に`<Subject N>`がある。
 3. SceneのVocalizationが`EXPLICIT_DIALOGUE_ONLY`である。
 
-さらに、肯定的な発声動詞を持つ行は同じ行にダイレクトスピーチを必要とする。別行又は別Shotの台詞で条件を満たしたことにしない。
+さらに、肯定的な発声動詞を持つ行は同じ行にダイレクトスピーチを必要とする。別行又は別Shotの台詞で条件を満たしたことにしない。話者IDはSubject番号から内部生成し、ユーザー指定を受理しない。
 
 無発声Sceneでは次を行う。
 
@@ -479,11 +490,12 @@ set "FORCE_CMAKE=1"
 ### 17.3 LLMJ2E
 
 - 新ディレクティブ正規化
-- 旧Commonと旧Scene構文拒否
+- Common正規化、順序及び禁止要素
+- 旧Scene構文拒否
 - Retention固定マーカー
 - Shot時刻の推論前検証
 - Soundscape固定値
-- `(Sx)`保護
+- ユーザー入力の`(Sx)`拒否
 - 全文1推論
 - コンテキスト時のレコード境界バッチ
 - プレースホルダ欠落、重複、移動
@@ -494,6 +506,7 @@ set "FORCE_CMAKE=1"
 ### 17.4 MDPARSE
 
 - トップレベル順序
+- Common格納、順序及び禁止要素
 - Scene preamble
 - Shot開始時刻と昇順
 - 空Shotと空Soundscape
@@ -506,9 +519,10 @@ set "FORCE_CMAKE=1"
 - 空`prompt_prefix`
 - Subject抽出とSubjectless固定文
 - RetentionのSceneフィルタと既定値
+- CommonのSceneフィルタ、配置及び非アクティブ化
 - 属性転送の両端検証
 - Shot labelとtimestamp
-- 話者IDの全体一意性
+- Subject番号に一致する話者IDの内部生成
 - 発声三重条件
 - 肯定的発声指示の同一行台詞要件
 - Audioの条件付き定義・削除
@@ -531,7 +545,7 @@ set "FORCE_CMAKE=1"
 - debug bundle
 - workflows内の新構文
 
-実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、話者ID、Audio声質参照、Retention、長文再試行を確認する。
+実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、Common、話者ID自動生成、Audio声質参照、Retention、長文再試行を確認する。
 
 ## 18. README要件
 
@@ -542,6 +556,7 @@ READMEは少なくとも次を含む。
 - Windowsの必須wheelビルド
 - 導入手順とGGUF探索先
 - 新Markdownのコピー可能な例
+- Commonの条件付き適用
 - Retentionマーカー
 - Shot時刻規則
 - 話者IDと発声許可
@@ -557,7 +572,9 @@ READMEは少なくとも次を含む。
 ## 19. 完了条件
 
 - 仕様書、README、実装、system prompt、テスト、同梱workflowが同じ新構文を使用する。
-- `# 共通プロンプト`と暗黙Shotが残っていない。ただし廃止説明及び拒否テストは除く。
+- CommonがSceneのアクティブSubject集合に従って適用され、それだけでSubjectを有効化しない。
+- ユーザー入力に話者IDがなく、JSONGENがSubject番号に一致するIDを生成する。
+- 暗黙Shotが残っていない。ただし拒否テストは除く。
 - 各Scene promptがFull-Referenceの6セクションを公式順で持つ。
 - Retentionと話者IDの公式制約を満たす。
 - 無発声時にAudio又は人物発声を有効化しない。

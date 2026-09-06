@@ -29,9 +29,6 @@ SUBJECT_RE = re.compile(r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>")
 AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
 DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
 SPEAKER_ID_RE = re.compile(r"(?<!\\)\(S([1-9][0-9]*)\)")
-SPEAKER_PAIR_RE = re.compile(
-    r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>[ \t]*\(S([1-9][0-9]*)\)"
-)
 SPEECH_CUE_RE = re.compile(
     r"\b(?:say|says|said|saying|speak|speaks|spoke|spoken|speaking|"
     r"talk|talks|talked|talking|utter|utters|uttered|uttering|"
@@ -104,6 +101,19 @@ def _referenced_subjects(scene: Scene) -> list[int]:
         searchable = _searchable(line, context="scene description")
         referenced.update(int(match.group(1)) for match in SUBJECT_RE.finditer(searchable))
     return sorted(referenced)
+
+
+def _common_lines_for_scene(emd: Emd, active_subjects: list[int]) -> list[str]:
+    active_set = set(active_subjects)
+    selected: list[str] = []
+    for line in emd.common_prompt:
+        searchable = _searchable(line, context="common prompt")
+        referenced = {
+            int(match.group(1)) for match in SUBJECT_RE.finditer(searchable)
+        }
+        if referenced.issubset(active_set):
+            selected.append(line)
+    return selected
 
 
 def _shot_subject_locations(scene: Scene, subject_number: int) -> list[int]:
@@ -225,66 +235,46 @@ def _scene_allows_dialogue(scene: Scene, scene_number: int) -> bool:
     return False
 
 
-def _speaker_bindings(emd: Emd) -> tuple[dict[int, int], list[dict[int, int]]]:
-    subject_to_speaker: dict[int, int] = {}
-    speaker_to_subject: dict[int, int] = {}
+def _line_dialogue_subject_matches(
+    line: str,
+    *,
+    context: str,
+) -> list[tuple[re.Match[str], re.Match[str]]]:
+    dialogues = list(DIRECT_SPEECH_RE.finditer(line))
+    subjects = list(SUBJECT_RE.finditer(line))
+    result: list[tuple[re.Match[str], re.Match[str]]] = []
+    for dialogue in dialogues:
+        preceding = [subject for subject in subjects if subject.end() <= dialogue.start()]
+        if not preceding:
+            raise JSONGenerationError(
+                f"{context} direct speech requires a preceding <Subject N> on the same line"
+            )
+        result.append((dialogue, preceding[-1]))
+    return result
+
+
+def _scene_speaker_bindings(emd: Emd) -> list[dict[int, int]]:
     scene_bindings: list[dict[int, int]] = []
-    next_new_speaker = 1
 
     for scene_number, scene in enumerate(emd.scenes, start=1):
         current_scene: dict[int, int] = {}
         for shot_number, shot in enumerate(scene.shots, start=1):
             for line_number, line in enumerate(shot.lines, start=1):
-                dialogues = list(DIRECT_SPEECH_RE.finditer(line))
-                pairs = list(SPEAKER_PAIR_RE.finditer(line))
-                speaker_ids = list(SPEAKER_ID_RE.finditer(line))
-                for speaker in speaker_ids:
-                    # SPEAKER_PAIR_RE captures only the digits, while SPEAKER_ID_RE
-                    # spans the complete marker. Compare values and containment.
-                    if not any(
-                        pair.start() <= speaker.start() and speaker.end() <= pair.end()
-                        for pair in pairs
-                    ):
-                        raise JSONGenerationError(
-                            f"Scene {scene_number} Shot {shot_number} line {line_number} has a speaker ID that is not immediately paired with <Subject N>"
-                        )
-                if not dialogues:
-                    if speaker_ids:
-                        raise JSONGenerationError(
-                            f"Scene {scene_number} Shot {shot_number} line {line_number} uses a speaker ID without direct speech"
-                        )
-                    continue
-
-                for dialogue in dialogues:
-                    preceding = [pair for pair in pairs if pair.end() <= dialogue.start()]
-                    if not preceding:
-                        raise JSONGenerationError(
-                            f"Scene {scene_number} Shot {shot_number} line {line_number} direct speech requires '<Subject N> (Sx)' before the dialogue"
-                        )
-                    pair = preceding[-1]
-                    subject = int(pair.group(1))
-                    speaker = int(pair.group(2))
-                    existing_speaker = subject_to_speaker.get(subject)
-                    if existing_speaker is not None and existing_speaker != speaker:
-                        raise JSONGenerationError(
-                            f"<Subject {subject}> is assigned to both (S{existing_speaker}) and (S{speaker})"
-                        )
-                    existing_subject = speaker_to_subject.get(speaker)
-                    if existing_subject is not None and existing_subject != subject:
-                        raise JSONGenerationError(
-                            f"(S{speaker}) is assigned to both <Subject {existing_subject}> and <Subject {subject}>"
-                        )
-                    if existing_speaker is None:
-                        if speaker != next_new_speaker:
-                            raise JSONGenerationError(
-                                f"New speaker IDs must follow first-vocal-event order; expected (S{next_new_speaker}), got (S{speaker})"
-                            )
-                        subject_to_speaker[subject] = speaker
-                        speaker_to_subject[speaker] = subject
-                        next_new_speaker += 1
-                    current_scene[subject] = speaker
+                if SPEAKER_ID_RE.search(line):
+                    raise JSONGenerationError(
+                        f"Scene {scene_number} Shot {shot_number} line {line_number} contains a user-supplied speaker ID; speaker IDs are generated internally"
+                    )
+                pairs = _line_dialogue_subject_matches(
+                    line,
+                    context=(
+                        f"Scene {scene_number} Shot {shot_number} line {line_number}"
+                    ),
+                )
+                for _dialogue, subject_match in pairs:
+                    subject = int(subject_match.group(1))
+                    current_scene[subject] = subject
         scene_bindings.append(current_scene)
-    return subject_to_speaker, scene_bindings
+    return scene_bindings
 
 
 def _sentence(value: str) -> str:
@@ -528,26 +518,47 @@ def _format_timestamp(milliseconds: int) -> str:
 
 def _shot_dialogue_subjects(shot: Shot) -> set[int]:
     subjects: set[int] = set()
-    for line in shot.lines:
-        pairs = list(SPEAKER_PAIR_RE.finditer(line))
-        for dialogue in DIRECT_SPEECH_RE.finditer(line):
-            preceding = [pair for pair in pairs if pair.end() <= dialogue.start()]
-            if preceding:
-                subjects.add(int(preceding[-1].group(1)))
+    for line_number, line in enumerate(shot.lines, start=1):
+        for _dialogue, subject_match in _line_dialogue_subject_matches(
+            line, context=f"Shot line {line_number}"
+        ):
+            subjects.add(int(subject_match.group(1)))
     return subjects
 
 
+def _with_internal_speaker_ids(line: str, *, context: str) -> str:
+    matches = _line_dialogue_subject_matches(line, context=context)
+    insertion_points = {
+        subject_match.end(): int(subject_match.group(1))
+        for _dialogue, subject_match in matches
+    }
+    rendered = line
+    for position, subject in sorted(insertion_points.items(), reverse=True):
+        rendered = rendered[:position] + f" (S{subject})" + rendered[position:]
+    return rendered
+
+
 def _detailed_description_block(
+    common_lines: list[str],
     scene: Scene,
     active_audio: dict[int, tuple[int, int]],
 ) -> str:
-    parts = [_sentence(line) for line in scene.preamble]
+    parts = [_sentence(line) for line in common_lines]
+    parts.extend(_sentence(line) for line in scene.preamble)
     audio_by_subject: dict[int, list[tuple[int, int]]] = {}
     for audio, (subject, speaker) in active_audio.items():
         audio_by_subject.setdefault(subject, []).append((audio, speaker))
 
     for shot_number, shot in enumerate(scene.shots, start=1):
-        body = " ".join(_sentence(line) for line in shot.lines)
+        body = " ".join(
+            _sentence(
+                _with_internal_speaker_ids(
+                    line,
+                    context=f"Shot {shot_number} line {line_number}",
+                )
+            )
+            for line_number, line in enumerate(shot.lines, start=1)
+        )
         present_audio = {
             int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(body)
         }
@@ -605,6 +616,87 @@ def _validate_retention_rules(emd: Emd) -> None:
             )
 
 
+def _validate_common_prompt(emd: Emd) -> None:
+    if not isinstance(emd.common_prompt, list):
+        raise JSONGenerationError("common_prompt must be a list of strings")
+    for line_number, line in enumerate(emd.common_prompt, start=1):
+        if not isinstance(line, str) or not line.strip():
+            raise JSONGenerationError(
+                f"Common prompt line {line_number} must be a non-empty string"
+            )
+        if AUDIO_REFERENCE_RE.search(line):
+            raise JSONGenerationError(
+                f"Common prompt line {line_number} cannot contain an Audio reference"
+            )
+        if DIRECT_SPEECH_RE.search(line):
+            raise JSONGenerationError(
+                f"Common prompt line {line_number} cannot contain direct speech"
+            )
+        if SPEAKER_ID_RE.search(line):
+            raise JSONGenerationError(
+                f"Common prompt line {line_number} cannot contain a speaker ID"
+            )
+        searchable = _searchable(line, context=f"Common prompt line {line_number}")
+        for subject_match in SUBJECT_RE.finditer(searchable):
+            subject = int(subject_match.group(1))
+            if subject > len(emd.subjects):
+                raise JSONGenerationError(
+                    f"Common prompt line {line_number} references undefined <Subject {subject}>"
+                )
+        for speech_match in SPEECH_CUE_RE.finditer(line):
+            prefix = line[max(0, speech_match.start() - 80):speech_match.start()]
+            if not NEGATED_SPEECH_PREFIX_RE.search(prefix):
+                raise JSONGenerationError(
+                    f"Common prompt line {line_number} cannot contain a positive speech instruction"
+                )
+
+
+def _validate_no_user_speaker_ids(emd: Emd) -> None:
+    values: list[tuple[str, str]] = []
+    values.extend(
+        (f"Subject definition {index}", value)
+        for index, value in enumerate(emd.subjects, start=1)
+    )
+    values.extend(
+        (f"Retention rule {index}", rule.description)
+        for index, rule in enumerate(emd.retention_rules, start=1)
+        if isinstance(rule, RetentionRule) and isinstance(rule.description, str)
+    )
+    values.extend(
+        (f"Common prompt line {index}", value)
+        for index, value in enumerate(emd.common_prompt, start=1)
+        if isinstance(value, str)
+    )
+    for scene_number, scene in enumerate(emd.scenes, start=1):
+        values.extend(
+            (f"Scene {scene_number} preamble line {index}", value)
+            for index, value in enumerate(scene.preamble, start=1)
+        )
+        for shot_number, shot in enumerate(scene.shots, start=1):
+            values.extend(
+                (
+                    f"Scene {scene_number} Shot {shot_number} line {line_number}",
+                    value,
+                )
+                for line_number, value in enumerate(shot.lines, start=1)
+            )
+        if isinstance(scene.soundscape, Soundscape):
+            values.extend(
+                (f"Scene {scene_number} {label}", value)
+                for label, value in (
+                    ("environment", scene.soundscape.environment),
+                    ("sound effects", scene.soundscape.sound_effects),
+                    ("vocalization", scene.soundscape.vocalization),
+                )
+                if isinstance(value, str)
+            )
+    for context, value in values:
+        if isinstance(value, str) and SPEAKER_ID_RE.search(value):
+            raise JSONGenerationError(
+                f"{context} contains a user-supplied speaker ID; speaker IDs are generated internally"
+            )
+
+
 def _shot_object(
     emd: Emd,
     scene: Scene,
@@ -628,7 +720,8 @@ def _shot_object(
         scene_speakers,
         allows_dialogue=allows_dialogue,
     )
-    detailed = _detailed_description_block(scene, active_audio)
+    common_lines = _common_lines_for_scene(emd, active_subjects)
+    detailed = _detailed_description_block(common_lines, scene, active_audio)
     detailed_audio = {
         int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(detailed)
     }
@@ -672,8 +765,10 @@ def generate_json(emd: Emd, *, steps: int = 8) -> str:
         raise JSONGenerationError(
             f"Scene count must be between 1 and 128; got {len(emd.scenes)}"
         )
+    _validate_no_user_speaker_ids(emd)
     _validate_retention_rules(emd)
-    _, scene_speakers = _speaker_bindings(emd)
+    _validate_common_prompt(emd)
+    scene_speakers = _scene_speaker_bindings(emd)
     plan = {
         "prompt_prefix": "",
         "defaults": {"duration_seconds": 5, "steps": steps},

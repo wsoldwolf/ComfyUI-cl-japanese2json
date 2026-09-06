@@ -44,13 +44,14 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(prompt_nodes), 1)
                 source = prompt_nodes[0]["widgets_values"][0]
-                self.assertNotIn("# 共通プロンプト", source)
+                self.assertIn("# 共通プロンプト", source)
                 self.assertIn("## ショット", source)
+                self.assertNotRegex(source, r"\(S[1-9][0-9]*\)")
                 for line in source.splitlines():
                     if "「" in line:
                         self.assertRegex(
                             line,
-                            r"<Subject [1-9][0-9]*> \(S[1-9][0-9]*\).*「",
+                            r"<Subject [1-9][0-9]*>.*「",
                         )
 
                 canonical = llmj2e.translate_markdown(
@@ -59,9 +60,9 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     "system",
                     max_tokens=16_384,
                 )
-                plan = jsongen.validate_final_json(
-                    jsongen.generate_json(mdparse.parse_markdown(canonical))
-                )
+                emd = mdparse.parse_markdown(canonical)
+                self.assertTrue(emd.common_prompt)
+                plan = jsongen.validate_final_json(jsongen.generate_json(emd))
                 self.assertEqual(
                     [
                         section.split(":", 1)[0]
@@ -81,6 +82,8 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     for value in node.get("widgets_values", []):
                         if not isinstance(value, str):
                             continue
+                        self.assertNotIn("(Sx)", value)
+                        self.assertNotRegex(value, r"共通プロンプト.*廃止")
                         for line in value.splitlines():
                             if line.startswith("# シーン"):
                                 self.assertNotIn("秒生成する", line)

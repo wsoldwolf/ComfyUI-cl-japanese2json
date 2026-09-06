@@ -110,6 +110,9 @@ JAPANESE_RETENTION_RE = re.compile(
 JAPANESE_SHOT_RE = re.compile(
     r"## ショット(?: ((?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)秒)?"
 )
+USER_SPEAKER_ID_RE = re.compile(r"\(S[1-9][0-9]*\)")
+COMMON_AUDIO_RE = re.compile(r"<Audio [1-9][0-9]*>")
+COMMON_DIRECT_SPEECH_RE = re.compile(r"<d>|</d>|「|」")
 
 
 def _canonical_scene_directive(line: str, line_number: int) -> str:
@@ -242,6 +245,7 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
     parent_last_shot_ms: int | None = None
     seen_subjects = False
     seen_retention = False
+    seen_common = False
     seen_scene = False
 
     for line_number, line in enumerate(plain_text.lstrip("\ufeff").splitlines(), start=1):
@@ -250,9 +254,9 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             continue
 
         if line == "# サブジェクト":
-            if seen_subjects or seen_retention or seen_scene:
+            if seen_subjects or seen_retention or seen_common or seen_scene:
                 raise TranslationError(
-                    f"# サブジェクト must appear exactly once before retention and scenes (line {line_number})"
+                    f"# サブジェクト must appear exactly once before retention, common prompt, and scenes (line {line_number})"
                 )
             seen_subjects = True
             current = LexicalBlock("# Subjects", "Subjects")
@@ -264,15 +268,10 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             parent_last_shot_ms = None
             continue
 
-        if line == "# 共通プロンプト":
-            raise TranslationError(
-                f"# 共通プロンプト was removed from the draft syntax (line {line_number}); move its content into each Scene preamble or a reusable Subject"
-            )
-
         if line == "# 保持分析":
-            if seen_retention or seen_scene:
+            if seen_retention or seen_common or seen_scene:
                 raise TranslationError(
-                    f"# 保持分析 must appear at most once before scenes (line {line_number})"
+                    f"# 保持分析 must appear at most once before common prompt and scenes (line {line_number})"
                 )
             seen_retention = True
             current = LexicalBlock("# Retention", "Retention")
@@ -284,7 +283,26 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             parent_last_shot_ms = None
             continue
 
+        if line == "# 共通プロンプト":
+            if seen_common or seen_scene:
+                raise TranslationError(
+                    f"# 共通プロンプト must appear at most once before scenes (line {line_number})"
+                )
+            seen_common = True
+            current = LexicalBlock("# Common", "Common")
+            blocks.append(current)
+            directive_count += 1
+            parent_section = "Common"
+            parent_has_soundscape = False
+            parent_has_shot = False
+            parent_last_shot_ms = None
+            continue
+
         if line == "# シーン" or line.startswith("# シーン "):
+            if blocks and blocks[-1].section == "Common" and not blocks[-1].records:
+                raise TranslationError(
+                    f"# 共通プロンプト must contain at least one bullet before line {line_number}"
+                )
             if parent_section == "Scene" and not parent_has_shot:
                 raise TranslationError(
                     f"Previous Scene must contain at least one ## ショット before line {line_number}"
@@ -395,13 +413,27 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 raise TranslationError(
                     f"Bullet outside a recognized section at line {line_number}"
                 )
+            body = line[2:]
+            if USER_SPEAKER_ID_RE.search(body):
+                raise TranslationError(
+                    f"Speaker IDs are generated internally; remove '(Sx)' at line {line_number}"
+                )
+            if current.section == "Common":
+                if COMMON_AUDIO_RE.search(body):
+                    raise TranslationError(
+                        f"# 共通プロンプト cannot contain <Audio N> at line {line_number}"
+                    )
+                if COMMON_DIRECT_SPEECH_RE.search(body):
+                    raise TranslationError(
+                        f"# 共通プロンプト cannot contain direct speech at line {line_number}"
+                    )
             record_number += 1
             bullet_count += 1
             record_id = f"R{record_number:06d}"
             if current.section == "Retention":
                 current.records.append(
                     _retention_record(
-                        line[2:],
+                        body,
                         line_number=line_number,
                         record_id=record_id,
                         block_index=len(blocks) - 1,
@@ -409,7 +441,7 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 )
                 continue
             if current.section == "Soundscape":
-                match = re.fullmatch(r"(環境音|効果音|発声)\s*[:：]\s*(.*)", line[2:])
+                match = re.fullmatch(r"(環境音|効果音|発声)\s*[:：]\s*(.*)", body)
                 if match is None:
                     raise TranslationError(
                         f"Invalid soundscape bullet at line {line_number}; expected Environment, Sound effects, or Vocalization"
@@ -458,7 +490,7 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 record_id=record_id,
                 section=current.section,
                 block_index=len(blocks) - 1,
-                payload=protect_text(line[2:], namespace=record_id),
+                payload=protect_text(body, namespace=record_id),
             )
             current.records.append(record)
             continue
@@ -471,6 +503,10 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
         raise TranslationError("Final Shot must contain at least one bullet")
     if blocks and blocks[-1].section == "Soundscape" and not blocks[-1].records:
         raise TranslationError("Final Soundscape must contain at least one bullet")
+    if seen_common and not any(
+        block.section == "Common" and block.records for block in blocks
+    ):
+        raise TranslationError("# 共通プロンプト must contain at least one bullet")
     if not seen_scene:
         raise TranslationError("At least one # シーン directive is required")
 
@@ -490,6 +526,7 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
 SECTION_STREAM_CODES = {
     "Subjects": "SUB",
     "Retention": "RET",
+    "Common": "COM",
     "ScenePreamble": "SCN",
     "Shot": "SCN",
     "Soundscape": "SND",
@@ -544,8 +581,9 @@ def _user_payload(
         "Translate the Japanese prose inside the single protected stream below. Return only the "
         "translated raw stream, without JSON or quotes. "
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
-        "A SUB marker starts a singular noun phrase ending in an ASCII period; RET, SCN, and SND "
-        "markers start concise natural US English. RET translates only a retention explanation. "
+        "A SUB marker starts a singular noun phrase ending in an ASCII period; RET, COM, SCN, and SND "
+        "markers start concise natural US English. RET translates only a retention explanation, "
+        "and COM translates one reusable global prompt line. "
         "Keep one segment after each marker and preserve the "
         "marker order. Do not replace a SUB marker with a label, index, copula, or framing text. "
         "Copy the final stop placeholder after translating the last segment. "
@@ -853,7 +891,7 @@ def _structural_tokens(stream: TranslationStream) -> list[str]:
 
 def _structural_pattern(stream: TranslationStream) -> re.Pattern[str]:
     return re.compile(
-        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|RET|SCN|SND)[0-9]+)X"
+        re.escape(stream.prefix) + r"(?:D[0-9]+|(?:SUB|RET|COM|SCN|SND)[0-9]+)X"
     )
 
 
@@ -1505,7 +1543,7 @@ def _rebuild(document: LexicalDocument) -> str:
     directive_count = sum(
         1
         for line in canonical.splitlines()
-        if line in {"# Subjects", "# Retention", "## Shot", "## Soundscape"}
+        if line in {"# Subjects", "# Retention", "# Common", "## Shot", "## Soundscape"}
         or line.startswith("# Scene")
         or line.startswith("## Shot ")
     )

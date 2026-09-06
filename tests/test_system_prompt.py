@@ -68,6 +68,7 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("output only a singular English noun phrase", prompt)
         self.assertIn("RET placeholders start retention-analysis text", prompt)
         self.assertIn("SND placeholders start soundscape text", prompt)
-        self.assertIn("speaker IDs such as (S1)", prompt)
+        self.assertIn("COM placeholders start reusable global prompt text", prompt)
+        self.assertNotIn("speaker IDs such as (S1)", prompt)
         self.assertNotIn("<Subject N> is", prompt)
         self.assertNotIn("photo prompt", prompt.lower())

@@ -12,7 +12,7 @@
 
 LLMは最終JSON、ディレクティブ、ショット構造、参照関係、話者ID、保持関係を決定しない。これらはPythonが処理する。
 
-本版はドラフトの破壊的改訂であり、旧`# 共通プロンプト`、暗黙ショット、`N秒生成する`、`継続する`との後方互換性を持たない。
+本版はドラフトの破壊的改訂であり、ユーザーが記述する旧来の`(Sx)`話者ID、暗黙ショット、`N秒生成する`、`継続する`との後方互換性を持たない。
 
 ## 2. 対象範囲
 
@@ -21,8 +21,9 @@ LLMは最終JSON、ディレクティブ、ショット構造、参照関係、�
 - UTF-8日本語縮小版Markdown
 - Subject、Picture、Video、Audio参照タグ
 - 日本語ダイレクトスピーチ
-- 文書全体で安定した`(Sx)`話者ID
+- Subject番号からPythonが生成する安定した`(Sx)`話者ID
 - シーンとシーン内ショット
+- Sceneへ条件付き適用するグローバル共通プロンプト
 - シーンローカルな音響許可リスト
 - Subject単位のグローバル保持分析規則
 - MiniMax H3 Full-Referenceの6セクション
@@ -76,15 +77,16 @@ tests/
 ```text
 [# サブジェクト]
 [# 保持分析]
+[# 共通プロンプト]
 # シーン ...
 ...
 ```
 
 - `# サブジェクト`は0又は1回。
 - `# 保持分析`は0又は1回。存在する場合はSubjectの後、最初のSceneより前。
+- `# 共通プロンプト`は0又は1回。存在する場合は、Subject又はRetentionも存在するならその後、最初のSceneより前。
 - `# シーン`は1～128回。
-- SubjectとRetentionの繰り返し又はScene開始後の出現はエラー。
-- `# 共通プロンプト`は廃止済みでありエラー。
+- Subject、Retention、Commonの繰り返し、順序違反又はScene開始後の出現はエラー。
 
 ### 5.2 Subject
 
@@ -135,7 +137,24 @@ Subject定義の`<Picture N>`と`<Video N>`は出典を表す。別の独立参�
 - アクティブな属性転送元の規則を適用する場合、転送先も同じシーンでアクティブでなければならない。
 - 明示規則のないアクティブSubjectは`fully_preserved`へフォールバックする。
 
-### 5.4 Scene
+### 5.4 Common
+
+```text
+# 共通プロンプト
+* 明るい昼の近代的なオフィス街を鮮やかな2Dアニメ調で描く。
+* <Subject 1>と<Subject 2>の外観を混同しない。
+```
+
+Commonはグローバルに宣言するが、各Sceneの`detailed_description`へ次の規則で行単位に適用する。
+
+- `<Subject N>`を含まない行は全Sceneへ適用する。
+- `<Subject N>`を含む行は、その行が参照する全SubjectがScene preamble又はShot本文でアクティブな場合だけ適用する。
+- CommonのSubject参照だけではSubjectをアクティブにしない。
+- 適用後の順序はCommon、Scene preamble、Shot本文とする。
+- `<Audio N>`、ダイレクトスピーチ、`(Sx)`話者ID又は肯定的な発声指示を書けない。
+- Commonは1個以上の箇条書きを持つ。
+
+### 5.5 Scene
 
 ```text
 # シーン [N秒] [継続]
@@ -151,7 +170,7 @@ Subject定義の`<Picture N>`と`<Video N>`は出典を表す。別の独立参�
 
 Sceneディレクティブ直下から最初のShotまでの箇条書きはScene preambleである。これはFull-Referenceの`detailed_description`における`[Shot 1]`より前の文章となり、シーン全体のスタイル、環境、前提を書く。ダイレクトスピーチは書けない。
 
-### 5.5 Shot
+### 5.6 Shot
 
 ```text
 ## ショット
@@ -170,7 +189,7 @@ Sceneディレクティブ直下から最初のShotまでの箇条書きはScene
 
 2個目以降はJSON内で`[Shot N] At MM:SS.mmm, ...`へ変換する。ここで時刻はシーン先頭からの経過時刻である。
 
-### 5.6 Soundscape
+### 5.7 Soundscape
 
 ```text
 ## 音響
@@ -205,16 +224,13 @@ Sceneディレクティブ直下から最初のShotまでの箇条書きはScene
 
 ### 6.2 話者ID
 
-`(S1)`、`(S2)`以降を保護対象とする。`<Subject N> (Sx)`又は`<Subject N>(Sx)`として隣接している場合は、Subject参照と話者IDを合わせた1個の不可分プレースホルダとして保護する。LLMは話者ペアを分離したり、その間へ語句を挿入したりできない。
+`(Sx)`は入力構文ではなくJSONGENが生成する内部表現である。ユーザー入力及び正規形Markdownのどの箇所に`(Sx)`があってもエラーとし、翻訳用プレースホルダの保護対象にはしない。
 
-話者IDの意味規則はJSONGENで検証する。
-
-- 実際の発声が文書に現れる順に、新規話者をS1、S2、...と割り当てる。
-- 同じSubjectは同じIDを再利用する。
-- 同じIDを異なるSubjectへ割り当てない。
-- 話者IDは同じ行で`<Subject N> (Sx)`又は`<Subject N>(Sx)`と隣接させる。
-- 話者IDはダイレクトスピーチより前に置く。
-- ダイレクトスピーチのない行へ話者IDを書かない。
+- 各ダイレクトスピーチの直前にある、同じ行で最も近い`<Subject N>`を話者とする。
+- 話者IDはSubject番号と同一にし、`<Subject N>`へ`(SN)`を割り当てる。登場順又は発声順では変化しない。
+- JSONGENは実際の台詞位置、対応するAudio定義及びAudio利用説明だけへ話者IDを生成する。
+- 通常の動作参照及び`retention_analysis`へ話者IDを生成しない。
+- 同じ行で台詞より前にSubject参照がなければエラーとする。
 
 ### 6.3 ダイレクトスピーチ
 
@@ -242,10 +258,8 @@ Sceneディレクティブ直下から最初のShotまでの箇条書きはScene
 各箇条書き本文について次の順に処理する。
 
 1. 既存`<d>...</d>`
-2. `<Subject N> (Sx)`話者ペア
-3. 残りの参照タグ
-4. 残りの話者ID
-5. 日本語鉤括弧台詞
+2. 参照タグ
+3. 日本語鉤括弧台詞
 
 各要素を区間固有の`CLJ...X`プレースホルダへ置換する。復元時は全プレースホルダがバイト単位で完全一致し、各1回でなければならない。
 
@@ -257,6 +271,7 @@ Sceneディレクティブ直下から最初のShotまでの箇条書きはScene
 | --- | --- |
 | `# サブジェクト` | `# Subjects` |
 | `# 保持分析` | `# Retention` |
+| `# 共通プロンプト` | `# Common` |
 | `# シーン 8秒 継続` | `# Scene 8sec CONTINUE` |
 | `## ショット 3.25秒` | `## Shot 3.25sec` |
 | `## 音響` | `## Soundscape` |
@@ -269,10 +284,11 @@ Retentionの固定マーカー、Soundscapeのラベルと固定値もPythonが�
 
 - `SUB`: Subject
 - `RET`: Retention説明
+- `COM`: Common
 - `SCN`: Scene preamble及びShot本文
 - `SND`: Environment又はSound effects
 
-参照タグ、話者ID、台詞はさらに区間固有の保護プレースホルダとなる。構造化JSON転送は用いず、1本の生テキストストリームを`TRANSLATION_STREAM_BEGIN`と`TRANSLATION_STREAM_END`の間へ置く。
+参照タグと台詞はさらに区間固有の保護プレースホルダとなる。構造化JSON転送は用いず、1本の生テキストストリームを`TRANSLATION_STREAM_BEGIN`と`TRANSLATION_STREAM_END`の間へ置く。話者IDは翻訳後に生成するためストリームへ含めない。
 
 実効コンテキスト長に文書全体が収まる場合、推論要求は1回である。収まらない場合だけレコード境界でバッチ分割し、1レコードを分割しない。
 
@@ -286,8 +302,8 @@ Retentionの固定マーカー、Soundscapeのラベルと固定値もPythonが�
 - JSON、Markdown fence、説明、推論を返さない。
 - 全`CLJT...X`及び`CLJ...X`を翻訳、変更、移動、複製、削除しない。
 - SUBは`<Subject N> is`の右辺となる単数名詞句にする。
-- RET、SCN、SNDは自然で簡潔な英語プロンプト文にする。
-- 保護された台詞と話者IDを変更しない。
+- RET、COM、SCN、SNDは自然で簡潔な英語プロンプト文にする。
+- 保護された参照タグと台詞を変更しない。
 - `/no_think`を翻訳対象に含めない。
 
 Qwen3では可能な場合、APIの`enable_thinking=False`等も使用する。正常に閉じた先頭`<think>...</think>`を1個だけ除去できる。途中、複数、未閉鎖又は翻訳本文のないthinkingはエラーである。
@@ -327,10 +343,13 @@ Qwen3では可能な場合、APIの`enable_thinking=False`等も使用する。�
 # Retention
 * <Subject 1> fully_preserved: The face, hairstyle, hair color, and clothing from <Picture 1> are retained.
 
-# Scene 8sec
+# Common
 * A bright modern office district is rendered in a vivid 2D anime style.
+
+# Scene 8sec
+* The camera frames the character from the front.
 ## Shot
-* <Subject 1> (S1) says <d>[Japanese]ようこそ！</d>.
+* <Subject 1> says <d>[Japanese]ようこそ！</d>.
 ## Shot 4.5sec
 * The camera slowly approaches <Subject 1>.
 ## Soundscape
@@ -375,6 +394,7 @@ class Scene:
 class Emd:
     subjects: list[str]
     retention_rules: list[RetentionRule]
+    common_prompt: list[str]
     scenes: list[Scene]
 ```
 
@@ -395,7 +415,7 @@ MDPARSEは翻訳済み本文を変更せず格納し、トップレベル順序�
 }
 ```
 
-- `prompt_prefix`は必ず空文字列。廃止した共通プロンプトを格納しない。
+- `prompt_prefix`は必ず空文字列。Commonはこのキーへ格納せず、各Sceneの`detailed_description`へ条件付きで展開する。
 - `defaults.duration_seconds`は5。
 - `defaults.steps`はノード入力値。1～10000の整数。
 - `shots`はScene順の1～128要素。
@@ -414,16 +434,20 @@ Scene preambleと全Shot本文から、ダイレクトスピーチ領域を除�
 - 抽出されたSubjectだけをアクティブとする。
 - 未定義Subjectはエラー。
 - Subject定義に書かれただけのSubjectはアクティブにしない。
+- Commonに書かれただけのSubjectもアクティブにしない。
 - SubjectがないSceneはエフェクト専用として固定文を出す。
+
+アクティブSubjectを確定した後、Commonの各行を5.4の規則でSceneへ選択する。Commonに未定義Subjectがあればエラーとする。
 
 ### 10.4 発声許可
 
 発声は次の全条件を必要とする。
 
 1. Shot本文に保護済みダイレクトスピーチがある。
-2. その台詞より前の同じ行に`<Subject N> (Sx)`がある。
+2. その台詞より前の同じ行に`<Subject N>`がある。
 3. Scene Soundscapeが`EXPLICIT_DIALOGUE_ONLY`である。
-4. 話者IDが文書全体の割当規則を満たす。
+
+JSONGENは各台詞の直前にある最も近いSubject参照から`(SN)`を生成する。入力に話者IDがある場合はエラーとする。
 
 肯定的な英語発声動詞があり同じ行に台詞がない場合は、別の明示台詞がScene内にあってもエラーとする。否定された`does not speak`、`without speaking`等は発声要求に数えない。
 
@@ -487,11 +511,12 @@ No reference labels are active in this scene.
 
 #### detailed_description
 
-- Scene preambleを`[Shot 1]`より前に出す。
+- 適用対象となったCommon行を先頭へ出す。
+- Scene preambleをCommonの後、`[Shot 1]`より前に出す。
 - 最初のShotは`[Shot 1] ...`。
 - 後続Shotは`[Shot N] At MM:SS.mmm, ...`。
 - 箇条書きは元順序で英文の文として結合する。
-- Subject、Picture、Video、Audio、話者ID、ダイレクトスピーチを必要位置に保持する。
+- Subject、Picture、Video、Audio、ダイレクトスピーチを必要位置に保持し、実発声位置へ話者IDを生成する。
 
 #### overall_soundscape
 
@@ -523,7 +548,8 @@ Environment、Sound effects、許可済み明示台詞だけを列挙し、最�
 - 空入力、未知行、未知ディレクティブ
 - 廃止構文
 - 不正Retention、Shot、Soundscape
-- 台詞、話者ID、発声許可の不一致
+- Commonの禁止要素又は未定義Subject
+- 台詞、内部話者ID、発声許可の不一致
 - 未定義Subject
 - 属性転送の不正な転送先
 - プレースホルダ欠落、重複、移動、他区間混入
@@ -557,9 +583,10 @@ Environment、Sound effects、許可済み明示台詞だけを列挙し、最�
 ## 13. 受入条件
 
 - 新日本語構文を正規形へ変換できる。
-- 旧共通プロンプトと暗黙Shotを拒否する。
+- CommonをSubject集合に応じて適用し、それだけでSubjectを有効化しない。
+- 暗黙Shotを拒否する。
 - Shot境界とミリ秒時刻を正しく出す。
-- `(Sx)`を保護し、全体で一貫性を検証する。
+- ユーザー入力の`(Sx)`を拒否し、話者Subject番号から`(SN)`を生成する。
 - 保持分析をアクティブSubjectへだけ適用する。
 - 6セクションを公式順で生成する。
 - `retention_analysis`へ話者IDを書かない。

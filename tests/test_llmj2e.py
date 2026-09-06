@@ -23,10 +23,13 @@ SOURCE = """# サブジェクト
 # 保持分析
 * <Subject 1> 完全に保持: 外観を維持する。
 
+# 共通プロンプト
+* 鮮やかなアニメ調にする。
+
 # シーン 5秒
 * 夜の街。
 ## ショット
-* <Subject 1> (S1)が「こんにちは」と言う。
+* <Subject 1>が「こんにちは」と言う。
 """
 
 
@@ -36,6 +39,7 @@ class LLMJ2ETests(unittest.TestCase):
         result = llmj2e.translate_markdown(SOURCE, llm, "system", max_tokens=64)
         self.assertIn("# Subjects", result)
         self.assertIn("# Retention", result)
+        self.assertIn("# Common", result)
         self.assertIn("# Scene 5sec", result)
         self.assertIn("<Picture 1>", result)
         self.assertIn("<Subject 1>", result)
@@ -51,13 +55,14 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIsInstance(stream, str)
         self.assertNotIn("/no_think", stream)
         self.assertNotIn('{"translation_stream"', call["messages"][-1]["content"])
-        self.assertEqual(len(records), 4)
+        self.assertEqual(len(records), 5)
 
     def test_stream_replaces_directives_references_and_dialogue(self) -> None:
         document = llmj2e.lex_japanese_markdown(SOURCE)
         stream = llmj2e._build_translation_stream(document.records)
         self.assertNotIn("# サブジェクト", stream.text)
         self.assertNotIn("# 保持分析", stream.text)
+        self.assertNotIn("# 共通プロンプト", stream.text)
         self.assertNotIn("# シーン", stream.text)
         self.assertNotIn("<Picture 1>", stream.text)
         self.assertNotIn("<Subject 1>", stream.text)
@@ -65,16 +70,17 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertRegex(stream.text, r"CLJT\d+D0X")
         self.assertRegex(stream.text, r"CLJT\d+SUB1X")
         self.assertRegex(stream.text, r"CLJT\d+RET2X")
-        self.assertRegex(stream.text, r"CLJT\d+SCN3X")
+        self.assertRegex(stream.text, r"CLJT\d+COM3X")
         self.assertRegex(stream.text, r"CLJT\d+SCN4X")
-        self.assertNotRegex(stream.text, r"CLJT\d+(?:SUB|RET|SCN)\d+EX")
+        self.assertRegex(stream.text, r"CLJT\d+SCN5X")
+        self.assertNotRegex(stream.text, r"CLJT\d+(?:SUB|RET|COM|SCN)\d+EX")
         replacements = {
             value
             for record in document.records
             for value in record.payload.replacements.values()
         }
         self.assertIn("<Picture 1>", replacements)
-        self.assertIn("<Subject 1> (S1)", replacements)
+        self.assertIn("<Subject 1>", replacements)
         self.assertIn("<d>[Japanese]こんにちは</d>", replacements)
 
     def test_stream_placeholders_are_unique_and_declared_per_record(self) -> None:
@@ -172,11 +178,11 @@ class LLMJ2ETests(unittest.TestCase):
         llm = FakeLLM([omit_directives])
         with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
             output = llmj2e.translate_markdown(SOURCE, llm, "sys", max_tokens=128)
-        self.assertEqual(output.count("* "), 4)
+        self.assertEqual(output.count("* "), 5)
         self.assertEqual(len(llm.calls), 1)
         self.assertTrue(
             any(
-                "reconstructing document structure from 4 intact record"
+                "reconstructing document structure from 5 intact record"
                 in line
                 for line in captured.output
             )
@@ -414,14 +420,30 @@ class LLMJ2ETests(unittest.TestCase):
             )
         self.assertEqual(llm.calls, [])
 
-    def test_removed_common_directive_is_rejected(self) -> None:
-        with self.assertRaises(errors.TranslationError):
-            llmj2e.translate_markdown(
-                "# 共通プロンプト\n* 共通。\n# シーン\n## ショット\n* 動作。",
-                FakeLLM(),
-                "sys",
-                max_tokens=64,
-            )
+    def test_common_directive_is_translated_once_and_rebuilt(self) -> None:
+        llm = FakeLLM()
+        output = llmj2e.translate_markdown(
+            "# 共通プロンプト\n* 共通。\n# シーン\n## ショット\n* 動作。",
+            llm,
+            "sys",
+            max_tokens=64,
+        )
+        self.assertIn("# Common", output)
+        records = request_records(llm.calls[0]["messages"])
+        self.assertEqual([record["section"] for record in records], ["Common", "Scene"])
+
+    def test_common_restrictions_and_explicit_speaker_ids_fail_before_inference(self) -> None:
+        invalid = (
+            "# 共通プロンプト\n* <Audio 1>を使う。\n# シーン\n## ショット\n* 動作。",
+            "# 共通プロンプト\n* 「台詞」。\n# シーン\n## ショット\n* 動作。",
+            "# シーン\n## ショット\n* <Subject 1> (S1)が「台詞」と言う。",
+        )
+        for source in invalid:
+            with self.subTest(source=source):
+                llm = FakeLLM()
+                with self.assertRaises(errors.TranslationError):
+                    llmj2e.translate_markdown(source, llm, "sys", max_tokens=64)
+                self.assertEqual(llm.calls, [])
 
     def test_scene_soundscape_subdirective_translates_only_audio_values(self) -> None:
         source = (

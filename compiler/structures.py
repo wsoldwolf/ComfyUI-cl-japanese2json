@@ -54,4 +54,5 @@ class Scene:
 class Emd:
     subjects: list[str] = field(default_factory=list)
     retention_rules: list[RetentionRule] = field(default_factory=list)
+    common_prompt: list[str] = field(default_factory=list)
     scenes: list[Scene] = field(default_factory=list)

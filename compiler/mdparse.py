@@ -34,6 +34,9 @@ RETENTION_LINE_RE = re.compile(
     r"(fully_preserved|partially_preserved|attribute_transfer|weak_reference)"
     r"(?: -> <Subject ([1-9][0-9]*)>)?: (.+)$"
 )
+SPEAKER_ID_RE = re.compile(r"(?<!\\)\(S[1-9][0-9]*\)")
+AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio [1-9][0-9]*(?<!\\)>")
+DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
 
 
 def _parse_scene_directive(line: str) -> tuple[int, bool] | None:
@@ -166,6 +169,7 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
     retention_subjects: set[int] = set()
     seen_subjects_directive = False
     seen_retention_directive = False
+    seen_common_directive = False
     seen_scene_directive = False
     directive_count = 0
 
@@ -177,9 +181,14 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
             continue
 
         if line == "# Subjects":
-            if seen_subjects_directive or seen_retention_directive or seen_scene_directive:
+            if (
+                seen_subjects_directive
+                or seen_retention_directive
+                or seen_common_directive
+                or seen_scene_directive
+            ):
                 raise MarkdownParseError(
-                    f"# Subjects must appear exactly once before retention and scenes (line {line_number})"
+                    f"# Subjects must appear exactly once before retention, common prompt, and scenes (line {line_number})"
                 )
             seen_subjects_directive = True
             directive_count += 1
@@ -188,13 +197,24 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
             continue
 
         if line == "# Retention":
-            if seen_retention_directive or seen_scene_directive:
+            if seen_retention_directive or seen_common_directive or seen_scene_directive:
                 raise MarkdownParseError(
-                    f"# Retention must appear at most once before scenes (line {line_number})"
+                    f"# Retention must appear at most once before common prompt and scenes (line {line_number})"
                 )
             seen_retention_directive = True
             directive_count += 1
             state = "RETENTION"
+            current_scene = None
+            continue
+
+        if line == "# Common":
+            if seen_common_directive or seen_scene_directive:
+                raise MarkdownParseError(
+                    f"# Common must appear at most once before scenes (line {line_number})"
+                )
+            seen_common_directive = True
+            directive_count += 1
+            state = "COMMON"
             current_scene = None
             continue
 
@@ -309,6 +329,10 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
         body = line[2:]
         if not body.strip():
             raise MarkdownParseError(f"Empty bullet at line {line_number}")
+        if SPEAKER_ID_RE.search(body):
+            raise MarkdownParseError(
+                f"Speaker IDs are generated internally and cannot be written at line {line_number}"
+            )
         if state == "SUBJECTS":
             emd.subjects.append(body)
             if len(emd.subjects) > 4:
@@ -324,6 +348,16 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                     seen_subjects=retention_subjects,
                 )
             )
+        elif state == "COMMON":
+            if AUDIO_REFERENCE_RE.search(body):
+                raise MarkdownParseError(
+                    f"Common prompt cannot contain an Audio reference at line {line_number}"
+                )
+            if DIRECT_SPEECH_RE.search(body):
+                raise MarkdownParseError(
+                    f"Common prompt cannot contain direct speech at line {line_number}"
+                )
+            emd.common_prompt.append(body)
         elif state == "PREAMBLE" and current_scene is not None:
             if current_scene.shots or scene_has_soundscape:
                 raise MarkdownParseError(
@@ -352,14 +386,17 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                 f"Scene {len(emd.scenes)} Soundscape must contain at least one bullet"
             )
         _validate_scene(current_scene, len(emd.scenes))
+    if seen_common_directive and not emd.common_prompt:
+        raise MarkdownParseError("# Common must contain at least one bullet")
     if not emd.scenes:
         raise MarkdownParseError("At least one # Scene directive is required")
 
     LOGGER.info(
-        "[cl_japanese2json] Parsed %d directive(s): %d subject(s), %d retention rule(s), %d scene(s)",
+        "[cl_japanese2json] Parsed %d directive(s): %d subject(s), %d retention rule(s), %d common prompt line(s), %d scene(s)",
         directive_count,
         len(emd.subjects),
         len(emd.retention_rules),
+        len(emd.common_prompt),
         len(emd.scenes),
     )
     return emd
