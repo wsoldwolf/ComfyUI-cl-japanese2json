@@ -117,6 +117,7 @@ JAPANESE_LIP_SYNC_RE = re.compile(
     r"リップシンク\s*[:：]\s*"
     r"<Subject ([0-9]+)>\s*<-\s*<Audio ([0-9]+)>\s*(.+)"
 )
+JAPANESE_LIP_SYNC_DIRECTIVE_PREFIX_RE = re.compile(r"リップシンク\s*[:：]")
 JAPANESE_BGM_REUSE_RE = re.compile(
     r"<Audio ([0-9]+)>\s+(完全コピー|部分コピー)"
     r"(?:\s+([0-9]{2,}:[0-5][0-9]\.[0-9]{3})-"
@@ -523,7 +524,7 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             record_number += 1
             bullet_count += 1
             record_id = f"R{record_number:06d}"
-            if body.startswith("リップシンク"):
+            if JAPANESE_LIP_SYNC_DIRECTIVE_PREFIX_RE.match(body):
                 if current.section != "Shot":
                     raise TranslationError(
                         f"Lip-sync bullet at line {line_number} must belong to a Shot"

@@ -493,6 +493,24 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertNotIn("こんにちは", llm.calls[0]["messages"][-1]["content"])
 
+    def test_lip_sync_word_without_directive_colon_is_ordinary_prose(self) -> None:
+        source = (
+            "# サブジェクト\n* 人物。\n"
+            "# 共通プロンプト\n"
+            "* リップシンク中は<Subject 1>の顔と口元を明瞭に表示する。\n"
+            "# シーン 5秒\n## ショット\n* <Subject 1>が身体を動かす。"
+        )
+        llm = FakeLLM()
+        output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=128)
+        records = request_records(llm.calls[0]["messages"])
+
+        self.assertEqual(
+            [record["section"] for record in records],
+            ["Subjects", "Common", "Scene"],
+        )
+        self.assertIn("# Common", output)
+        self.assertIn("<Subject 1>", output)
+
     def test_invalid_lip_sync_fails_before_inference(self) -> None:
         invalid = (
             "# シーン\n## ショット\n* リップシンク: <Subject 1> <- <Audio 1>",
