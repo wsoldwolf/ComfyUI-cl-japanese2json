@@ -25,6 +25,7 @@ class Soundscape:
     environment: str | None = None
     sound_effects: str | None = None
     vocalization: str | None = None
+    background_music: str | None = None
 
 
 @dataclass

@@ -31,6 +31,7 @@ CANONICAL = """# Subjects
 ## Soundscape
 * Environment: Soft wind.
 * Vocalization: NONE
+* Background music: Sparse piano at a slow tempo.
 
 # Scene 5sec CONTINUE
 ## Shot
@@ -58,6 +59,10 @@ class MarkdownParserTests(unittest.TestCase):
         self.assertEqual(emd.scenes[0].preamble, ["A clean anime style."])
         self.assertEqual([shot.start_ms for shot in emd.scenes[0].shots], [0, 3250])
         self.assertEqual(emd.scenes[0].shots[0].lines, ["<Subject 1> acts."])
+        self.assertEqual(
+            emd.scenes[0].soundscape.background_music,
+            "Sparse piano at a slow tempo.",
+        )
 
     def test_attribute_transfer_requires_a_different_target(self) -> None:
         valid = parse_markdown(
@@ -110,12 +115,41 @@ class MarkdownParserTests(unittest.TestCase):
             "# Scene 5sec\n## Shot\n* Action.\n\n## Soundscape\n"
             "* Environment: Soft wind.\n"
             "* Sound effects: Footsteps.\n"
-            "* Vocalization: NONE"
+            "* Vocalization: NONE\n"
+            "* Background music: Sparse piano."
         )
         soundscape = emd.scenes[0].soundscape
         self.assertEqual(soundscape.environment, "Soft wind.")
         self.assertEqual(soundscape.sound_effects, "Footsteps.")
         self.assertEqual(soundscape.vocalization, "NONE")
+        self.assertEqual(soundscape.background_music, "Sparse piano.")
+
+    def test_canonical_lip_sync_is_preserved_in_shot_order(self) -> None:
+        emd = parse_markdown(
+            "# Subjects\n* one.\n# Scene\n## Shot\n"
+            "* Before.\n"
+            "* Lip sync: <Subject 1> <- <Audio 1>: <d>[Japanese]こんにちは</d>\n"
+            "* After.\n"
+            "## Soundscape\n* Vocalization: EXPLICIT_DIALOGUE_ONLY"
+        )
+        self.assertEqual(
+            emd.scenes[0].shots[0].lines,
+            [
+                "Before.",
+                "Lip sync: <Subject 1> <- <Audio 1>: <d>[Japanese]こんにちは</d>",
+                "After.",
+            ],
+        )
+
+    def test_invalid_canonical_lip_sync_is_rejected(self) -> None:
+        invalid_lines = (
+            "Lip sync: <Subject 1> <- <Audio 1>: missing dialogue",
+            "Lip sync: <Subject 1> <- <Audio 1>: <d>[Japanese]</d>",
+            "Lip sync: <Subject 1> <- <Audio 1>: <d>one</d> <d>two</d>",
+        )
+        for line in invalid_lines:
+            with self.subTest(line=line), self.assertRaises(errors.MarkdownParseError):
+                parse_markdown(f"# Scene\n## Shot\n* {line}")
 
     def test_empty_soundscape_is_rejected(self) -> None:
         with self.assertRaises(errors.MarkdownParseError):

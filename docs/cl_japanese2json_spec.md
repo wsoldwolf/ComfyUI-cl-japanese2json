@@ -22,10 +22,12 @@ LLMは最終JSON、ディレクティブ、ショット構造、参照関係、�
 - Cスタイルの行コメント及びブロックコメント
 - Subject、Picture、Video、Audio参照タグ
 - 日本語ダイレクトスピーチ
+- 既存Audio信号を部分コピーする明示的リップシンク
 - Subject番号からPythonが生成する安定した`(Sx)`話者ID
 - シーンとシーン内ショット
 - Sceneへ条件付き適用するグローバル共通プロンプト
 - シーンローカルな音響許可リスト
+- シーンローカルな非ダイジェティックBGM生成指定
 - Subject単位のグローバル保持分析規則
 - MiniMax H3 Full-Referenceの6セクション
 - Contex-Loopの継続・リセット設定
@@ -37,8 +39,9 @@ LLMは最終JSON、ディレクティブ、ショット構造、参照関係、�
 - `llama-cpp-python`の自動インストール又は更新
 - GGUFの自動ダウンロード
 - ComfyUI本体又は他の`custom_nodes`の変更
-- BGM生成
-- Audio信号の直接コピー、BGM/環境音のAudio参照
+- 完全な音声トラックを1:1で使う`fully_copy`
+- BGM又は環境音のAudio参照・Audio再利用
+- Audio内容の自動文字起こし又は台詞推測
 - 旧入力構文の互換変換
 
 ## 3. ファイル構成
@@ -217,6 +220,22 @@ Sceneディレクティブ直下から最初のShotまでの箇条書きはScene
 
 2個目以降はJSON内で`[Shot N] At MM:SS.mmm, ...`へ変換する。ここで時刻はシーン先頭からの経過時刻である。
 
+Shot内では、既存Audio信号を人物の発声として部分コピーし、口の動きを同期させる次の構造化バレットを使用できる。
+
+```text
+* リップシンク: <Subject 1> <- <Audio 1> 「こんにちは、よろしくお願いします。」
+```
+
+- 構文は`* リップシンク: <Subject N> <- <Audio N> 台詞`である。コロンは`:`又は`：`を許容する。
+- Subjectは1～4、Audioは1～3の正規番号とする。
+- 末尾には日本語鉤括弧又は既存`<d>...</d>`による、空でない正確な台詞を1個だけ必須とする。
+- リップシンクバレットはLLMへ送らず、Pythonが正規形`Lip sync: <Subject N> <- <Audio N>: <d>...</d>`へ変換する。
+- JSONGENは元Audio信号を使う`audio reuse`として扱い、Audio保持関係を`partially_copy`とする。
+- 同じAudioを同一Scene内で声質参照と信号再利用へ同時に割り当ててはならない。
+- 同じAudioを同一Scene内の複数Subjectへ割り当ててはならない。
+- 通常台詞と同様に、Sceneの`発声: 指定台詞のみ`を必須とする。
+- コンパイラはAudioから文字起こしを行わず、記載された台詞を正本とする。
+
 ### 5.7 Soundscape
 
 ```text
@@ -224,17 +243,20 @@ Sceneディレクティブ直下から最初のShotまでの箇条書きはScene
 * 環境音: 草原を吹く弱い風音。
 * 効果音: 足音と衣服の擦れ音。
 * 発声: 指定台詞のみ
+* BGM: ゆっくりしたピアノと低い弦楽器。終盤で徐々に音量を下げる。
 ```
 
 - Soundscapeは各Sceneに0又は1回。
 - 全Shotの後へ置く。
 - 空のSoundscapeはエラー。
-- 項目は`環境音`、`効果音`、`発声`を各0又は1回。
-- 環境音と効果音は任意の日本語本文又は`なし`。
+- 項目は`環境音`、`効果音`、`発声`、`BGM`を各0又は1回。
+- 環境音、効果音及びBGMは任意の日本語本文又は`なし`。
 - 発声は`なし`又は`指定台詞のみ`だけ。
 - 項目を省略した場合、その音響層は無効。
-- Soundscape全体を省略した場合、完全無音へフォールバックする。
-- 環境音と効果音には`<Audio N>`又はダイレクトスピーチを書けない。
+- Soundscape全体を省略した場合、人物発声、環境音、効果音及びBGMを全て無効化する。
+- 環境音、効果音及びBGMには`<Audio N>`又はダイレクトスピーチを書けない。
+- BGMは登場人物には聞こえず視聴者だけに聞こえる非ダイジェティック音楽である。劇中で人物に聞こえる音楽はShot本文へ書く。
+- BGM本文は楽器、テンポ、リズム及び音量変化を具体的に記述し、台詞又は具体的な歌詞を書かない。
 - SoundscapeはScene内部へ格納し、他Sceneへ継承しない。
 
 ## 6. 保護対象
@@ -306,7 +328,7 @@ LLMJ2Eは最初に4.1のコメント走査を行い、コメントを翻訳レ�
 | `## ショット 3.25秒` | `## Shot 3.25sec` |
 | `## 音響` | `## Soundscape` |
 
-Retentionの固定マーカー、Soundscapeのラベルと固定値もPythonが正規化する。
+Retentionの固定マーカー、リップシンクバレット、Soundscapeのラベルと固定値もPythonが正規化する。
 
 ### 7.2 翻訳ストリーム
 
@@ -316,7 +338,7 @@ Retentionの固定マーカー、Soundscapeのラベルと固定値もPythonが�
 - `RET`: Retention説明
 - `COM`: Common
 - `SCN`: Scene preamble及びShot本文
-- `SND`: Environment又はSound effects
+- `SND`: Environment、Sound effects又はBackground music
 
 参照タグと台詞はさらに区間固有の保護プレースホルダとなる。構造化JSON転送は用いず、1本の生テキストストリームを`TRANSLATION_STREAM_BEGIN`と`TRANSLATION_STREAM_END`の間へ置く。話者IDは翻訳後に生成するためストリームへ含めない。
 
@@ -381,10 +403,11 @@ Qwen3では可能な場合、APIの`enable_thinking=False`等も使用する。�
 ## Shot
 * <Subject 1> says <d>[Japanese]ようこそ！</d>.
 ## Shot 4.5sec
-* The camera slowly approaches <Subject 1>.
+* Lip sync: <Subject 1> <- <Audio 2>: <d>[Japanese]次の台詞です。</d>
 ## Soundscape
 * Environment: Distant city ambience.
 * Vocalization: EXPLICIT_DIALOGUE_ONLY
+* Background music: Sparse piano at a slow tempo, fading out at the end.
 ```
 
 正規形は内部インターフェースであり、日本語入力の構造と件数を保持する。
@@ -399,6 +422,7 @@ class Soundscape:
     environment: str | None
     sound_effects: str | None
     vocalization: str | None
+    background_music: str | None
 
 @dataclass
 class Shot:
@@ -479,6 +503,14 @@ Scene preambleと全Shot本文から、ダイレクトスピーチ領域を除�
 
 JSONGENは各台詞の直前にある最も近いSubject参照から`(SN)`を生成する。入力に話者IDがある場合はエラーとする。
 
+リップシンク正規形はSubject、Audio及び台詞の対応を構造として持つため、JSONGENが次の自然な記述へ展開する。
+
+```text
+<Subject 1> (S1) physically performs the directly reused spoken audio from <Audio 1> and lip-syncs exactly to <d>[Japanese]こんにちは。</d>.
+```
+
+元信号と正確な語句を保持し、置換、反復又は追加発声を行わない固定文も同じShotへ追加する。
+
 肯定的な英語発声動詞があり同じ行に台詞がない場合は、別の明示台詞がScene内にあってもエラーとする。否定された`does not speak`、`without speaking`等は発声要求に数えない。
 
 ### 10.5 Audio有効化
@@ -493,6 +525,16 @@ JSONGENは各台詞の直前にある最も近いSubject参照から`(SN)`を生
 - 無発声Sceneでは全Audio参照を除去する。
 - Environment又はSound effectsからAudioを有効化しない。
 
+リップシンクバレットで使用するAudioは、Subject定義内の声質参照とは別に有効化する。
+
+- `subject_definitions`へ、該当Audioが指定Subjectのリップシンク用に直接再利用されることを記述する。
+- `summary`へ`audio reuse`を追加する。
+- `retention_analysis`へ`<Audio N>: partially_copy`を追加する。
+- 該当Shotと指定Subjectを明記し、他の音響層は別生成であることを記述する。
+- `retention_analysis`へ`(Sx)`を書かない。
+- 声質参照と信号再利用が同じAudio番号で競合する場合はエラーとする。
+- BGM、Environment又はSound effectsのAudio参照は本版では受理しない。
+
 ### 10.6 6セクション
 
 各Sceneの`prompt`は次の6文字列を正確にこの順序で持つ。
@@ -502,7 +544,7 @@ JSONGENは各台詞の直前にある最も近いSubject参照から`(SN)`を生
 3. `retention_analysis:\n...`
 4. `detailed_description:\n...`
 5. `overall_soundscape:\n...`
-6. `non_diegetic_music:\nN/A`
+6. `non_diegetic_music:\n...`
 
 #### subject_definitions
 
@@ -510,6 +552,7 @@ JSONGENは各台詞の直前にある最も近いSubject参照から`(SN)`を生
 
 ```text
 <Audio 1> is the voice-timbre reference for <Subject 1> (S1).
+<Audio 2> is the directly reused spoken-audio signal performed by <Subject 1> (S1) for exact lip synchronization in [Shot 2].
 ```
 
 Subjectがない場合は次の固定文である。
@@ -524,12 +567,14 @@ No character subject or reference-image person is active.
 
 - 通常: `[reference generation]`
 - Audio声質参照あり: `[reference generation + audio reference]`
+- リップシンクAudio再利用あり: `[reference generation + audio reuse]`
+- 両方あり: `[reference generation + audio reuse + audio reference]`
 
 アクティブSubject、シーン内Shot数、Audio役割を簡潔に記述する。`継続`は公式の`video continuation`タスク種別とは見なさず、必要なら前Sceneを継続するという本文を追加する。
 
 #### retention_analysis
 
-アクティブSubjectごとに関係マーカーと適用Shotを記述する。Scene preambleだけで使う場合はscene全体への適用とする。Audioは`reference`として記述する。
+アクティブSubjectごとに関係マーカーと適用Shotを記述する。Scene preambleだけで使う場合はscene全体への適用とする。声質参照Audioは`reference`、リップシンクで直接再利用するAudioは`partially_copy`として記述する。
 
 公式ガイドに従い、`(Sx)`をこのセクションへ書かない。
 
@@ -550,11 +595,13 @@ No reference labels are active in this scene.
 
 #### overall_soundscape
 
-Environment、Sound effects、許可済み明示台詞だけを列挙し、最後に`No other sound is present.`を置く。何も許可されない場合は`Complete silence.`とする。台詞本文はここへ複製しない。
+Environment、Sound effects、許可済み明示台詞だけを列挙し、最後に他の環境音、物理音及び人物発声がないことを置く。BGMも含め全音響が無効なら`Complete silence.`とする。BGMだけが有効なら、ここでは環境音、物理音及び人物発声がないことを明示する。台詞本文とBGMはここへ複製しない。
 
 #### non_diegetic_music
 
-常に`N/A`である。BGMは別のAIで作成し後編集する運用を前提とする。
+SoundscapeのBGMが省略又は`NONE`なら`N/A`とする。指定があれば翻訳済み本文を出力し、末尾を英文句読点で閉じる。Audio参照及びダイレクトスピーチは含めない。
+
+H3のBGM生成は結果のランダム性が高い。再現性又は楽曲品質を重視する場合は`BGM: なし`を指定し、Suno等で生成した音楽を後編集する運用を推奨する。
 
 ### 10.7 最終検証
 
@@ -567,7 +614,7 @@ Environment、Sound effects、許可済み明示台詞だけを列挙し、最�
 - promptが文字列6要素で、種類と順序が正しい。
 - 各セクション本文が非空。
 - detailed_description内のShot番号が1始まりの連番。
-- 最終要素が正確な`non_diegetic_music:\nN/A`。
+- 最終要素が非空の`non_diegetic_music:\n...`であり、BGM省略又は`なし`では正確に`N/A`。
 - 継続とリセット用キーが排他的で正しい。
 - 最終文字列末尾がLF1個。
 
@@ -578,7 +625,7 @@ Environment、Sound effects、許可済み明示台詞だけを列挙し、最�
 - 空入力、未知行、未知ディレクティブ
 - 不正なCスタイルコメント又はHTMLコメント
 - 廃止構文
-- 不正Retention、Shot、Soundscape
+- 不正Retention、Shot、リップシンク又はSoundscape
 - Commonの禁止要素又は未定義Subject
 - 台詞、内部話者ID、発声許可の不一致
 - 未定義Subject
@@ -625,6 +672,7 @@ Environment、Sound effects、許可済み明示台詞だけを列挙し、最�
 - `retention_analysis`へ話者IDを書かない。
 - 無発声SceneからAudioを除去する。
 - 音響省略時は無音へフォールバックする。
-- BGMを常に無効化する。
+- リップシンクAudioを`audio reuse`及び`partially_copy`として出力する。
+- BGM指定を`non_diegetic_music`へ出力し、省略時は`N/A`へフォールバックする。
 - LLMが構造又は保護トークンを破壊した結果を受理しない。
 - 実GGUFを必要としない単体テストが成功する。

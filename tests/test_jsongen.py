@@ -139,6 +139,126 @@ class JSONGenerationTests(unittest.TestCase):
         self.assertIn("use <Audio 1> only as a voice-timbre", prompt[3])
         self.assertIn("exact shot-synchronized dialogue", prompt[4])
 
+    def test_lip_sync_reuses_audio_signal_with_transcript_and_speaker(self) -> None:
+        emd = Emd(
+            subjects=["a character based on <Picture 1>."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "Lip sync: <Subject 1> <- <Audio 1>: "
+                            "<d>[Japanese]こんにちは</d>"
+                        )
+                    ],
+                    soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
+                )
+            ],
+        )
+        prompt = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"]
+        self.assertIn("directly reused spoken-audio signal", prompt[0])
+        self.assertIn("<Subject 1> (S1)", prompt[0])
+        self.assertIn("[reference generation + audio reuse]", prompt[1])
+        self.assertIn("<Audio 1>: partially_copy", prompt[2])
+        self.assertNotIn("(S1)", prompt[2])
+        self.assertIn("lip-syncs exactly to <d>[Japanese]こんにちは</d>", prompt[3])
+        self.assertIn("source audio signal and exact words are preserved", prompt[3])
+
+    def test_lip_sync_requires_dialogue_permission(self) -> None:
+        emd = Emd(
+            subjects=["one."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "Lip sync: <Subject 1> <- <Audio 1>: "
+                            "<d>[Japanese]x</d>"
+                        )
+                    ]
+                )
+            ],
+        )
+        with self.assertRaisesRegex(errors.JSONGenerationError, "not enabled"):
+            jsongen.generate_json(emd)
+
+    def test_audio_cannot_be_voice_reference_and_reused_signal(self) -> None:
+        emd = Emd(
+            subjects=["a character whose voice is based on <Audio 1>."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "Lip sync: <Subject 1> <- <Audio 1>: "
+                            "<d>[Japanese]one</d>",
+                            "<Subject 1> says <d>[Japanese]two</d>.",
+                        )
+                    ],
+                    soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
+                )
+            ],
+        )
+        with self.assertRaisesRegex(errors.JSONGenerationError, "both as"):
+            jsongen.generate_json(emd)
+
+    def test_reused_audio_cannot_be_assigned_to_multiple_subjects(self) -> None:
+        emd = Emd(
+            subjects=["one.", "two."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "Lip sync: <Subject 1> <- <Audio 1>: "
+                            "<d>[Japanese]one</d>",
+                            "Lip sync: <Subject 2> <- <Audio 1>: "
+                            "<d>[Japanese]two</d>",
+                        )
+                    ],
+                    soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
+                )
+            ],
+        )
+        with self.assertRaisesRegex(errors.JSONGenerationError, "multiple Subjects"):
+            jsongen.generate_json(emd)
+
+    def test_lip_sync_transcript_must_contain_spoken_text(self) -> None:
+        emd = Emd(
+            subjects=["one."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "Lip sync: <Subject 1> <- <Audio 1>: "
+                            "<d>[Japanese]</d>"
+                        )
+                    ],
+                    soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
+                )
+            ],
+        )
+        with self.assertRaisesRegex(errors.JSONGenerationError, "empty lip-sync"):
+            jsongen.generate_json(emd)
+
+    def test_lip_sync_role_overrides_unused_subject_voice_reference(self) -> None:
+        emd = Emd(
+            subjects=["a character whose voice is based on <Audio 1>."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "Lip sync: <Subject 1> <- <Audio 1>: "
+                            "<d>[Japanese]one</d>"
+                        )
+                    ],
+                    soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
+                )
+            ],
+        )
+        prompt = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"]
+        self.assertIn("directly reused spoken-audio signal", prompt[0])
+        self.assertNotIn("voice-timbre reference", prompt[0])
+        self.assertIn("[reference generation + audio reuse]", prompt[1])
+        self.assertIn("<Audio 1>: partially_copy", prompt[2])
+        self.assertNotIn("<Audio 1>: reference", prompt[2])
+
     def test_speaker_id_is_generated_from_subject_number(self) -> None:
         emd = Emd(
             subjects=["a character whose voice is based on <Audio 1>."],
@@ -371,13 +491,41 @@ class JSONGenerationTests(unittest.TestCase):
             "overall_soundscape:\n"
             "Environment: Soft grassland wind. "
             "Sound effects: Footsteps and clothing rustle. "
-            "No other sound is present.",
+            "No other ambience, physical sound, or character vocalization is present.",
         )
+
+    def test_background_music_is_generated_in_sixth_section(self) -> None:
+        scene = Scene(
+            shots=[make_shot("A landscape remains visible.")],
+            soundscape=Soundscape(
+                background_music=(
+                    "Sparse piano notes at a slow tempo with sustained low strings."
+                )
+            ),
+        )
+        prompt = json.loads(jsongen.generate_json(Emd(scenes=[scene])))["shots"][0]["prompt"]
+        self.assertEqual(prompt[4], jsongen.NO_DIEGETIC_SOUND)
+        self.assertEqual(
+            prompt[5],
+            "non_diegetic_music:\n"
+            "Sparse piano notes at a slow tempo with sustained low strings.",
+        )
+        jsongen.validate_final_json(jsongen.generate_json(Emd(scenes=[scene])))
+
+    def test_background_music_none_keeps_na(self) -> None:
+        scene = Scene(
+            shots=[make_shot("Action.")],
+            soundscape=Soundscape(background_music="NONE"),
+        )
+        prompt = json.loads(jsongen.generate_json(Emd(scenes=[scene])))["shots"][0]["prompt"]
+        self.assertEqual(prompt[5], jsongen.NON_DIEGETIC_MUSIC)
 
     def test_soundscape_text_cannot_bypass_vocalization_policy(self) -> None:
         for soundscape in (
             Soundscape(environment="Reference <Audio 1>."),
             Soundscape(sound_effects="Play <d>[Japanese]x</d>."),
+            Soundscape(background_music="Reuse <Audio 1>."),
+            Soundscape(background_music="A song with <d>[Japanese]lyrics</d>."),
         ):
             with self.subTest(soundscape=soundscape), self.assertRaises(
                 errors.JSONGenerationError
@@ -435,4 +583,21 @@ class JSONGenerationTests(unittest.TestCase):
         prompt = parsed["shots"][0]["prompt"]
         prompt[1], prompt[2] = prompt[2], prompt[1]
         with self.assertRaises(errors.JSONValidationError):
+            jsongen.validate_final_json(json.dumps(parsed, ensure_ascii=False) + "\n")
+
+        for music in (
+            "non_diegetic_music:\nReuse <Audio 1>.",
+            "non_diegetic_music:\nSing <d>[Japanese]lyrics</d>.",
+        ):
+            with self.subTest(music=music):
+                parsed = json.loads(text)
+                parsed["shots"][0]["prompt"][5] = music
+                with self.assertRaises(errors.JSONValidationError):
+                    jsongen.validate_final_json(
+                        json.dumps(parsed, ensure_ascii=False) + "\n"
+                    )
+
+        parsed = json.loads(text)
+        parsed["shots"][0]["prompt"][5] = "non_diegetic_music:\nSparse piano."
+        with self.assertRaisesRegex(errors.JSONValidationError, "complete silence"):
             jsongen.validate_final_json(json.dumps(parsed, ensure_ascii=False) + "\n")

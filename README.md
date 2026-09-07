@@ -86,6 +86,7 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 * 環境音: 遠くの都市環境音。
 * 効果音: 衣服の微かな動作音。
 * 発声: 指定台詞のみ
+* BGM: なし
 ```
 
 利用できるディレクティブは次のとおりです。
@@ -209,6 +210,24 @@ Pythonは各台詞の直前にある最も近い`<Subject N>`を話者とし、J
 
 アクティブな話者のSubject定義に`<Audio N>`があるときだけ、独立したAudio定義と`reference`保持分析を生成します。Audioはその話者の明記された台詞の声質と話し方だけに使用し、元音声信号や元の発話内容はコピーしません。台詞のないシーンではSubject定義からAudio句を取り除きます。
 
+### 既存音声によるリップシンク
+
+元のAudio信号を部分的に再利用して人物の口を同期させる場合は、Shot内へ次の構造化バレットを書きます。
+
+```text
+# シーン 6秒
+## ショット
+* <Subject 1>がカメラを見る。
+* リップシンク: <Subject 1> <- <Audio 1> 「こんにちは、よろしくお願いします。」
+## 音響
+* 発声: 指定台詞のみ
+* BGM: なし
+```
+
+`<Subject N>`は1～4、`<Audio N>`は1～3です。台詞は空にできず、日本語鉤括弧又は既存の`<d>...</d>`を正確に1個指定します。Audioからの自動文字起こしは行わないため、実際の音声と同じ台詞を記載してください。
+
+この行はLLMへ送らずPythonが固定変換します。出力では`summary`へ`audio reuse`、`retention_analysis`へ`partially_copy`、発声位置へ`<Subject N> (SN)`を生成し、元信号と台詞を保持したリップシンクとして`detailed_description`へ展開します。同じAudioを複数人物へ割り当てることや、同一シーンで声質参照と信号再利用の両方へ使うことはできません。
+
 ### 音響
 
 `## 音響`はシーンローカルの許可リストです。省略した項目は無効です。全項目を省略したシーンは`overall_soundscape:\nComplete silence.`になります。空の`## 音響`はエラーです。
@@ -218,11 +237,14 @@ Pythonは各台詞の直前にある最も近い`<Subject N>`を話者とし、J
 * 環境音: 草原を吹く弱い風音。
 * 効果音: 足音と衣服の擦れ音。
 * 発声: なし
+* BGM: ゆっくりしたピアノと低い弦楽器。終盤で徐々に音量を下げる。
 ```
 
-各項目は1回までです。環境音と効果音は任意文又は`なし`、発声は`なし`又は`指定台詞のみ`だけを使えます。環境音と効果音へ`<Audio N>`や台詞は書けません。
+各項目は1回までです。環境音、効果音及びBGMは任意文又は`なし`、発声は`なし`又は`指定台詞のみ`だけを使えます。環境音、効果音及びBGMへ`<Audio N>`や台詞は書けません。
 
-全シーンの末尾には`non_diegetic_music:\nN/A`を固定で付けます。MiniMax H3によるBGM生成はランダム性が高いため、BGMはSunoなど別の音楽生成AIで作り、動画生成後の編集で追加する運用を想定しています。
+`BGM`は登場人物に聞こえず、視聴者だけに聞こえる非ダイジェティック音楽です。楽器、テンポ、リズム、音量変化を具体的に記述します。劇中で人物にも聞こえる音楽はShot本文へ書いてください。
+
+`BGM`を省略するか`BGM: なし`とすると`non_diegetic_music:\nN/A`になります。BGMを指定した場合は英訳して`non_diegetic_music`へ出力します。MiniMax H3によるBGM生成はランダム性が高いため、再現性や楽曲品質を優先する場合は従来どおりSunoなど別の音楽生成AIで作り、動画生成後に追加する運用を推奨します。
 
 ## JSON出力
 
@@ -252,7 +274,7 @@ Pythonは各台詞の直前にある最も近い`<Subject N>`を話者とし、J
         "summary:\n[reference generation + audio reference] The target video uses <Subject 1> in a 2-shot scene. <Audio 1> is referenced only for the explicitly specified dialogue.",
         "retention_analysis:\n<Subject 1> (used in [Shot 1]): fully_preserved - The defined identity and visual characteristics are preserved.\n<Audio 1>: reference - only the voice timbre and delivery are referenced for <Subject 1>; the source signal and its original speech are not copied.",
         "detailed_description:\nA bright modern office district is rendered in a vivid 2D anime style.\n[Shot 1] <Subject 1> (S1) says <d>[Japanese]ようこそ！</d>. For <Subject 1> (S1)'s explicitly specified dialogue in this shot, use <Audio 1> only as a voice-timbre and delivery reference; do not copy or introduce any other speech from the source audio.\n[Shot 2] At 00:04.500, the camera slowly approaches <Subject 1>.",
-        "overall_soundscape:\nEnvironment: Distant city ambience. The only character vocalization is the exact shot-synchronized dialogue explicitly specified in this scene. No other sound is present.",
+        "overall_soundscape:\nEnvironment: Distant city ambience. The only character vocalization is the exact shot-synchronized dialogue explicitly specified in this scene. No other ambience, physical sound, or character vocalization is present.",
         "non_diegetic_music:\nN/A"
       ],
       "duration_seconds": 8,
@@ -312,6 +334,8 @@ system promptは`prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み�
 - コンテキスト不足: `n_ctx`又は`max_tokens`を見直します。
 - プレースホルダ欠落: `retry_max`を増やすか、標準的なinstruction-tuned GGUFを試します。診断には`save_debug_output=True`を使います。
 - 台詞エラー: 同じショット行で台詞より前に`<Subject N>`を書き、`「...」`と発声動詞を記述し、シーン末尾で`発声: 指定台詞のみ`を許可します。`(Sx)`は入力しません。
+- リップシンクエラー: Shot内で`リップシンク: <Subject N> <- <Audio N> 「正確な台詞」`と書き、`発声: 指定台詞のみ`を許可します。同一Audioの役割競合も確認します。
+- BGMエラー: `BGM`にはAudio参照、台詞又は具体的な歌詞を書かず、不要なら`BGM: なし`にします。
 - ショットエラー: 最初は`## ショット`、2個目以降は昇順の`## ショット N秒`にします。
 - コメントエラー: `/* ... */`の入れ子、閉じ忘れ、対応しない`*/`、HTMLコメントがないか確認します。行コメントの`//`は行頭でだけ有効です。
 

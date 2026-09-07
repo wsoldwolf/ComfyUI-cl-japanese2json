@@ -469,15 +469,53 @@ class LLMJ2ETests(unittest.TestCase):
             )
         )
 
+    def test_lip_sync_is_canonicalized_without_llm_translation(self) -> None:
+        source = (
+            "# サブジェクト\n* 人物。\n"
+            "# シーン 5秒\n## ショット\n"
+            "* リップシンク: <Subject 1> <- <Audio 1> 「こんにちは！」\n"
+            "## 音響\n* 発声: 指定台詞のみ\n"
+            "* BGM: ゆっくりしたピアノ。"
+        )
+        llm = FakeLLM()
+        output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=128)
+        self.assertIn(
+            "* Lip sync: <Subject 1> <- <Audio 1>: "
+            "<d>[Japanese]こんにちは！</d>",
+            output,
+        )
+        self.assertIn("* Background music: A defined audible sound", output)
+        records = request_records(llm.calls[0]["messages"])
+        self.assertEqual(len(records), 2)
+        self.assertNotIn("こんにちは", llm.calls[0]["messages"][-1]["content"])
+
+    def test_invalid_lip_sync_fails_before_inference(self) -> None:
+        invalid = (
+            "# シーン\n## ショット\n* リップシンク: <Subject 1> <- <Audio 1>",
+            "# シーン\n## ショット\n* リップシンク: <Subject 5> <- <Audio 1> 「台詞」",
+            "# シーン\n## ショット\n* リップシンク: <Subject 1> <- <Audio 4> 「台詞」",
+            "# シーン\n## ショット\n* リップシンク: <Subject 1> <- <Audio 1> 「」",
+            "# シーン\n* リップシンク: <Subject 1> <- <Audio 1> 「台詞」\n"
+            "## ショット\n* 動作。",
+        )
+        for source in invalid:
+            with self.subTest(source=source):
+                llm = FakeLLM()
+                with self.assertRaises(errors.TranslationError):
+                    llmj2e.translate_markdown(source, llm, "sys", max_tokens=64)
+                self.assertEqual(llm.calls, [])
+
     def test_fixed_soundscape_values_require_no_llm_record(self) -> None:
         source = (
             "# シーン\n## ショット\n* 動作。\n## 音響\n"
-            "* 環境音: なし\n* 効果音: なし\n* 発声: 指定台詞のみ"
+            "* 環境音: なし\n* 効果音: なし\n* 発声: 指定台詞のみ\n"
+            "* BGM: なし"
         )
         output = llmj2e.translate_markdown(source, FakeLLM(), "sys", max_tokens=64)
         self.assertIn("* Environment: NONE", output)
         self.assertIn("* Sound effects: NONE", output)
         self.assertIn("* Vocalization: EXPLICIT_DIALOGUE_ONLY", output)
+        self.assertIn("* Background music: NONE", output)
 
     def test_soundscape_is_scene_only_and_rejects_invalid_bullets(self) -> None:
         invalid_documents = (
@@ -485,12 +523,15 @@ class LLMJ2ETests(unittest.TestCase):
             "# シーン\n## ショット\n* 動作。\n## 音響\n* 発声: 自動",
             "# シーン\n## ショット\n* 動作。\n## 音響\n* 不明: 音。",
             "# シーン\n## ショット\n* 動作。\n## 響き\n* 環境音: 音。",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n* BGM: <Audio 1>を使用する。",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n* BGM: 「歌詞」を歌う曲。",
         )
         for text in invalid_documents:
-            with self.subTest(text=text), self.assertRaises(
-                errors.TranslationError
-            ):
-                llmj2e.translate_markdown(text, FakeLLM(), "sys", max_tokens=64)
+            with self.subTest(text=text):
+                llm = FakeLLM()
+                with self.assertRaises(errors.TranslationError):
+                    llmj2e.translate_markdown(text, llm, "sys", max_tokens=64)
+                self.assertEqual(llm.calls, [])
 
     def test_code_fence_causes_one_retry_then_success(self) -> None:
         llm = FakeLLM(["```json\n{}\n```"])

@@ -67,3 +67,26 @@ class CoreIntegrationTests(unittest.TestCase):
             parsed["shots"][0]["prompt"][4].startswith("overall_soundscape:\n")
         )
         self.assertEqual(json.loads(text), parsed)
+
+    def test_lip_sync_and_background_music_end_to_end(self) -> None:
+        source = """# サブジェクト
+* <Picture 1>を外観参照として使用する人物。
+
+# シーン 6秒
+## ショット
+* <Subject 1>がカメラを見る。
+* リップシンク: <Subject 1> <- <Audio 1> 「こんにちは！」
+## 音響
+* 発声: 指定台詞のみ
+* BGM: ゆっくりしたピアノと低い弦楽器。"""
+        canonical = llmj2e.translate_markdown(
+            source, FakeLLM(), "system", max_tokens=128
+        )
+        parsed = jsongen.validate_final_json(
+            jsongen.generate_json(mdparse.parse_markdown(canonical))
+        )
+        prompt = parsed["shots"][0]["prompt"]
+        self.assertIn("[reference generation + audio reuse]", prompt[1])
+        self.assertIn("<Audio 1>: partially_copy", prompt[2])
+        self.assertIn("<d>[Japanese]こんにちは！</d>", prompt[3])
+        self.assertIn("non_diegetic_music:\nA defined audible sound", prompt[5])

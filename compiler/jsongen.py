@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import logging
 import re
@@ -28,6 +29,10 @@ LOGGER = logging.getLogger("cl_japanese2json")
 SUBJECT_RE = re.compile(r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>")
 AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
 DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
+LIP_SYNC_LINE_RE = re.compile(
+    r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>: "
+    r"(<d>(?:(?!<d>|</d>).)+</d>)$"
+)
 SPEAKER_ID_RE = re.compile(r"(?<!\\)\(S([1-9][0-9]*)\)")
 SPEECH_CUE_RE = re.compile(
     r"\b(?:say|says|said|saying|speak|speaks|spoke|spoken|speaking|"
@@ -71,8 +76,13 @@ SUMMARY_PREFIX = "summary:\n"
 RETENTION_ANALYSIS_PREFIX = "retention_analysis:\n"
 DETAILED_DESCRIPTION_PREFIX = "detailed_description:\n"
 OVERALL_SOUNDSCAPE_PREFIX = "overall_soundscape:\n"
+NON_DIEGETIC_MUSIC_PREFIX = "non_diegetic_music:\n"
 NON_DIEGETIC_MUSIC = "non_diegetic_music:\nN/A"
 COMPLETE_SILENCE = OVERALL_SOUNDSCAPE_PREFIX + "Complete silence."
+NO_DIEGETIC_SOUND = (
+    OVERALL_SOUNDSCAPE_PREFIX
+    + "No ambience, physical sound, or character vocalization is present."
+)
 NO_ACTIVE_SUBJECT_BLOCK = (
     SUBJECT_DEFINITIONS_PREFIX
     + "No character subject or reference-image person is active."
@@ -80,6 +90,13 @@ NO_ACTIVE_SUBJECT_BLOCK = (
 NO_ACTIVE_RETENTION = (
     RETENTION_ANALYSIS_PREFIX + "No reference labels are active in this scene."
 )
+
+
+@dataclass
+class ReusedAudioBinding:
+    subject: int
+    speaker: int
+    shot_numbers: list[int] = field(default_factory=list)
 
 
 def _scene_lines(scene: Scene) -> Iterable[str]:
@@ -193,6 +210,7 @@ def _validate_soundscape(soundscape: Soundscape, *, context: str) -> None:
         ("environment", soundscape.environment),
         ("sound effects", soundscape.sound_effects),
         ("vocalization", soundscape.vocalization),
+        ("background music", soundscape.background_music),
     ):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise JSONGenerationError(f"{context} {label} must be a non-empty string")
@@ -282,7 +300,9 @@ def _sentence(value: str) -> str:
     return cleaned if cleaned.endswith((".", "!", "?")) else cleaned + "."
 
 
-def _overall_soundscape(scene: Scene, allows_dialogue: bool) -> str:
+def _overall_soundscape(
+    scene: Scene, allows_dialogue: bool, *, has_background_music: bool
+) -> str:
     environment = (
         []
         if scene.soundscape.environment in {None, SOUND_NONE}
@@ -306,9 +326,18 @@ def _overall_soundscape(scene: Scene, allows_dialogue: bool) -> str:
             "explicitly specified in this scene."
         )
     if not parts:
-        return COMPLETE_SILENCE
-    parts.append("No other sound is present.")
+        return NO_DIEGETIC_SOUND if has_background_music else COMPLETE_SILENCE
+    parts.append(
+        "No other ambience, physical sound, or character vocalization is present."
+    )
     return OVERALL_SOUNDSCAPE_PREFIX + " ".join(parts)
+
+
+def _non_diegetic_music(scene: Scene) -> str:
+    music = scene.soundscape.background_music
+    if music in {None, SOUND_NONE}:
+        return NON_DIEGETIC_MUSIC
+    return NON_DIEGETIC_MUSIC_PREFIX + _sentence(music)
 
 
 def _trim_audio_clause(clause: str) -> str:
@@ -358,18 +387,35 @@ def _without_audio_references(definition: str) -> str:
     return result.rstrip(".!?") + "."
 
 
-def _active_audio_bindings(
+def _generated_dialogue_subjects(scene: Scene) -> set[int]:
+    subjects: set[int] = set()
+    for shot_number, shot in enumerate(scene.shots, start=1):
+        for line_number, line in enumerate(shot.lines, start=1):
+            if LIP_SYNC_LINE_RE.fullmatch(line):
+                continue
+            for _dialogue, subject_match in _line_dialogue_subject_matches(
+                line,
+                context=f"Shot {shot_number} line {line_number}",
+            ):
+                subjects.add(int(subject_match.group(1)))
+    return subjects
+
+
+def _active_voice_audio_bindings(
     emd: Emd,
     scene_number: int,
     active_subjects: list[int],
     scene_speakers: dict[int, int],
     *,
     allows_dialogue: bool,
+    generated_dialogue_subjects: set[int],
 ) -> dict[int, tuple[int, int]]:
     if not allows_dialogue:
         return {}
     bindings: dict[int, tuple[int, int]] = {}
     for subject in active_subjects:
+        if subject not in generated_dialogue_subjects:
+            continue
         speaker = scene_speakers.get(subject)
         if speaker is None:
             continue
@@ -385,11 +431,50 @@ def _active_audio_bindings(
     return bindings
 
 
+def _reused_audio_bindings(
+    scene: Scene, *, scene_number: int
+) -> dict[int, ReusedAudioBinding]:
+    bindings: dict[int, ReusedAudioBinding] = {}
+    for shot_number, shot in enumerate(scene.shots, start=1):
+        for line_number, line in enumerate(shot.lines, start=1):
+            if not line.startswith("Lip sync:"):
+                continue
+            match = LIP_SYNC_LINE_RE.fullmatch(line)
+            if match is None:
+                raise JSONGenerationError(
+                    f"Scene {scene_number} Shot {shot_number} line {line_number} "
+                    "has invalid canonical lip-sync syntax"
+                )
+            subject = int(match.group(1))
+            audio = int(match.group(2))
+            transcript = match.group(3)[3:-4]
+            spoken_text = re.sub(
+                r"^\[[^\]]+\]", "", transcript, count=1
+            ).strip()
+            if not spoken_text:
+                raise JSONGenerationError(
+                    f"Scene {scene_number} Shot {shot_number} line {line_number} "
+                    "has an empty lip-sync transcript"
+                )
+            existing = bindings.get(audio)
+            if existing is not None and existing.subject != subject:
+                raise JSONGenerationError(
+                    f"Scene {scene_number} reuses <Audio {audio}> for multiple Subjects"
+                )
+            if existing is None:
+                existing = ReusedAudioBinding(subject=subject, speaker=subject)
+                bindings[audio] = existing
+            if shot_number not in existing.shot_numbers:
+                existing.shot_numbers.append(shot_number)
+    return bindings
+
+
 def _subject_block(
     emd: Emd,
     scene_number: int,
     active_subjects: list[int],
-    active_audio: dict[int, tuple[int, int]],
+    voice_audio: dict[int, tuple[int, int]],
+    reused_audio: dict[int, ReusedAudioBinding],
 ) -> str:
     if not active_subjects:
         return NO_ACTIVE_SUBJECT_BLOCK
@@ -402,21 +487,38 @@ def _subject_block(
             )
         definition = _without_audio_references(emd.subjects[number - 1])
         definitions.append(f"<Subject {number}> is {definition}")
-    for audio, (subject, speaker) in sorted(active_audio.items()):
-        definitions.append(
+    audio_definitions = {
+        audio: (
             f"<Audio {audio}> is the voice-timbre reference for "
             f"<Subject {subject}> (S{speaker})."
         )
+        for audio, (subject, speaker) in voice_audio.items()
+    }
+    audio_definitions.update(
+        {
+            audio: (
+                f"<Audio {audio}> is the directly reused spoken-audio signal "
+                f"performed by <Subject {binding.subject}> (S{binding.speaker}) "
+                f"for exact lip synchronization in "
+                f"{_shot_list_text(binding.shot_numbers)}."
+            )
+            for audio, binding in reused_audio.items()
+        }
+    )
+    definitions.extend(audio_definitions[audio] for audio in sorted(audio_definitions))
     return SUBJECT_DEFINITIONS_PREFIX + "\n".join(definitions)
 
 
 def _summary_block(
     scene: Scene,
     active_subjects: list[int],
-    active_audio: dict[int, tuple[int, int]],
+    voice_audio: dict[int, tuple[int, int]],
+    reused_audio: dict[int, ReusedAudioBinding],
 ) -> str:
     task_types = ["reference generation"]
-    if active_audio:
+    if reused_audio:
+        task_types.append("audio reuse")
+    if voice_audio:
         task_types.append("audio reference")
     prefix = "[" + " + ".join(task_types) + "]"
     if active_subjects:
@@ -438,12 +540,19 @@ def _summary_block(
         )
     if scene.is_continue:
         body += " The scene continues the preceding generated scene."
-    if active_audio:
-        audio_labels = ", ".join(f"<Audio {number}>" for number in sorted(active_audio))
+    if voice_audio:
+        audio_labels = ", ".join(f"<Audio {number}>" for number in sorted(voice_audio))
         body += (
             f" {audio_labels} is referenced only for the explicitly specified dialogue."
-            if len(active_audio) == 1
+            if len(voice_audio) == 1
             else f" {audio_labels} are referenced only for the explicitly specified dialogue."
+        )
+    if reused_audio:
+        audio_labels = ", ".join(f"<Audio {number}>" for number in sorted(reused_audio))
+        body += (
+            f" {audio_labels} is directly reused for the explicitly transcribed lip-synced dialogue."
+            if len(reused_audio) == 1
+            else f" {audio_labels} are directly reused for the explicitly transcribed lip-synced dialogue."
         )
     return SUMMARY_PREFIX + prefix + " " + body
 
@@ -456,9 +565,10 @@ def _retention_block(
     emd: Emd,
     scene: Scene,
     active_subjects: list[int],
-    active_audio: dict[int, tuple[int, int]],
+    voice_audio: dict[int, tuple[int, int]],
+    reused_audio: dict[int, ReusedAudioBinding],
 ) -> str:
-    if not active_subjects and not active_audio:
+    if not active_subjects and not voice_audio and not reused_audio:
         return NO_ACTIVE_RETENTION
 
     rules = {rule.subject_number: rule for rule in emd.retention_rules}
@@ -501,12 +611,26 @@ def _retention_block(
             f"{_sentence(rule.description)}"
         )
 
-    for audio, (subject, _speaker) in sorted(active_audio.items()):
-        lines.append(
+    audio_lines = {
+        audio: (
             f"<Audio {audio}>: reference - only the voice timbre and delivery are "
             f"referenced for <Subject {subject}>; the source signal and "
             "its original speech are not copied."
         )
+        for audio, (subject, _speaker) in voice_audio.items()
+    }
+    audio_lines.update(
+        {
+            audio: (
+                f"<Audio {audio}>: partially_copy - the specified spoken-audio "
+                f"signal is copied for <Subject {binding.subject}>'s synchronized "
+                f"dialogue in {_shot_list_text(binding.shot_numbers)}, while other "
+                "audio layers are generated separately."
+            )
+            for audio, binding in reused_audio.items()
+        }
+    )
+    lines.extend(audio_lines[audio] for audio in sorted(audio_lines))
     return RETENTION_ANALYSIS_PREFIX + "\n".join(lines)
 
 
@@ -516,9 +640,11 @@ def _format_timestamp(milliseconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
-def _shot_dialogue_subjects(shot: Shot) -> set[int]:
+def _shot_generated_dialogue_subjects(shot: Shot) -> set[int]:
     subjects: set[int] = set()
     for line_number, line in enumerate(shot.lines, start=1):
+        if LIP_SYNC_LINE_RE.fullmatch(line):
+            continue
         for _dialogue, subject_match in _line_dialogue_subject_matches(
             line, context=f"Shot line {line_number}"
         ):
@@ -538,21 +664,36 @@ def _with_internal_speaker_ids(line: str, *, context: str) -> str:
     return rendered
 
 
+def _render_shot_line(line: str, *, context: str) -> str:
+    lip_sync = LIP_SYNC_LINE_RE.fullmatch(line)
+    if lip_sync is None:
+        return _with_internal_speaker_ids(line, context=context)
+    subject = int(lip_sync.group(1))
+    audio = int(lip_sync.group(2))
+    dialogue = lip_sync.group(3)
+    return (
+        f"<Subject {subject}> (S{subject}) physically performs the directly reused "
+        f"spoken audio from <Audio {audio}> and lip-syncs exactly to {dialogue}. "
+        "The source audio signal and exact words are preserved without replacement, "
+        "repetition, or additional speech."
+    )
+
+
 def _detailed_description_block(
     common_lines: list[str],
     scene: Scene,
-    active_audio: dict[int, tuple[int, int]],
+    voice_audio: dict[int, tuple[int, int]],
 ) -> str:
     parts = [_sentence(line) for line in common_lines]
     parts.extend(_sentence(line) for line in scene.preamble)
     audio_by_subject: dict[int, list[tuple[int, int]]] = {}
-    for audio, (subject, speaker) in active_audio.items():
+    for audio, (subject, speaker) in voice_audio.items():
         audio_by_subject.setdefault(subject, []).append((audio, speaker))
 
     for shot_number, shot in enumerate(scene.shots, start=1):
         body = " ".join(
             _sentence(
-                _with_internal_speaker_ids(
+                _render_shot_line(
                     line,
                     context=f"Shot {shot_number} line {line_number}",
                 )
@@ -562,7 +703,7 @@ def _detailed_description_block(
         present_audio = {
             int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(body)
         }
-        for subject in sorted(_shot_dialogue_subjects(shot)):
+        for subject in sorted(_shot_generated_dialogue_subjects(shot)):
             for audio, speaker in sorted(audio_by_subject.get(subject, [])):
                 if audio not in present_audio:
                     body += (
@@ -687,6 +828,7 @@ def _validate_no_user_speaker_ids(emd: Emd) -> None:
                     ("environment", scene.soundscape.environment),
                     ("sound effects", scene.soundscape.sound_effects),
                     ("vocalization", scene.soundscape.vocalization),
+                    ("background music", scene.soundscape.background_music),
                 )
                 if isinstance(value, str)
             )
@@ -707,38 +849,57 @@ def _shot_object(
     _validate_scene_structure(scene, scene_number)
     _validate_soundscape(scene.soundscape, context=f"Scene {scene_number}")
     allows_dialogue = _scene_allows_dialogue(scene, scene_number)
+    generated_dialogue_subjects = _generated_dialogue_subjects(scene)
+    reused_audio = _reused_audio_bindings(scene, scene_number=scene_number)
     active_subjects = _referenced_subjects(scene)
     for subject in active_subjects:
         if subject > len(emd.subjects):
             raise JSONGenerationError(
                 f"Scene {scene_number} references undefined <Subject {subject}>"
             )
-    active_audio = _active_audio_bindings(
+    voice_audio = _active_voice_audio_bindings(
         emd,
         scene_number,
         active_subjects,
         scene_speakers,
         allows_dialogue=allows_dialogue,
+        generated_dialogue_subjects=generated_dialogue_subjects,
     )
+    conflicting_audio = set(voice_audio) & set(reused_audio)
+    if conflicting_audio:
+        labels = ", ".join(
+            f"<Audio {number}>" for number in sorted(conflicting_audio)
+        )
+        raise JSONGenerationError(
+            f"Scene {scene_number} assigns {labels} both as a voice-timbre "
+            "reference and as a directly reused lip-sync signal"
+        )
     common_lines = _common_lines_for_scene(emd, active_subjects)
-    detailed = _detailed_description_block(common_lines, scene, active_audio)
+    detailed = _detailed_description_block(common_lines, scene, voice_audio)
     detailed_audio = {
         int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(detailed)
     }
-    unexpected_audio = detailed_audio - set(active_audio)
+    expected_audio = set(voice_audio) | set(reused_audio)
+    unexpected_audio = detailed_audio - expected_audio
     if unexpected_audio:
         labels = ", ".join(f"<Audio {number}>" for number in sorted(unexpected_audio))
         raise JSONGenerationError(
-            f"Scene {scene_number} uses Audio reference(s) without an active Subject voice binding: {labels}"
+            f"Scene {scene_number} uses Audio reference(s) without an active voice-reference or lip-sync binding: {labels}"
         )
 
+    has_background_music = scene.soundscape.background_music not in {None, SOUND_NONE}
+
     prompt = [
-        _subject_block(emd, scene_number, active_subjects, active_audio),
-        _summary_block(scene, active_subjects, active_audio),
-        _retention_block(emd, scene, active_subjects, active_audio),
+        _subject_block(emd, scene_number, active_subjects, voice_audio, reused_audio),
+        _summary_block(scene, active_subjects, voice_audio, reused_audio),
+        _retention_block(emd, scene, active_subjects, voice_audio, reused_audio),
         detailed,
-        _overall_soundscape(scene, allows_dialogue),
-        NON_DIEGETIC_MUSIC,
+        _overall_soundscape(
+            scene,
+            allows_dialogue,
+            has_background_music=has_background_music,
+        ),
+        _non_diegetic_music(scene),
     ]
 
     result: dict[str, Any] = {
@@ -823,6 +984,7 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
         RETENTION_ANALYSIS_PREFIX,
         DETAILED_DESCRIPTION_PREFIX,
         OVERALL_SOUNDSCAPE_PREFIX,
+        NON_DIEGETIC_MUSIC_PREFIX,
     )
     for index, shot in enumerate(shots, start=1):
         if not isinstance(shot, dict):
@@ -847,9 +1009,14 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
                 raise JSONValidationError(
                     f"Shot {index} prompt section {position + 1} must not be empty"
                 )
-        if prompt[-1] != NON_DIEGETIC_MUSIC:
+        music = prompt[5][len(NON_DIEGETIC_MUSIC_PREFIX):].strip()
+        if AUDIO_REFERENCE_RE.search(music) or DIRECT_SPEECH_RE.search(music):
             raise JSONValidationError(
-                f"Shot {index} prompt must end with the non-diegetic music disable directive"
+                f"Shot {index} non_diegetic_music cannot contain an Audio reference or direct speech"
+            )
+        if music != "N/A" and prompt[4] == COMPLETE_SILENCE:
+            raise JSONValidationError(
+                f"Shot {index} overall_soundscape cannot claim complete silence when background music is active"
             )
         if not prompt[1][len(SUMMARY_PREFIX):].startswith("["):
             raise JSONValidationError(f"Shot {index} summary must begin with a task type")

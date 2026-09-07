@@ -92,6 +92,7 @@ class LexicalDocument:
 SOUNDSCAPE_PREFIXES = {
     "環境音": "* Environment: ",
     "効果音": "* Sound effects: ",
+    "BGM": "* Background music: ",
 }
 SOUNDSCAPE_FIXED_VALUES = {
     "なし": "NONE",
@@ -110,6 +111,10 @@ JAPANESE_RETENTION_RE = re.compile(
 )
 JAPANESE_SHOT_RE = re.compile(
     r"## ショット(?: ((?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)秒)?"
+)
+JAPANESE_LIP_SYNC_RE = re.compile(
+    r"リップシンク\s*[:：]\s*"
+    r"<Subject ([0-9]+)>\s*<-\s*<Audio ([0-9]+)>\s*(.+)"
 )
 USER_SPEAKER_ID_RE = re.compile(r"\(S[1-9][0-9]*\)")
 COMMON_AUDIO_RE = re.compile(r"<Audio [1-9][0-9]*>")
@@ -224,6 +229,58 @@ def _retention_record(
         payload=protect_text(description, namespace=record_id),
         output_prefix=(
             f"* <Subject {source}> {relationship}{target_suffix}: "
+        ),
+    )
+
+
+def _lip_sync_record(
+    body: str,
+    *,
+    line_number: int,
+    record_id: str,
+    block_index: int,
+) -> TranslationRecord:
+    match = JAPANESE_LIP_SYNC_RE.fullmatch(body)
+    if match is None:
+        raise TranslationError(
+            f"Invalid lip-sync bullet at line {line_number}; use "
+            "'* リップシンク: <Subject N> <- <Audio N> 「台詞」'"
+        )
+    subject_text, audio_text, source_dialogue = match.groups()
+    subject = int(subject_text)
+    audio = int(audio_text)
+    if subject_text != str(subject) or not 1 <= subject <= 4:
+        raise TranslationError(
+            f"Lip-sync Subject at line {line_number} must be in the Subject 1-4 range"
+        )
+    if audio_text != str(audio) or not 1 <= audio <= 3:
+        raise TranslationError(
+            f"Lip-sync Audio at line {line_number} must be in the Audio 1-3 range"
+        )
+
+    dialogue_payload = protect_text(source_dialogue.strip(), namespace=record_id)
+    if (
+        len(dialogue_payload.replacements) != 1
+        or dialogue_payload.text not in dialogue_payload.replacements
+    ):
+        raise TranslationError(
+            f"Lip-sync bullet at line {line_number} must end with exactly one Japanese "
+            "corner-bracket dialogue or one <d>...</d> block"
+        )
+    dialogue = dialogue_payload.replacements[dialogue_payload.text]
+    inner_dialogue = dialogue[3:-4]
+    spoken_text = re.sub(r"^\[[^\]]+\]", "", inner_dialogue, count=1).strip()
+    if not spoken_text:
+        raise TranslationError(
+            f"Lip-sync dialogue at line {line_number} must not be empty"
+        )
+    return TranslationRecord(
+        record_id=record_id,
+        section="Shot",
+        block_index=block_index,
+        payload=None,
+        translated=(
+            f"Lip sync: <Subject {subject}> <- <Audio {audio}>: {dialogue}"
         ),
     )
 
@@ -436,6 +493,20 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
             record_number += 1
             bullet_count += 1
             record_id = f"R{record_number:06d}"
+            if body.startswith("リップシンク"):
+                if current.section != "Shot":
+                    raise TranslationError(
+                        f"Lip-sync bullet at line {line_number} must belong to a Shot"
+                    )
+                current.records.append(
+                    _lip_sync_record(
+                        body,
+                        line_number=line_number,
+                        record_id=record_id,
+                        block_index=len(blocks) - 1,
+                    )
+                )
+                continue
             if current.section == "Retention":
                 current.records.append(
                     _retention_record(
@@ -447,10 +518,10 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 )
                 continue
             if current.section == "Soundscape":
-                match = re.fullmatch(r"(環境音|効果音|発声)\s*[:：]\s*(.*)", body)
+                match = re.fullmatch(r"(環境音|効果音|発声|BGM)\s*[:：]\s*(.*)", body)
                 if match is None:
                     raise TranslationError(
-                        f"Invalid soundscape bullet at line {line_number}; expected Environment, Sound effects, or Vocalization"
+                        f"Invalid soundscape bullet at line {line_number}; expected Environment, Sound effects, Vocalization, or BGM"
                     )
                 label, raw_value = match.groups()
                 value = raw_value.strip()
@@ -479,6 +550,10 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                     translated = "NONE"
                     payload = None
                 else:
+                    if COMMON_AUDIO_RE.search(value) or COMMON_DIRECT_SPEECH_RE.search(value):
+                        raise TranslationError(
+                            f"{label} at line {line_number} cannot contain an Audio reference or direct speech"
+                        )
                     translated = None
                     payload = protect_text(value, namespace=record_id)
                 current.records.append(
