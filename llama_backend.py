@@ -16,6 +16,7 @@ from .compiler.errors import ModelLoadError
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
+QWEN3_NON_THINKING_PREFILL = "<think>\n\n</think>\n\n"
 
 try:
     import llama_cpp as _llama_cpp  # type: ignore
@@ -282,6 +283,142 @@ class LlamaBackend:
             "usage": usage,
         }
 
+    @staticmethod
+    def _qwen3_non_thinking_prompt(messages: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"system", "user", "assistant"} or not isinstance(
+                content, str
+            ):
+                raise ModelLoadError(
+                    "Qwen3 non-thinking completion requires plain-text "
+                    "system, user, or assistant messages"
+                )
+            parts.append(f"<|im_start|>{role}\n{content}<|im_end|>\n")
+        parts.append("<|im_start|>assistant\n")
+        parts.append(QWEN3_NON_THINKING_PREFILL)
+        return "".join(parts)
+
+    @staticmethod
+    def _qwen3_stop_sequences(stop: Any) -> list[str]:
+        if isinstance(stop, str):
+            values = [stop]
+        elif isinstance(stop, list):
+            values = [value for value in stop if isinstance(value, str)]
+        else:
+            values = []
+        for value in ("<|im_end|>", "<|endoftext|>"):
+            if value not in values:
+                values.append(value)
+        return values
+
+    def _collect_streamed_text_completion(
+        self,
+        stream: Any,
+        *,
+        prompt: str,
+        progress_callback: Callable[[int], None],
+    ) -> dict[str, Any]:
+        content_parts: list[str] = []
+        finish_reason: Any = None
+        usage: dict[str, Any] | None = None
+        content_chunk_count = 0
+
+        for chunk in stream:
+            if not isinstance(chunk, dict):
+                raise ModelLoadError(
+                    "llama-cpp-python returned an invalid streaming text chunk"
+                )
+            chunk_usage = chunk.get("usage")
+            if isinstance(chunk_usage, dict):
+                usage = dict(chunk_usage)
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            piece = choice.get("text")
+            if isinstance(piece, str) and piece:
+                content_parts.append(piece)
+                content_chunk_count += 1
+                progress_callback(content_chunk_count)
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice.get("finish_reason")
+
+        content = "".join(content_parts)
+        if usage is None:
+            prompt_tokens = self._completion_token_count(prompt)
+            completion_tokens = self._completion_token_count(content)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+        return {
+            "choices": [
+                {
+                    "message": {"content": content},
+                    "finish_reason": finish_reason or "stop",
+                }
+            ],
+            "usage": usage,
+        }
+
+    def _complete_qwen3_without_thinking(
+        self,
+        call_kwargs: dict[str, Any],
+        *,
+        progress_callback: Callable[[int], None] | None,
+    ) -> Any:
+        if self.llm is None:
+            raise ModelLoadError("No GGUF model is loaded")
+        completion = getattr(self.llm, "create_completion", None)
+        if not callable(completion):
+            return None
+
+        messages = call_kwargs.pop("messages", None)
+        if not isinstance(messages, list):
+            raise ModelLoadError("Qwen3 completion requires a messages list")
+        prompt = self._qwen3_non_thinking_prompt(messages)
+        call_kwargs["prompt"] = prompt
+        call_kwargs["stop"] = self._qwen3_stop_sequences(call_kwargs.get("stop"))
+        if progress_callback is not None:
+            call_kwargs["stream"] = True
+
+        LOGGER.info(
+            "[cl_japanese2json] Using strict Qwen3 non-thinking assistant prefill"
+        )
+        response = completion(**call_kwargs)
+        if progress_callback is not None and not isinstance(response, dict):
+            return self._collect_streamed_text_completion(
+                response,
+                prompt=prompt,
+                progress_callback=progress_callback,
+            )
+        if not isinstance(response, dict):
+            raise ModelLoadError("llama-cpp-python returned an invalid text completion")
+        choices = response.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(
+            choices[0], dict
+        ):
+            raise ModelLoadError("llama-cpp-python text completion has no choices")
+        choice = choices[0]
+        content = choice.get("text")
+        if not isinstance(content, str):
+            raise ModelLoadError("llama-cpp-python text completion has no text")
+        return {
+            "choices": [
+                {
+                    "message": {"content": content},
+                    "finish_reason": choice.get("finish_reason") or "stop",
+                }
+            ],
+            "usage": response.get("usage"),
+        }
+
     def complete_chat(self, **kwargs: Any) -> Any:
         if self.llm is None:
             raise ModelLoadError("No GGUF model is loaded")
@@ -297,7 +434,19 @@ class LlamaBackend:
         progress_callback = call_kwargs.pop("progress_callback", None)
         if progress_callback is not None and not callable(progress_callback):
             raise ModelLoadError("progress_callback must be callable")
-        if self.is_qwen3():
+        is_qwen3 = self.is_qwen3()
+        if is_qwen3 and callable(getattr(self.llm, "create_completion", None)):
+            try:
+                return self._complete_qwen3_without_thinking(
+                    call_kwargs,
+                    progress_callback=progress_callback,
+                )
+            except TypeError as exc:
+                raise ModelLoadError(
+                    "llama-cpp-python rejected the strict Qwen3 non-thinking "
+                    "text-completion arguments; check backend compatibility"
+                ) from exc
+        if is_qwen3:
             try:
                 parameters = inspect.signature(call).parameters
             except (TypeError, ValueError):

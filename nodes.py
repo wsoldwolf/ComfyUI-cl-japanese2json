@@ -118,7 +118,7 @@ class CLJapaneseToJSONGGUF:
                 "retry_max": (
                     "INT",
                     {
-                        "default": 3,
+                        "default": 10,
                         "min": -1,
                         "max": 100,
                         "step": 1,
@@ -283,7 +283,7 @@ class CLJapaneseToJSONGGUF:
         seed: int,
         keep_last_prompt: bool,
         steps: int = 8,
-        retry_max: int = 3,
+        retry_max: int = 10,
         save_debug_output: bool = False,
         speech_guard: str = SPEECH_GUARD_STRICT,
     ) -> tuple[str]:

@@ -134,6 +134,29 @@ class FakeStreamingLoadedLlama(FakeLoadedLlama):
         )
 
 
+class FakeRawCompletionLlama(FakeLoadedLlama):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.text_completion_kwargs = None
+
+    def create_completion(self, **kwargs):
+        self.text_completion_kwargs = kwargs
+        if kwargs.get("stream"):
+            return iter(
+                [
+                    {
+                        "choices": [{"text": "Translated", "finish_reason": None}]
+                    },
+                    {"choices": [{"text": " stream", "finish_reason": None}]},
+                    {"choices": [{"text": "", "finish_reason": "stop"}]},
+                ]
+            )
+        return {
+            "choices": [{"text": "Translated stream", "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        }
+
+
 class LlamaBackendTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeLoadedLlama.instances.clear()
@@ -240,6 +263,70 @@ class LlamaBackendTests(unittest.TestCase):
                 {"enable_thinking": False},
             )
             self.assertIs(loaded.completion_kwargs["reasoning"], False)
+
+    def test_qwen3_uses_strict_non_thinking_prefill_when_text_completion_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "qwen3-model.gguf"
+            path.write_bytes(b"x")
+            backend = backend_module.LlamaBackend(
+                llama_module=FakeLlamaModule,
+                llama_class=FakeRawCompletionLlama,
+            )
+            loaded = self._load(backend, path)
+            response = backend.complete_chat(
+                messages=[
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "translate /no_think"},
+                ],
+                max_tokens=32,
+                temperature=0.1,
+                top_p=0.9,
+                repeat_penalty=1.05,
+                seed=1,
+                stop=["CLJT0ENDX"],
+            )
+
+            self.assertIsNone(loaded.completion_kwargs)
+            self.assertTrue(
+                loaded.text_completion_kwargs["prompt"].endswith(
+                    "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            )
+            self.assertEqual(
+                loaded.text_completion_kwargs["stop"],
+                ["CLJT0ENDX", "<|im_end|>", "<|endoftext|>"],
+            )
+            self.assertEqual(
+                response["choices"][0]["message"]["content"],
+                "Translated stream",
+            )
+
+    def test_streamed_qwen3_text_completion_reports_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "qwen3-model.gguf"
+            path.write_bytes(b"x")
+            backend = backend_module.LlamaBackend(
+                llama_module=FakeLlamaModule,
+                llama_class=FakeRawCompletionLlama,
+            )
+            self._load(backend, path)
+            progress = []
+            response = backend.complete_chat(
+                messages=[{"role": "user", "content": "translate /no_think"}],
+                max_tokens=32,
+                temperature=0.1,
+                top_p=0.9,
+                repeat_penalty=1.05,
+                seed=1,
+                stop=["CLJT0ENDX"],
+                progress_callback=progress.append,
+            )
+
+            self.assertEqual(progress, [1, 2])
+            self.assertEqual(
+                response["choices"][0]["message"]["content"],
+                "Translated stream",
+            )
 
     def test_streaming_completion_reports_progress_and_rebuilds_response(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

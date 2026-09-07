@@ -31,7 +31,7 @@ def arguments(**overrides):
         "seed": 1,
         "keep_last_prompt": False,
         "steps": 8,
-        "retry_max": 3,
+        "retry_max": 10,
         "speech_guard": "strict",
     }
     values.update(overrides)
@@ -81,7 +81,7 @@ class NodeIntegrationTests(unittest.TestCase):
         self.assertEqual(required["model_name"][1]["default"], "model.gguf")
         self.assertEqual(required["op_offload"][0], "BOOLEAN")
         self.assertEqual(required["steps"][1]["default"], 8)
-        self.assertEqual(required["retry_max"][1]["default"], 3)
+        self.assertEqual(required["retry_max"][1]["default"], 10)
         self.assertEqual(required["retry_max"][1]["min"], -1)
         self.assertEqual(
             input_types["optional"]["save_debug_output"][1]["default"], False
@@ -178,12 +178,12 @@ class NodeIntegrationTests(unittest.TestCase):
                 generate.call_args_list[1].kwargs["speech_guard"], "strict"
             )
 
-    def test_retry_max_is_forwarded_and_default_allows_three_retries(self) -> None:
+    def test_retry_max_is_forwarded_and_default_allows_ten_retries(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             model = Path(temp) / "model.gguf"
             model.write_bytes(b"x")
             node = nodes.CLJapaneseToJSONGGUF()
-            backend = FakeBackend(["bad 1", "bad 2", "bad 3"])
+            backend = FakeBackend([f"bad {index}" for index in range(1, 11)])
             node._backend = backend
             with patch.object(
                 nodes, "resolve_model_name", return_value=model
@@ -191,8 +191,8 @@ class NodeIntegrationTests(unittest.TestCase):
                 result = node.compile_json(**arguments())
 
             self.assertEqual(json.loads(result[0])["shots"][0]["id"], "scene_1")
-            self.assertEqual(len(backend.calls), 4)
-            self.assertEqual(len({call["seed"] for call in backend.calls}), 4)
+            self.assertEqual(len(backend.calls), 11)
+            self.assertEqual(len({call["seed"] for call in backend.calls}), 11)
 
     def test_keep_last_with_history_bypasses_all_current_inputs(self) -> None:
         node = nodes.CLJapaneseToJSONGGUF()

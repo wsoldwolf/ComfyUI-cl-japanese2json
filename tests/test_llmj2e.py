@@ -665,8 +665,111 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIn("# Scene", output)
         self.assertEqual(len(llm.calls), 1)
         self.assertTrue(
-            any("Ignored one leading Qwen thinking block" in line for line in captured.output)
+            any("Ignored 1 leading Qwen thinking block(s)" in line for line in captured.output)
         )
+
+    def test_multiple_leading_qwen_thinking_blocks_are_ignored(self) -> None:
+        def leading_thinks(kwargs):
+            translated = default_stream_translation(kwargs["messages"])
+            return (
+                "<think>first internal pass</think>\n"
+                "<think>second internal pass</think>\n\n"
+                + translated
+            )
+
+        llm = FakeLLM([leading_thinks])
+        with self.assertLogs("cl_japanese2json", level="INFO") as captured:
+            output = llmj2e.translate_markdown(
+                "# シーン\n## ショット\n* 動作。", llm, "sys", max_tokens=64
+            )
+
+        self.assertIn("# Scene", output)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(
+            any("Ignored 2 leading Qwen thinking block(s)" in line for line in captured.output)
+        )
+
+    def test_embedded_thinking_retries_only_contaminated_record(self) -> None:
+        def embedded_think(kwargs):
+            records = request_records(kwargs["messages"])
+
+            def transform(record):
+                translated = default_translation(record)
+                if record["id"] == records[1]["id"]:
+                    return f"<think>internal reasoning</think> {translated}"
+                return translated
+
+            return default_stream_translation(kwargs["messages"], transform=transform)
+
+        retry_record_counts = []
+
+        def retry_response(kwargs):
+            retry_record_counts.append(len(request_records(kwargs["messages"])))
+            return default_stream_translation(kwargs["messages"])
+
+        source = "# シーン\n## ショット\n* 一。\n* 二。\n* 三。"
+        llm = FakeLLM([embedded_think, retry_response])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(
+                source, llm, "sys", max_tokens=128, retry_max=1
+            )
+
+        self.assertEqual(output.count("* The action occurs ."), 3)
+        self.assertNotIn("<think>", output)
+        self.assertEqual(retry_record_counts, [1])
+        self.assertTrue(
+            any(
+                "Recovered 2/3 valid text segment(s)" in line
+                for line in captured.output
+            )
+        )
+
+    def test_unclosed_thinking_preamble_does_not_retry_valid_records(self) -> None:
+        def malformed_thinking_preamble(kwargs):
+            return (
+                "<think>unfinished internal reasoning\n"
+                + default_stream_translation(kwargs["messages"])
+            )
+
+        source = "# シーン\n## ショット\n* 一。\n* 二。\n* 三。"
+        llm = FakeLLM([malformed_thinking_preamble])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(
+                source, llm, "sys", max_tokens=128, retry_max=1
+            )
+
+        self.assertEqual(output.count("* The action occurs ."), 3)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(
+            any(
+                "Recovered 3/3 valid text segment(s)" in line
+                for line in captured.output
+            )
+        )
+
+    def test_duplicate_marker_retries_only_ambiguous_neighbor_records(self) -> None:
+        def duplicate_second_marker(kwargs):
+            records = request_records(kwargs["messages"])
+            translated = default_stream_translation(kwargs["messages"])
+            marker = records[1]["marker_token"]
+            return translated.replace(marker, f"{marker}\n{marker}", 1)
+
+        retry_record_ids = []
+
+        def retry(kwargs):
+            retry_record_ids.extend(
+                record["id"] for record in request_records(kwargs["messages"])
+            )
+            return default_stream_translation(kwargs["messages"])
+
+        source = "# シーン\n## ショット\n* 一。\n* 二。\n* 三。\n* 四。"
+        llm = FakeLLM([duplicate_second_marker, retry])
+        output = llmj2e.translate_markdown(
+            source, llm, "sys", max_tokens=128, retry_max=1
+        )
+
+        self.assertEqual(output.count("* The action occurs ."), 4)
+        self.assertEqual(retry_record_ids, ["R000001", "R000002"])
 
     def test_two_invalid_responses_raise(self) -> None:
         llm = FakeLLM(["not json", "still not json"])

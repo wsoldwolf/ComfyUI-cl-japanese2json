@@ -17,7 +17,7 @@ JAPANESE_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
 
 REFERENCE_LIMITS = {
     "Picture": (1, 9),
-    "Video": (1, 9),
+    "Video": (1, 3),
     "Audio": (1, 3),
     "Subject": (1, 4),
 }

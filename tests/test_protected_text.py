@@ -12,7 +12,7 @@ ProtectedTextError = module("compiler.errors").ProtectedTextError
 class ProtectedTextTests(unittest.TestCase):
     def test_all_valid_references_restore_exactly(self) -> None:
         source = (
-            "<Picture 1> <Picture 9> <Video 1> <Video 9> "
+            "<Picture 1> <Picture 9> <Video 1> <Video 3> "
             "<Audio 1> <Audio 3> <Subject 1> <Subject 4>"
         )
         payload = protected.protect_text(source)
@@ -23,6 +23,12 @@ class ProtectedTextTests(unittest.TestCase):
         with self.assertLogs("cl_japanese2json", level="WARNING"):
             payload = protected.protect_text("<Subject 5>")
         self.assertEqual(protected.restore_text(payload, payload.text), "<Subject 5>")
+
+    def test_video_above_official_three_clip_limit_warns_and_is_preserved(self) -> None:
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            payload = protected.protect_text("<Video 4>")
+        self.assertEqual(protected.restore_text(payload, payload.text), "<Video 4>")
+        self.assertIn("Out-of-range", captured.output[0])
 
     def test_compact_reference_warns_and_is_preserved(self) -> None:
         source = "<Picture1> <Audio2> <Subject3>"

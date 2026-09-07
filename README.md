@@ -149,10 +149,12 @@ Cスタイルの行コメントとブロックコメントを使用できます�
 
 ```text
 <Picture 1>～<Picture 9>
-<Video 1>～<Video 9>
+<Video 1>～<Video 3>
 <Audio 1>～<Audio 3>
 <Subject 1>～<Subject 4>
 ```
+
+`Picture`、`Video`、`Audio`の上限は、MiniMax H3-Base-Ref2VAの[公式入力仕様](https://www.minimax.io/news/minimax-h3-open-source)（画像9枚、動画3本、音声3本）に合わせています。`Subject`は本コンパイラの論理被写体番号です。
 
 タグ名と番号の間には1個のASCII空白が必要です。`<Picture1>`のような形式は警告されます。
 
@@ -363,7 +365,7 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
 | `seed` | 翻訳seed。再試行ごとに決定論的に変更します。 |
 | `keep_last_prompt` | 最後に検証成功したJSONがあれば現在の入力を無視して返します。 |
 | `steps` | JSONの`defaults.steps`。既定値8、範囲1～10000。翻訳には影響しません。 |
-| `retry_max` | 検証失敗後の最大再試行回数。既定3、`0`はなし、`-1`は成功又は中断まで無制限です。 |
+| `retry_max` | 検証失敗後の最大再試行回数。既定10、`0`はなし、`-1`は成功又は中断まで無制限です。長文でも検証済み区間は保持し、未解決区間だけを再送します。 |
 | `save_debug_output` | 中間情報をComfyUIのoutput下へ保存します。既定`False`。 |
 | `speech_guard` | 保護台詞のない肯定的発声語の扱い。`strict`（既定）はエラー、`warn`はWARNINGを記録してJSON生成を続行します。 |
 
@@ -377,7 +379,9 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
 
 推論中は約10秒ごとに、バッチ、attempt、経過秒及び受信済みストリームチャンク数を通常ログへ出力します。入力評価中など、まだ最初の出力チャンクが得られていない場合も`streamed_chunks=0`のハートビートで処理中であることを確認できます。プロンプト本文や生成途中の翻訳文は通常ログへ出しません。
 
-応答では構造と保護プレースホルダの個数・順序・所有区間、コードフェンス、thinking、日本語残留などを検証します。失敗時は検証済み区間を保持し、未解決区間だけを新しいseedで`retry_max`まで再送します。正常に閉じた先頭`<think>...</think>`を1個だけ無視できます。
+Qwen3ではユーザーメッセージ末尾の`/no_think`に加え、llama-cpp-pythonのchat APIがhard switchを公開しない環境でも、空のthinking assistant prefillを生成開始位置へ与えてthinkingそのものを抑止します。
+
+応答では構造と保護プレースホルダの個数・順序・所有区間、コードフェンス、thinking、日本語残留などを検証します。正常に閉じた先頭`<think>...</think>`が連続して出た場合だけエンベロープとして無視します。本文中のthinkingは無条件削除せず、その区間だけを未解決とします。応答全体の検証に失敗しても、余分な前置きや局所的な構造破損から独立して境界を確定できる正常区間を個別回収し、未解決区間だけを新しいseedで`retry_max`まで再送します。
 
 `save_debug_output=True`では、実行ごとのディレクトリを`ComfyUI/output/cl_japanese2json_debug/`へ作り、`source.md`、system prompt、保護要求、LLM生応答、検証メタデータ、成功時の`canonical.md`と`result.json`、失敗時の`error.txt`を保存します。入力内容を含むため共有前に確認してください。`ComfyUI/input`へは書きません。
 

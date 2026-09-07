@@ -20,6 +20,12 @@ class WorkflowCompatibilityTests(unittest.TestCase):
         for path in paths:
             with self.subTest(workflow=path.name):
                 workflow = json.loads(path.read_text(encoding="utf-8"))
+                serialized = json.dumps(workflow, ensure_ascii=False)
+                self.assertNotRegex(
+                    serialized,
+                    r"<Video (?:[4-9]|[1-9][0-9]+)>",
+                )
+                self.assertNotIn("<Video 1>～<Video 9>", serialized)
                 compiler_nodes = [
                     node
                     for node in workflow["nodes"]
@@ -30,6 +36,13 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 input_names = [item["name"] for item in compiler["inputs"]]
                 self.assertIn("steps", input_names)
                 self.assertEqual(compiler["widgets_values_named"]["steps"], 8)
+                self.assertEqual(
+                    compiler["widgets_values_named"]["retry_max"], 10
+                )
+                retry_index = list(compiler["widgets_values_named"]).index(
+                    "retry_max"
+                )
+                self.assertEqual(compiler["widgets_values"][retry_index], 10)
                 if "save_debug_output" in input_names:
                     self.assertFalse(
                         compiler["widgets_values_named"]["save_debug_output"]

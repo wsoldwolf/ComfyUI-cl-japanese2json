@@ -74,7 +74,7 @@ requiredの順序は次のとおりである。
 | `seed` | INT | 1 | 1～4294967295 |
 | `keep_last_prompt` | BOOLEAN | False | True/False |
 | `steps` | INT | 8 | 1～10000 |
-| `retry_max` | INT | 3 | -1～100 |
+| `retry_max` | INT | 10 | -1～100 |
 
 optionalは次である。
 
@@ -90,6 +90,8 @@ optionalは次である。
 - `0`: 初回失敗後に再試行しない。
 - 1～100: 指定回数まで再試行する。
 - `-1`: 成功、バックエンドエラー又はComfyUI中断まで無制限に再試行する。
+
+既定値は長文での局所的なプレースホルダ欠落を吸収するため10とする。検証済み区間は再送しないため、再試行回数を増やしても毎回文書全体を推論してはならない。恒常的な失敗時の待ち時間を制限するため20又は`-1`を既定値にはしない。
 
 `speech_guard`の意味は次である。
 
@@ -221,7 +223,9 @@ Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追
 - `chat_template_kwargs={"enable_thinking": False}`
 - `reasoning=False`
 
-ユーザーメッセージ末尾にも`/no_think`を置く。
+ユーザーメッセージ末尾にも`/no_think`を置く。ただし、`/no_think`はsoft switchなのでこれだけをhard switchとして扱わない。Qwen3かつロード済みllama-cpp-pythonが`create_completion()`を提供する場合は、system/userメッセージをChatMLへ変換し、assistant生成開始位置へ空の`<think>\n\n</think>\n\n`を事前配置してtext completionを実行する。戻り値は通常のchat completion形式へ正規化する。停止条件には既存の構造停止トークンに加えて`<|im_end|>`及び`<|endoftext|>`を含める。
+
+ストリーム応答は生本文を応答全体検証より先に保持する。先頭に連続する正常閉鎖thinking blockは除去できる。残留thinking、長さ上限又は構造不正があっても、構造マーカーで安全に分離できる各区間を個別検証し、正常区間を保持して未解決区間だけを再送する。未閉鎖thinking又は余分な前置きが最初の構造マーカーより前にある場合も、後続区間の回収を試みる。重複、欠落又は順序不正マーカーは隣接境界を曖昧にする区間だけを失敗させる。翻訳区間内のthinkingを文字列置換で無条件削除してはならない。
 
 ### 6.6 コンテキスト計算
 
@@ -322,6 +326,19 @@ with instance_lock:
 - コメントだけの行は構文状態を変更せず、ディレクティブと箇条書きの間でも透明に扱う。
 - コメント内部を翻訳レコード、参照走査、発声走査又はJSON生成へ渡さない。
 - HTMLコメントはサポートせず、`CommentSyntaxError`とする。
+
+#### 9.1.2 参照タグの正規範囲
+
+MiniMax H3-Base-Ref2VAの入力上限に合わせ、正規の参照タグ範囲を次とする。
+
+```text
+<Picture 1>～<Picture 9>
+<Video 1>～<Video 3>
+<Audio 1>～<Audio 3>
+<Subject 1>～<Subject 4>
+```
+
+`Subject`は本コンパイラが定義する論理被写体番号であり、MiniMax H3の入力メディア本数ではない。範囲外又は非正規の参照タグは警告を出し、文字列自体は翻訳から保護して復元する。
 
 ### 9.2 Common
 

@@ -955,7 +955,7 @@ def _call_llm(
     return completion(**kwargs)
 
 
-def _content_from_response(response: Any) -> str:
+def _response_content(response: Any) -> tuple[str, Any]:
     if not isinstance(response, dict):
         raise TranslationError("LLM response must be an object")
     choices = response.get("choices")
@@ -964,26 +964,12 @@ def _content_from_response(response: Any) -> str:
     choice = choices[0]
     if not isinstance(choice, dict):
         raise TranslationError("LLM response choice is invalid")
-    if choice.get("finish_reason") == "length":
-        raise TranslationError("LLM response was truncated because max_tokens was reached")
     message = choice.get("message")
     if not isinstance(message, dict):
         raise TranslationError("LLM response has no message object")
     content = message.get("content")
     if not isinstance(content, str) or content.strip() == "":
         raise TranslationError("LLM response content is empty")
-    leading_think = LEADING_THINK_BLOCK_RE.match(content)
-    if leading_think is not None:
-        content = content[leading_think.end():]
-        LOGGER.info("[cl_japanese2json] Ignored one leading Qwen thinking block")
-    if content.strip() == "":
-        raise TranslationError(
-            "LLM response contains thinking markup but no translation"
-        )
-    if CODE_FENCE_RE.search(content):
-        raise TranslationError("LLM response contains a Markdown code fence")
-    if THINK_RE.search(content):
-        raise TranslationError("LLM response contains Qwen thinking markup")
     usage = response.get("usage")
     if isinstance(usage, dict):
         prompt_tokens = usage.get("prompt_tokens", "?")
@@ -995,6 +981,37 @@ def _content_from_response(response: Any) -> str:
             completion_tokens,
             total_tokens,
         )
+    return content, choice.get("finish_reason")
+
+
+def _strip_leading_thinking_blocks(content: str) -> str:
+    stripped = content
+    block_count = 0
+    while True:
+        leading_think = LEADING_THINK_BLOCK_RE.match(stripped)
+        if leading_think is None:
+            break
+        stripped = stripped[leading_think.end():]
+        block_count += 1
+    if block_count:
+        LOGGER.info(
+            "[cl_japanese2json] Ignored %d leading Qwen thinking block(s)",
+            block_count,
+        )
+    return stripped
+
+
+def _validated_response_content(content: str, finish_reason: Any) -> str:
+    if finish_reason == "length":
+        raise TranslationError("LLM response was truncated because max_tokens was reached")
+    if content.strip() == "":
+        raise TranslationError(
+            "LLM response contains thinking markup but no translation"
+        )
+    if CODE_FENCE_RE.search(content):
+        raise TranslationError("LLM response contains a Markdown code fence")
+    if THINK_RE.search(content):
+        raise TranslationError("LLM response contains Qwen thinking markup")
     return content
 
 
@@ -1003,6 +1020,14 @@ def _validate_translation_text(record: TranslationRecord, translated: str) -> st
         raise TranslationError(f"Record {record.record_id} has no translatable payload")
     if "\n" in translated or "\r" in translated:
         raise TranslationError(f"Record {record.record_id} was split across multiple lines")
+    if CODE_FENCE_RE.search(translated):
+        raise TranslationError(
+            f"Record {record.record_id} contains a Markdown code fence"
+        )
+    if THINK_RE.search(translated):
+        raise TranslationError(
+            f"Record {record.record_id} contains Qwen thinking markup"
+        )
     validate_protected_translation(record.payload, translated)
     if record.section == "Subjects" and SUBJECT_LABEL_RE.match(translated):
         raise TranslationError(
@@ -1398,7 +1423,13 @@ def _parse_stream_text_values(
 def _salvage_stream_response(
     content: str, stream: TranslationStream
 ) -> dict[int, str]:
-    """Return individually valid segments from a structurally incomplete response."""
+    """Return independently bounded valid segments from an invalid response.
+
+    Response-wide contamination, such as an unclosed thinking preamble, must not
+    discard later records whose marker, payload, and following boundary remain
+    unambiguous.  A record is recovered only when its own marker is unique and
+    the next observed structural marker cannot hide an omitted record.
+    """
 
     try:
         translated_stream = _translation_stream_from_content(content, stream)
@@ -1407,62 +1438,68 @@ def _salvage_stream_response(
 
     structural_tokens = _structural_tokens(stream)
     expected_set = set(structural_tokens)
-    found = _structural_pattern(stream).findall(translated_stream)
-    if not found:
+    structural_pattern = _structural_pattern(stream)
+    matches = list(structural_pattern.finditer(translated_stream))
+    if not matches:
         return _salvage_markerless_response(translated_stream, stream)
-    if any(token not in expected_set for token in found) or len(found) != len(set(found)):
+
+    leading_text = translated_stream[: matches[0].start()]
+    if (
+        leading_text.strip()
+        and THINK_RE.search(leading_text) is None
+        and CODE_FENCE_RE.search(leading_text) is None
+    ):
+        # Ordinary model-added prose outside every record remains a hard error.
+        # Only known response wrappers may be discarded during record salvage.
         return {}
+
     expected_index = {token: index for index, token in enumerate(structural_tokens)}
-    found_indices = [expected_index[token] for token in found]
-    if found_indices != sorted(found_indices):
-        return {}
-
-    positions = {token: translated_stream.index(token) for token in found}
-    if found and translated_stream[: positions[found[0]]].strip():
-        return {}
-    for directive_token in stream.directive_tokens:
-        if directive_token not in positions:
-            continue
-        token_index = expected_index[directive_token]
-        if token_index + 1 >= len(structural_tokens):
-            continue
-        next_token = structural_tokens[token_index + 1]
-        if next_token not in positions:
-            continue
-        value_start = positions[directive_token] + len(directive_token)
-        if translated_stream[value_start:positions[next_token]].strip():
-            return {}
-
-    missing_directive_blocks = {
-        stream_record.record.block_index
+    record_expected_indices = {
+        expected_index[stream_record.marker_token]
         for stream_record in stream.records
-        if f"{stream.prefix}D{stream_record.record.block_index}X" not in positions
     }
-    first_record_by_block: dict[int, int] = {}
-    for record_index, stream_record in enumerate(stream.records):
-        first_record_by_block.setdefault(
-            stream_record.record.block_index, record_index
-        )
+    occurrence_counts: dict[str, int] = {}
+    for match in matches:
+        token = match.group(0)
+        occurrence_counts[token] = occurrence_counts.get(token, 0) + 1
+
     salvaged: dict[int, str] = {}
     for record_index, stream_record in enumerate(stream.records):
-        if (
-            stream_record.record.block_index in missing_directive_blocks
-            and first_record_by_block[stream_record.record.block_index]
-            == record_index
-        ):
-            continue
         token = stream_record.marker_token
-        if token not in positions:
+        if occurrence_counts.get(token) != 1:
             continue
-        token_index = expected_index[token]
-        if token_index + 1 < len(structural_tokens):
-            next_token = structural_tokens[token_index + 1]
-            if next_token not in positions:
+
+        marker_match_index = next(
+            index
+            for index, match in enumerate(matches)
+            if match.group(0) == token
+        )
+        marker_match = matches[marker_match_index]
+        current_expected_index = expected_index[token]
+        if marker_match_index + 1 < len(matches):
+            boundary_match = matches[marker_match_index + 1]
+            boundary_token = boundary_match.group(0)
+            boundary_expected_index = expected_index.get(boundary_token)
+            if (
+                boundary_token not in expected_set
+                or occurrence_counts.get(boundary_token) != 1
+                or boundary_expected_index is None
+                or boundary_expected_index <= current_expected_index
+            ):
                 continue
-            value_end = positions[next_token]
-        else:
+            if any(
+                current_expected_index < candidate < boundary_expected_index
+                for candidate in record_expected_indices
+            ):
+                # A missing record marker makes this record's end ambiguous.
+                continue
+            value_end = boundary_match.start()
+        elif record_index == len(stream.records) - 1:
             value_end = len(translated_stream)
-        value_start = positions[token] + len(token)
+        else:
+            continue
+
+        value_start = marker_match.end()
         translated = _normalize_segment_text(
             translated_stream[value_start:value_end]
         )
@@ -1657,7 +1694,9 @@ def _translate_batch(
                 progress_callback=report_stream_progress,
             )
             _capture_debug_response(event, response)
-            content = _content_from_response(response)
+            content, finish_reason = _response_content(response)
+            content = _strip_leading_thinking_blocks(content)
+            content = _validated_response_content(content, finish_reason)
             translated_values = _parse_stream_text_values(content, stream)
             failures: list[TranslationError] = []
             for original_index, stream_record, translated in zip(
@@ -1699,6 +1738,13 @@ def _translate_batch(
             )
             for local_index, value in salvaged.items():
                 validated[attempt_indices[local_index]] = value
+            if salvaged:
+                LOGGER.warning(
+                    "[cl_japanese2json] Recovered %d/%d valid text segment(s) "
+                    "from an invalid batch response",
+                    len(salvaged),
+                    len(attempt_indices),
+                )
             _set_debug_result(event, exc)
         finally:
             heartbeat_stop.set()
