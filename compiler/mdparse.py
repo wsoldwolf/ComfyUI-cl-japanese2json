@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
+from .comments import strip_c_comments
 from .errors import MarkdownParseError
 from .structures import (
     Emd,
@@ -160,6 +161,8 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
     if not isinstance(markdown, str):
         raise TypeError("canonical Markdown must be a string")
 
+    comment_scan = strip_c_comments(markdown.lstrip("\ufeff"))
+
     emd = Emd()
     state = "OUTSIDE"
     current_scene: Scene | None = None
@@ -173,7 +176,10 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
     seen_scene_directive = False
     directive_count = 0
 
-    for line_number, line in enumerate(markdown.splitlines(), start=1):
+    for line_number, line in enumerate(comment_scan.text.splitlines(), start=1):
+        if line_number in comment_scan.comment_only_lines:
+            continue
+        line = line.rstrip(" \t")
         if line.strip() == "":
             state = "OUTSIDE"
             current_shot = None

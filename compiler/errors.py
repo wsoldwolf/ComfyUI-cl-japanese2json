@@ -17,6 +17,10 @@ class SystemPromptError(CLJapaneseToJSONError):
     """The external system-prompt file is unavailable or invalid."""
 
 
+class CommentSyntaxError(CLJapaneseToJSONError):
+    """C-style comments have invalid or unsupported syntax."""
+
+
 class TranslationError(CLJapaneseToJSONError):
     """The LLM translation response failed structural validation."""
 

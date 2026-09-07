@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any, Iterable
 
+from .comments import strip_c_comments
 from .errors import ProtectedTextError, TranslationError
 from .protected_text import (
     ProtectedPayload,
@@ -233,6 +234,8 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
     if not isinstance(plain_text, str):
         raise TypeError("plain_text must be a string")
 
+    comment_scan = strip_c_comments(plain_text.lstrip("\ufeff"))
+
     blocks: list[LexicalBlock] = []
     current: LexicalBlock | None = None
     record_number = 0
@@ -248,7 +251,10 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
     seen_common = False
     seen_scene = False
 
-    for line_number, line in enumerate(plain_text.lstrip("\ufeff").splitlines(), start=1):
+    for line_number, line in enumerate(comment_scan.text.splitlines(), start=1):
+        if line_number in comment_scan.comment_only_lines:
+            continue
+        line = line.rstrip(" \t")
         if line.strip() == "":
             current = None
             continue

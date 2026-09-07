@@ -197,7 +197,7 @@ prompts/llmj2e_qwen3_8b_system_prompt.txt
 3. system promptを読み込む。
 4. 選択GGUFを再解決する。
 5. ロードシグネチャに応じてモデルをロード又は再利用する。
-6. `translate_markdown()`で日本語Markdownを正規形へ変換する。
+6. `translate_markdown()`でCスタイルコメントを除外し、日本語Markdownを正規形へ変換する。
 7. `parse_markdown()`で`Emd`へ変換する。
 8. `generate_json(steps=steps)`でPlan文字列を作る。
 9. `validate_final_json()`で最終文字列を再検証する。
@@ -249,6 +249,20 @@ with instance_lock:
 ```
 
 トップレベルはSubject、Retention、Common、Sceneの順とし、前3者は任意かつ各1回までとする。暗黙Shot、`生成する`、`継続する`は即時エラーにする。
+
+#### 9.1.1 コメント前処理
+
+`compiler/comments.py`の決定論的スキャナーをLLMJ2E字句解析より前に実行する。MDPARSEも防御的に同じスキャナーを使用する。
+
+- 行頭の空白を除いて`//`で始まる物理行は行末までコメント。
+- 通常本文後方の`//`及びURLの`//`は通常文字列。
+- `/* ... */`は行内及び複数行コメント。
+- コメントの入れ子、未閉鎖開始記号及び対応しない終了記号は`CommentSyntaxError`。
+- `「...」`及び`<d>...</d>`内部ではコメント記号を認識しない。
+- コメントは空白へ置換し、改行と元の行番号を保持する。
+- コメントだけの行は構文状態を変更せず、ディレクティブと箇条書きの間でも透明に扱う。
+- コメント内部を翻訳レコード、参照走査、発声走査又はJSON生成へ渡さない。
+- HTMLコメントはサポートせず、`CommentSyntaxError`とする。
 
 ### 9.2 Common
 
@@ -441,6 +455,7 @@ ComfyUI/inputへは書かない。診断保存自体の失敗は本来の生成�
 - `ModelDiscoveryError`
 - `ModelLoadError`
 - `SystemPromptError`
+- `CommentSyntaxError`
 - `ProtectedTextError`
 - `TranslationError`
 - `MarkdownParseError`
@@ -489,6 +504,11 @@ set "FORCE_CMAKE=1"
 
 ### 17.3 LLMJ2E
 
+- 行コメント、行内ブロックコメント及び複数行ブロックコメントの推論前除外
+- コメントだけの行による構文状態の非分断
+- コメント内の偽ディレクティブ、参照及び日本語の無視
+- 台詞内コメント記号及びURLの`//`保持
+- 入れ子、未閉鎖、対応しないブロックコメント及びHTMLコメントの拒否
 - 新ディレクティブ正規化
 - Common正規化、順序及び禁止要素
 - 旧Scene構文拒否
@@ -556,6 +576,7 @@ READMEは少なくとも次を含む。
 - Windowsの必須wheelビルド
 - 導入手順とGGUF探索先
 - 新Markdownのコピー可能な例
+- Cスタイルコメント構文と制約
 - Commonの条件付き適用
 - Retentionマーカー
 - Shot時刻規則
@@ -572,6 +593,7 @@ READMEは少なくとも次を含む。
 ## 19. 完了条件
 
 - 仕様書、README、実装、system prompt、テスト、同梱workflowが同じ新構文を使用する。
+- コメントを推論前に安全に除外し、改行、行番号及び台詞本文を保持する。
 - CommonがSceneのアクティブSubject集合に従って適用され、それだけでSubjectを有効化しない。
 - ユーザー入力に話者IDがなく、JSONGENがSubject番号に一致するIDを生成する。
 - 暗黙Shotが残っていない。ただし拒否テストは除く。
