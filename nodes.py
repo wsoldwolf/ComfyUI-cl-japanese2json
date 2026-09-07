@@ -8,7 +8,12 @@ import threading
 from typing import Any
 
 from .compiler.errors import CLJapaneseToJSONError
-from .compiler.jsongen import generate_json, validate_final_json
+from .compiler.jsongen import (
+    SPEECH_GUARD_STRICT,
+    SPEECH_GUARD_WARN,
+    generate_json,
+    validate_final_json,
+)
 from .compiler.llmj2e import translate_markdown
 from .compiler.mdparse import parse_markdown
 from .debug_output import save_debug_bundle
@@ -18,6 +23,11 @@ from .system_prompt import load_system_prompt, system_prompt_fingerprint
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
+
+try:  # Available only when loaded by ComfyUI.
+    from comfy.utils import ProgressBar as _ComfyProgressBar  # type: ignore
+except ImportError:  # pragma: no cover - standalone unit-test environment
+    _ComfyProgressBar = None
 
 
 class CLJapaneseToJSONGGUF:
@@ -124,6 +134,13 @@ class CLJapaneseToJSONGGUF:
                         "tooltip": "Save source, protected requests, raw LLM responses, and validation results below ComfyUI/output/cl_japanese2json_debug.",
                     },
                 ),
+                "speech_guard": (
+                    [SPEECH_GUARD_STRICT, SPEECH_GUARD_WARN],
+                    {
+                        "default": SPEECH_GUARD_STRICT,
+                        "tooltip": "strict stops on unprotected speech cues; warn logs a warning and still generates JSON, which may produce unintended vocalization.",
+                    },
+                ),
             },
         }
 
@@ -165,6 +182,7 @@ class CLJapaneseToJSONGGUF:
         steps: int,
         retry_max: int,
         save_debug_output: bool,
+        speech_guard: str,
     ) -> None:
         if not isinstance(plain_text, str) or plain_text.strip() == "":
             raise CLJapaneseToJSONError("plain_text must contain Japanese reduced Markdown")
@@ -208,6 +226,11 @@ class CLJapaneseToJSONGGUF:
                 raise CLJapaneseToJSONError(f"{name} must be Boolean")
         if kv_cache_type not in {"q8_0", "f16"}:
             raise CLJapaneseToJSONError("kv_cache_type must be q8_0 or f16")
+        if (
+            not isinstance(speech_guard, str)
+            or speech_guard not in {SPEECH_GUARD_STRICT, SPEECH_GUARD_WARN}
+        ):
+            raise CLJapaneseToJSONError("speech_guard must be strict or warn")
 
     def clear_model(self) -> None:
         self._backend.clear_model()
@@ -262,6 +285,7 @@ class CLJapaneseToJSONGGUF:
         steps: int = 8,
         retry_max: int = 3,
         save_debug_output: bool = False,
+        speech_guard: str = SPEECH_GUARD_STRICT,
     ) -> tuple[str]:
         with self._lock:
             if keep_last_prompt and self.last_json_text is not None:
@@ -269,6 +293,28 @@ class CLJapaneseToJSONGGUF:
                 return (self.last_json_text,)
 
             debug_events: list[dict[str, Any]] = []
+            progress_state: dict[str, Any] = {"key": None, "bar": None}
+
+            def report_translation_progress(
+                batch_number: int,
+                batch_count: int,
+                attempt_number: int,
+                current: int,
+                total: int,
+            ) -> None:
+                if _ComfyProgressBar is None:
+                    return
+                key = (batch_number, batch_count, attempt_number)
+                if progress_state["key"] != key:
+                    progress_state["key"] = key
+                    progress_state["bar"] = _ComfyProgressBar(total)
+                progress_state["bar"].update_absolute(current, total)
+
+            translation_progress = (
+                report_translation_progress
+                if _ComfyProgressBar is not None
+                else None
+            )
             system_prompt = ""
             canonical: str | None = None
             json_text: str | None = None
@@ -289,6 +335,7 @@ class CLJapaneseToJSONGGUF:
                 "steps": steps,
                 "retry_max": retry_max,
                 "save_debug_output": save_debug_output,
+                "speech_guard": speech_guard,
             }
             try:
                 self._validate_parameters(
@@ -309,6 +356,7 @@ class CLJapaneseToJSONGGUF:
                     steps=steps,
                     retry_max=retry_max,
                     save_debug_output=save_debug_output,
+                    speech_guard=speech_guard,
                 )
                 system_prompt = load_system_prompt()
                 model_path = resolve_model_name(model_name)
@@ -334,9 +382,14 @@ class CLJapaneseToJSONGGUF:
                     debug_events=(
                         debug_events if save_debug_output is True else None
                     ),
+                    progress_callback=translation_progress,
                 )
                 emd = parse_markdown(canonical)
-                json_text = generate_json(emd, steps=steps)
+                json_text = generate_json(
+                    emd,
+                    steps=steps,
+                    speech_guard=speech_guard,
+                )
                 validate_final_json(json_text)
                 self.last_json_text = json_text
                 LOGGER.info(

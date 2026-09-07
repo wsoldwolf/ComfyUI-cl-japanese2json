@@ -344,6 +344,96 @@ class JSONGenerationTests(unittest.TestCase):
         with self.assertRaises(errors.JSONGenerationError):
             jsongen.generate_json(emd)
 
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            parsed = json.loads(
+                jsongen.generate_json(emd, speech_guard="warn")
+            )
+        self.assertIn("<Subject 1> speaks softly.", parsed["shots"][0]["prompt"][3])
+        self.assertTrue(
+            any(
+                "Scene 1 Shot 1 line 1" in message
+                and "'speaks'" in message
+                and "speech_guard=warn" in message
+                for message in captured.output
+            )
+        )
+
+    def test_warn_speech_guard_does_not_enable_vocalization(self) -> None:
+        emd = Emd(
+            subjects=["one."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "<Subject 1> raises a hand as if speaking to the wind."
+                        )
+                    ]
+                )
+            ],
+        )
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            prompt = json.loads(
+                jsongen.generate_json(emd, speech_guard="warn")
+            )["shots"][0]["prompt"]
+
+        self.assertIn("as if speaking to the wind", prompt[3])
+        self.assertEqual(prompt[4], jsongen.COMPLETE_SILENCE)
+        self.assertTrue(
+            any("unintended vocalization" in message for message in captured.output)
+        )
+
+    def test_speech_guard_covers_narration_and_non_speech_vocal_cues(self) -> None:
+        for line, cue in (
+            ("<Subject 1> narrates the journey.", "narrates"),
+            ("<Subject 1> briefly sighs.", "sighs"),
+        ):
+            emd = Emd(
+                subjects=["one."],
+                scenes=[Scene(shots=[make_shot(line)])],
+            )
+            with self.subTest(line=line), self.assertRaises(
+                errors.JSONGenerationError
+            ):
+                jsongen.generate_json(emd)
+            with self.subTest(line=line), self.assertLogs(
+                "cl_japanese2json", level="WARNING"
+            ) as captured:
+                jsongen.generate_json(emd, speech_guard="warn")
+            self.assertTrue(
+                any(f"'{cue}'" in message for message in captured.output)
+            )
+
+    def test_warn_speech_guard_does_not_suppress_structural_audio_errors(self) -> None:
+        direct_speech_without_permission = Emd(
+            subjects=["one."],
+            scenes=[
+                Scene(
+                    shots=[
+                        make_shot(
+                            "<Subject 1> says <d>[Japanese]台詞</d>."
+                        )
+                    ]
+                )
+            ],
+        )
+        permission_without_direct_speech = Emd(
+            subjects=["one."],
+            scenes=[
+                Scene(
+                    shots=[make_shot("<Subject 1> speaks softly.")],
+                    soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
+                )
+            ],
+        )
+        for emd in (
+            direct_speech_without_permission,
+            permission_without_direct_speech,
+        ):
+            with self.subTest(emd=emd), self.assertRaises(
+                errors.JSONGenerationError
+            ):
+                jsongen.generate_json(emd, speech_guard="warn")
+
     def test_speaker_ids_equal_subject_numbers_independent_of_vocal_order(self) -> None:
         valid = Emd(
             subjects=["one.", "two."],
@@ -485,6 +575,21 @@ class JSONGenerationTests(unittest.TestCase):
                         scenes=[Scene(shots=[make_shot("<Subject 1> acts.")])],
                     )
                 )
+
+    def test_warn_speech_guard_allows_common_speech_cue_with_warning(self) -> None:
+        emd = Emd(
+            subjects=["one."],
+            common_prompt=["The character's eyes speak of a long journey."],
+            scenes=[Scene(shots=[make_shot("<Subject 1> remains still.")])],
+        )
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            prompt = json.loads(
+                jsongen.generate_json(emd, speech_guard="warn")
+            )["shots"][0]["prompt"]
+        self.assertIn("eyes speak of a long journey", prompt[3])
+        self.assertTrue(
+            any("Common prompt line 1" in message for message in captured.output)
+        )
 
     def test_negated_speech_cues_remain_silent(self) -> None:
         definition = "a character whose voice is based on <Audio 1>."
@@ -774,6 +879,14 @@ class JSONGenerationTests(unittest.TestCase):
                 jsongen.generate_json(
                     Emd(scenes=[Scene(shots=[make_shot("Action.")])]),
                     steps=steps,
+                )
+        for speech_guard in ("", "ignore", None, True):
+            with self.subTest(speech_guard=speech_guard), self.assertRaises(
+                errors.JSONGenerationError
+            ):
+                jsongen.generate_json(
+                    Emd(scenes=[Scene(shots=[make_shot("Action.")])]),
+                    speech_guard=speech_guard,
                 )
 
     def test_final_validator_rejects_wrong_prefix_and_section_order(self) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import unittest
 
 from .helpers import FakeLLM, ROOT, module
@@ -88,3 +89,66 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                             if line.startswith("# シーン"):
                                 self.assertNotIn("秒生成する", line)
                                 self.assertNotIn("継続する", line)
+
+    def test_bgm_sync_workflow_auto_pads_one_shared_source_track(self) -> None:
+        path = ROOT / "workflows" / "minimax_h3_ref2va_20260907_bgm_sync.json"
+        workflow = json.loads(path.read_text(encoding="utf-8"))
+        nodes = {int(node["id"]): node for node in workflow["nodes"]}
+        links = {int(link[0]): link for link in workflow["links"]}
+
+        audio_pad = nodes[2020]
+        self.assertEqual(audio_pad["type"], "CLAudioPad")
+        self.assertEqual(
+            audio_pad["widgets_values_named"],
+            {
+                "target_duration_seconds": 0.0,
+                "extra_padding_seconds": 0.0,
+                "pad_position": "end",
+            },
+        )
+        self.assertNotIn(2021, nodes)
+        self.assertFalse(
+            any(node["type"] in {"EmptyAudio", "AudioConcat"} for node in nodes.values())
+        )
+        self.assertEqual(links[3571][1:5], [2008, 0, 2020, 0])
+        plan_slot = next(
+            index
+            for index, item in enumerate(audio_pad["inputs"])
+            if item["name"] == "plan"
+        )
+        self.assertEqual(links[3572][1:5], [1700, 0, 2020, plan_slot])
+        self.assertEqual(nodes[2008]["outputs"][0]["links"], [3571])
+        self.assertIn(3572, nodes[1700]["outputs"][0]["links"])
+
+        padded_destinations = {
+            (int(links[link_id][3]), int(links[link_id][4]))
+            for link_id in audio_pad["outputs"][0]["links"]
+        }
+        self.assertEqual(
+            padded_destinations,
+            {(1701, 1), (1702, 1), (1706, 1)},
+        )
+
+        source = nodes[1952]["widgets_values"][0]
+        canonical = llmj2e.translate_markdown(
+            source,
+            FakeLLM(n_ctx=1_000_000),
+            "system",
+            max_tokens=16_384,
+        )
+        plan = jsongen.validate_final_json(
+            jsongen.generate_json(mdparse.parse_markdown(canonical))
+        )
+        durations = [shot["duration_seconds"] for shot in plan["shots"]]
+        self.assertEqual(durations, [10, 10, 10, 10, 10, 7])
+
+        def h3_frame_length(seconds: int) -> int:
+            requested = max(5, int(math.ceil(seconds * 24 - 1e-9)))
+            return requested + (5 - requested % 17) % 17
+
+        raw_frames = [h3_frame_length(seconds) for seconds in durations]
+        delivered_frames = raw_frames[0] + sum(
+            frames - 22 for frames in raw_frames[1:]
+        )
+        self.assertEqual(raw_frames, [243, 243, 243, 243, 243, 175])
+        self.assertEqual(delivered_frames, 1280)

@@ -32,6 +32,7 @@ def arguments(**overrides):
         "keep_last_prompt": False,
         "steps": 8,
         "retry_max": 3,
+        "speech_guard": "strict",
     }
     values.update(overrides)
     return values
@@ -85,6 +86,12 @@ class NodeIntegrationTests(unittest.TestCase):
         self.assertEqual(
             input_types["optional"]["save_debug_output"][1]["default"], False
         )
+        self.assertEqual(
+            input_types["optional"]["speech_guard"][0], ["strict", "warn"]
+        )
+        self.assertEqual(
+            input_types["optional"]["speech_guard"][1]["default"], "strict"
+        )
 
     def test_compile_returns_one_tuple_and_valid_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -105,6 +112,36 @@ class NodeIntegrationTests(unittest.TestCase):
             self.assertEqual(len(backend.calls), 1)
             self.assertIs(backend.llm, backend)
 
+    def test_compile_updates_comfyui_progress_during_translation(self) -> None:
+        class FakeProgressBar:
+            instances = []
+
+            def __init__(self, total):
+                self.total = total
+                self.updates = []
+                self.__class__.instances.append(self)
+
+            def update_absolute(self, value, total=None):
+                self.updates.append((value, total))
+
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "model.gguf"
+            model.write_bytes(b"x")
+            node = nodes.CLJapaneseToJSONGGUF()
+            node._backend = FakeBackend()
+            with patch.object(
+                nodes, "resolve_model_name", return_value=model
+            ), patch.object(
+                nodes, "load_system_prompt", return_value="system"
+            ), patch.object(
+                nodes, "_ComfyProgressBar", FakeProgressBar
+            ):
+                node.compile_json(**arguments())
+
+        self.assertEqual(len(FakeProgressBar.instances), 1)
+        self.assertEqual(FakeProgressBar.instances[0].updates[0], (0, 64))
+        self.assertEqual(FakeProgressBar.instances[0].updates[-1], (64, 64))
+
     def test_steps_input_is_written_to_plan_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             model = Path(temp) / "model.gguf"
@@ -117,6 +154,29 @@ class NodeIntegrationTests(unittest.TestCase):
             ):
                 result = node.compile_json(**arguments(steps=12))
             self.assertEqual(json.loads(result[0])["defaults"]["steps"], 12)
+
+    def test_speech_guard_is_forwarded_to_json_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "model.gguf"
+            model.write_bytes(b"x")
+            node = nodes.CLJapaneseToJSONGGUF()
+            backend = FakeBackend()
+            node._backend = backend
+            with patch.object(
+                nodes, "resolve_model_name", return_value=model
+            ), patch.object(
+                nodes, "load_system_prompt", return_value="system"
+            ), patch.object(
+                nodes, "generate_json", wraps=nodes.generate_json
+            ) as generate:
+                node.compile_json(**arguments(speech_guard="warn"))
+                without_optional_guard = arguments()
+                without_optional_guard.pop("speech_guard")
+                node.compile_json(**without_optional_guard)
+            self.assertEqual(generate.call_args_list[0].kwargs["speech_guard"], "warn")
+            self.assertEqual(
+                generate.call_args_list[1].kwargs["speech_guard"], "strict"
+            )
 
     def test_retry_max_is_forwarded_and_default_allows_three_retries(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -295,6 +355,8 @@ class NodeIntegrationTests(unittest.TestCase):
             {"retry_max": -2},
             {"retry_max": 101},
             {"retry_max": True},
+            {"speech_guard": "ignore"},
+            {"speech_guard": None},
             {"save_debug_output": 1},
         ]
         for override in bad_values:

@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 import re
-from typing import Any, Iterable
+import threading
+import time
+from typing import Any, Callable, Iterable
 
 from .comments import strip_c_comments
 from .errors import ProtectedTextError, TranslationError
@@ -21,6 +23,7 @@ from .protected_text import (
 LOGGER = logging.getLogger("cl_japanese2json")
 MAX_SEED = 4_294_967_295
 RETRY_SEED_STRIDE = 1_000_003
+INFERENCE_HEARTBEAT_SECONDS = 10.0
 CODE_FENCE_RE = re.compile(r"```", re.IGNORECASE)
 THINK_RE = re.compile(r"<\s*/?\s*think\b", re.IGNORECASE)
 LEADING_THINK_BLOCK_RE = re.compile(
@@ -927,6 +930,7 @@ def _call_llm(
     repetition_penalty: float,
     seed: int,
     stop_token: str,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> Any:
     kwargs = {
         "messages": messages,
@@ -938,6 +942,8 @@ def _call_llm(
         "stop": [stop_token],
     }
     if hasattr(llm, "complete_chat"):
+        if progress_callback is not None:
+            kwargs["progress_callback"] = progress_callback
         return llm.complete_chat(**kwargs)
 
     reset = getattr(llm, "reset", None)
@@ -1555,7 +1561,9 @@ def _translate_batch(
     seed: int,
     retry_max: int,
     batch_index: int,
+    batch_count: int,
     debug_events: list[dict[str, Any]] | None,
+    progress_callback: Callable[[int, int, int, int, int], None] | None,
 ) -> list[str]:
     validated: list[str | None] = [None] * len(records)
     unresolved_indices = list(range(len(records)))
@@ -1573,6 +1581,54 @@ def _translate_batch(
         content: str | None = None
         event: dict[str, Any] | None = None
         attempt_error: TranslationError | None = None
+        attempt_number = retry_number + 1
+        streamed_chunks = 0
+        progress_lock = threading.Lock()
+        heartbeat_stop = threading.Event()
+        inference_started = time.monotonic()
+
+        def report_stream_progress(chunk_count: int) -> None:
+            nonlocal streamed_chunks
+            with progress_lock:
+                streamed_chunks = max(streamed_chunks, int(chunk_count))
+                current = streamed_chunks
+            if progress_callback is not None:
+                progress_callback(
+                    batch_index + 1,
+                    batch_count,
+                    attempt_number,
+                    min(current, max_tokens),
+                    max_tokens,
+                )
+
+        def log_inference_heartbeat() -> None:
+            while not heartbeat_stop.wait(INFERENCE_HEARTBEAT_SECONDS):
+                with progress_lock:
+                    current = streamed_chunks
+                LOGGER.info(
+                    "[cl_japanese2json] LLM inference active: batch %d/%d "
+                    "attempt %d, elapsed=%.1fs streamed_chunks=%d",
+                    batch_index + 1,
+                    batch_count,
+                    attempt_number,
+                    time.monotonic() - inference_started,
+                    current,
+                )
+
+        if progress_callback is not None:
+            progress_callback(
+                batch_index + 1,
+                batch_count,
+                attempt_number,
+                0,
+                max_tokens,
+            )
+        heartbeat = threading.Thread(
+            target=log_inference_heartbeat,
+            name="cl_japanese2json-llm-heartbeat",
+            daemon=True,
+        )
+        heartbeat.start()
 
         try:
             messages = _messages(
@@ -1598,6 +1654,7 @@ def _translate_batch(
                 repetition_penalty=repetition_penalty,
                 seed=attempt_seed,
                 stop_token=stream.stop_token,
+                progress_callback=report_stream_progress,
             )
             _capture_debug_response(event, response)
             content = _content_from_response(response)
@@ -1643,11 +1700,31 @@ def _translate_batch(
             for local_index, value in salvaged.items():
                 validated[attempt_indices[local_index]] = value
             _set_debug_result(event, exc)
+        finally:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=0.25)
+            LOGGER.info(
+                "[cl_japanese2json] LLM inference completed: batch %d/%d "
+                "attempt %d, elapsed=%.1fs streamed_chunks=%d",
+                batch_index + 1,
+                batch_count,
+                attempt_number,
+                time.monotonic() - inference_started,
+                streamed_chunks,
+            )
 
         unresolved_indices = [
             index for index, value in enumerate(validated) if value is None
         ]
         if not unresolved_indices:
+            if progress_callback is not None:
+                progress_callback(
+                    batch_index + 1,
+                    batch_count,
+                    attempt_number,
+                    max_tokens,
+                    max_tokens,
+                )
             return [value for value in validated if value is not None]
         if attempt_error is None:
             attempt_error = TranslationError(
@@ -1725,6 +1802,7 @@ def translate_markdown(
     seed: int = 1,
     retry_max: int = 1,
     debug_events: list[dict[str, Any]] | None = None,
+    progress_callback: Callable[[int, int, int, int, int], None] | None = None,
 ) -> str:
     """Translate Japanese bullet payloads and rebuild canonical Markdown."""
 
@@ -1762,7 +1840,9 @@ def translate_markdown(
                 seed=seed,
                 retry_max=retry_max,
                 batch_index=batch_index,
+                batch_count=len(batches),
                 debug_events=debug_events,
+                progress_callback=progress_callback,
             )
             for record, translated in zip(batch, translations):
                 record.translated = translated

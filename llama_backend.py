@@ -215,6 +215,73 @@ class LlamaBackend:
         path_text = str(self.current_model_path or "")
         return "qwen3" in f"{metadata_text} {path_text}".casefold()
 
+    def _completion_token_count(self, content: str) -> int:
+        if self.llm is not None:
+            tokenizer = getattr(self.llm, "tokenize", None)
+            if callable(tokenizer):
+                try:
+                    return len(tokenizer(content.encode("utf-8"), add_bos=False))
+                except (TypeError, ValueError, RuntimeError):
+                    pass
+        return max(1, (len(content.encode("utf-8")) + 2) // 3)
+
+    def _collect_streamed_chat_completion(
+        self,
+        stream: Any,
+        *,
+        messages: list[dict[str, str]],
+        progress_callback: Callable[[int], None],
+    ) -> dict[str, Any]:
+        content_parts: list[str] = []
+        finish_reason: Any = None
+        usage: dict[str, Any] | None = None
+        content_chunk_count = 0
+
+        for chunk in stream:
+            if not isinstance(chunk, dict):
+                raise ModelLoadError(
+                    "llama-cpp-python returned an invalid streaming chat chunk"
+                )
+            chunk_usage = chunk.get("usage")
+            if isinstance(chunk_usage, dict):
+                usage = dict(chunk_usage)
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            payload = choice.get("delta")
+            if not isinstance(payload, dict):
+                payload = choice.get("message")
+            if isinstance(payload, dict):
+                piece = payload.get("content")
+                if isinstance(piece, str) and piece:
+                    content_parts.append(piece)
+                    content_chunk_count += 1
+                    progress_callback(content_chunk_count)
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice.get("finish_reason")
+
+        content = "".join(content_parts)
+        if usage is None:
+            prompt_tokens = self.count_input_tokens(messages)
+            completion_tokens = self._completion_token_count(content)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+        return {
+            "choices": [
+                {
+                    "message": {"content": content},
+                    "finish_reason": finish_reason or "stop",
+                }
+            ],
+            "usage": usage,
+        }
+
     def complete_chat(self, **kwargs: Any) -> Any:
         if self.llm is None:
             raise ModelLoadError("No GGUF model is loaded")
@@ -227,6 +294,9 @@ class LlamaBackend:
             raise ModelLoadError("Loaded model does not provide create_chat_completion()")
 
         call_kwargs = dict(kwargs)
+        progress_callback = call_kwargs.pop("progress_callback", None)
+        if progress_callback is not None and not callable(progress_callback):
+            raise ModelLoadError("progress_callback must be callable")
         if self.is_qwen3():
             try:
                 parameters = inspect.signature(call).parameters
@@ -238,8 +308,17 @@ class LlamaBackend:
                 call_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
             if "reasoning" in parameters:
                 call_kwargs["reasoning"] = False
+        if progress_callback is not None:
+            call_kwargs["stream"] = True
         try:
-            return call(**call_kwargs)
+            response = call(**call_kwargs)
+            if progress_callback is None or isinstance(response, dict):
+                return response
+            return self._collect_streamed_chat_completion(
+                response,
+                messages=call_kwargs.get("messages", []),
+                progress_callback=progress_callback,
+            )
         except TypeError as exc:
             raise ModelLoadError(
                 "llama-cpp-python rejected the Qwen chat-completion arguments; "

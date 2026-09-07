@@ -34,6 +34,41 @@ SOURCE = """# サブジェクト
 
 
 class LLMJ2ETests(unittest.TestCase):
+    def test_translation_reports_attempt_progress(self) -> None:
+        progress = []
+        output = llmj2e.translate_markdown(
+            SOURCE,
+            FakeLLM(),
+            "system",
+            max_tokens=64,
+            progress_callback=lambda *values: progress.append(values),
+        )
+
+        self.assertIn("# Subjects", output)
+        self.assertEqual(progress[0], (1, 1, 1, 0, 64))
+        self.assertEqual(progress[-1], (1, 1, 1, 64, 64))
+
+    def test_retry_starts_a_new_progress_attempt(self) -> None:
+        progress = []
+        llm = FakeLLM(
+            [
+                "invalid response",
+                lambda kwargs: default_stream_translation(kwargs["messages"]),
+            ]
+        )
+        llmj2e.translate_markdown(
+            SOURCE,
+            llm,
+            "system",
+            max_tokens=64,
+            retry_max=1,
+            progress_callback=lambda *values: progress.append(values),
+        )
+
+        starts = [values for values in progress if values[3] == 0]
+        self.assertEqual(starts, [(1, 1, 1, 0, 64), (1, 1, 2, 0, 64)])
+        self.assertEqual(progress[-1], (1, 1, 2, 64, 64))
+
     def test_normal_translation_rebuilds_canonical_markdown(self) -> None:
         llm = FakeLLM()
         result = llmj2e.translate_markdown(SOURCE, llm, "system", max_tokens=64)

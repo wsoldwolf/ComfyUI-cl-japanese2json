@@ -2,16 +2,16 @@
 
 ## 1. 目的
 
-本書は`cl_japanese2json`コンパイラを独立したComfyUI V1カスタムノードとして提供する実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`である。
+本書は`cl_japanese2json`コンパイラとPCM無音パディング機能を独立したComfyUIカスタムノードとして提供する実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`である。
 
 本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、条件付きCommon、Python生成の話者ID、Retention、Audio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
 - パッケージ名: `ComfyUI-cl-japanese2json`
-- ノードクラス: `CLJapaneseToJSONGGUF`
-- 表示名: `CL Japanese to JSON (GGUF)`
-- カテゴリ: `MiniMax H3/Prompt Tools`
+- ノードクラス: `CLJapaneseToJSONGGUF`, `CLAudioPad`
+- 表示名: `CL Japanese to JSON (GGUF)`, `CL Audio Pad (PCM Silence)`
+- カテゴリ: `MiniMax H3/Prompt Tools`, `MiniMax H3/Audio Tools`
 - 出力ノードではない。
 - ComfyUI本体及び他の`custom_nodes`を変更しない。
 - ComfyUI-QwenVL-Modをimportしない。
@@ -20,6 +20,8 @@
 
 `llama-cpp-python`が存在しない環境でも、カスタムノードのimportと登録は成功させる。実行時にだけ手動導入を案内する`ModelLoadError`を発生させる。
 
+`CLAudioPad`は`llama-cpp-python`を使用せず、ComfyUI標準`AUDIO`テンソルのAPIだけで動作させる。Contex-Loopがなくてもノード登録を成功させ、任意の`H3_CHAIN_PLAN`入力を接続した場合だけその辞書を参照する。
+
 ## 3. ノード登録
 
 パッケージ直下`__init__.py`は次を公開する。
@@ -27,10 +29,12 @@
 ```python
 NODE_CLASS_MAPPINGS = {
     "CLJapaneseToJSONGGUF": CLJapaneseToJSONGGUF,
+    "CLAudioPad": CLAudioPad,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLJapaneseToJSONGGUF": "CL Japanese to JSON (GGUF)",
+    "CLAudioPad": "CL Audio Pad (PCM Silence)",
 }
 ```
 
@@ -47,6 +51,8 @@ OUTPUT_NODE = False
 `compile_json()`は1要素tuple`(json_text,)`を返す。
 
 ## 4. INPUT_TYPES
+
+### 4.1 CL Japanese to JSON (GGUF)
 
 requiredの順序は次のとおりである。
 
@@ -75,6 +81,7 @@ optionalは次である。
 | 名前 | 型 | 既定 | 用途 |
 | --- | --- | --- | --- |
 | `save_debug_output` | BOOLEAN | False | ComfyUI output下へ診断バンドルを保存 |
+| `speech_guard` | COMBO | `strict` | `strict`, `warn`。未保護発声キューの扱い |
 
 `steps`はJSONの`defaults.steps`だけへ反映し、LLM翻訳の生成設定へ渡さない。
 
@@ -84,7 +91,49 @@ optionalは次である。
 - 1～100: 指定回数まで再試行する。
 - `-1`: 成功、バックエンドエラー又はComfyUI中断まで無制限に再試行する。
 
+`speech_guard`の意味は次である。
+
+- `strict`: 保護台詞を同じ行に持たない肯定的な英語発声キューをエラーにする。
+- `warn`: ComfyUIへWARNINGを出し、該当英文を変更せずJSON生成を続行する。Audio参照、話者ID又は発声許可は自動追加せず、無音フォールバックも変更しないため、MiniMax H3が想定外の人物音声を生成する可能性がある。
+
+`warn`でも、台詞とSoundscape発声許可の不一致、不正なダイレクトスピーチ、参照、リップシンク又はSoundscape構造はエラーである。
+
 各値は実行時にも型と範囲を検証する。Booleanを整数として受理してはならない。
+
+### 4.2 CL Audio Pad (PCM Silence)
+
+requiredは次のとおりである。
+
+| 名前 | 型 | 既定 | 範囲又は候補 |
+| --- | --- | --- | --- |
+| `audio` | AUDIO | 接続必須 | ComfyUI標準の`waveform`, `sample_rate`辞書 |
+| `target_duration_seconds` | FLOAT | 0.0 | 0～86400、step 0.001。0はUI目標を無効化 |
+| `extra_padding_seconds` | FLOAT | 0.0 | 0～3600、step 0.001 |
+| `pad_position` | COMBO | `end` | `end`, `start`, `both` |
+
+optionalは次である。
+
+| 名前 | 型 | 用途 |
+| --- | --- | --- |
+| `plan` | H3_CHAIN_PLAN | Contex-Loopの完成フレーム数とfpsから必要な音声長を自動計算 |
+
+入力波形は`[batch, channels, samples]`でなければならない。サンプルレート、波形dtype、デバイス、バッチ数及びチャンネル数を維持し、新規領域をPCM値`0.0`で埋める。入力音声を切り詰めたり、リサンプルしたり、音量を変更してはならない。
+
+サンプル数は次で決定する。
+
+```text
+ui_target_samples = round(target_duration_seconds * sample_rate)
+plan_target_samples = round(total_delivered_frames / fps * sample_rate)
+base_target_samples = max(original_samples, ui_target_samples, plan_target_samples)
+output_samples = base_target_samples + round(extra_padding_seconds * sample_rate)
+padding_samples = output_samples - original_samples
+```
+
+`plan`がない場合の`plan_target_samples`は0である。Planにfpsがない場合は24fpsを既定とする。`target_duration_seconds=0`、Planなし、`extra_padding_seconds=0`なら入力AUDIOを同一オブジェクトのまま返す。
+
+`end`は原音の開始位置を維持して末尾へ全量を追加する。`start`は先頭、`both`は前後へほぼ等分し、奇数サンプルの余りを末尾へ置く。リップシンク用source trackでは`end`を既定かつ推奨とし、`start`と`both`は原音の時刻を移動させることをtooltipで明示する。
+
+出力は`padded_audio`, `original_duration`, `padded_duration`, `padding_added`, `status`の順とする。秒数出力はFLOAT、状態はSTRINGである。
 
 ## 5. GGUFモデル探索
 
@@ -148,7 +197,7 @@ ComfyUIの`folder_names_and_paths`に`LLM`が登録されている場合、各�
 
 - シグネチャ一致かつモデル保持中なら再利用する。
 - 不一致なら古いモデルを解放してロードする。
-- temperature、top_p、repetition_penalty、max_tokens、seed、steps、retry_max、system prompt変更だけではロードシグネチャを変えない。
+- temperature、top_p、repetition_penalty、max_tokens、seed、steps、retry_max、speech_guard、system prompt変更だけではロードシグネチャを変えない。
 
 ### 6.4 解放
 
@@ -159,6 +208,12 @@ ComfyUIの`folder_names_and_paths`に`LLM`が登録されている場合、各�
 ### 6.5 推論
 
 `create_chat_completion()`へsystem/user message、`max_tokens`、`temperature`、`top_p`、`repeat_penalty`、`seed`及び停止条件を渡す。JSON modeは使わない。
+
+ComfyUI実行時は`stream=True`で応答を逐次消費し、チャンクを連結して非ストリーミング時と同じ`choices[0].message.content`及び`finish_reason`を持つ応答へ再構築してからLLMJ2Eへ返す。ストリームがusageを返さない場合だけ、利用可能なtokenizer又は既存の保守的見積りでusageを補完する。翻訳、停止条件及び応答検証規則はストリーミングの有無で変更しない。
+
+各バッチの各attemptはComfyUIの`ProgressBar`を1個作成し、受信した非空contentチャンク数を`max_tokens`に対する概算進捗として通知する。チャンクとトークンは必ずしも1対1ではなく、応答が`max_tokens`より前に終了し得るため、これは残り時間又は厳密なトークン割合ではない。検証成功時は完了値へ進め、再試行又は次バッチでは新しいバーを0から開始する。ComfyUI外での単体利用ではProgressBarを必須としない。
+
+推論呼出し中はdaemon heartbeatを動かし、10秒ごとにバッチ番号、総バッチ数、attempt番号、経過秒及び受信済みcontentチャンク数をINFOログへ記録する。最初のチャンク以前も0件として記録し、入力評価中の死活確認を可能にする。heartbeatは応答又は例外時に必ず停止し、プロンプト本文及び途中の翻訳本文を記録しない。
 
 Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追加する。
 
@@ -199,7 +254,7 @@ prompts/llmj2e_qwen3_8b_system_prompt.txt
 5. ロードシグネチャに応じてモデルをロード又は再利用する。
 6. `translate_markdown()`でCスタイルコメントを除外し、日本語Markdownを正規形へ変換する。
 7. `parse_markdown()`で`Emd`へ変換する。
-8. `generate_json(steps=steps)`でPlan文字列を作る。
+8. `generate_json(steps=steps, speech_guard=speech_guard)`でPlan文字列を作る。
 9. `validate_final_json()`で最終文字列を再検証する。
 10. 成功JSONを`last_json_text`へ保存してtupleで返す。
 11. 設定又は失敗状態に従ってモデルを解放する。
@@ -223,7 +278,11 @@ with instance_lock:
             retry_max,
         )
         emd = parse_markdown(canonical)
-        json_text = generate_json(emd, steps=steps)
+        json_text = generate_json(
+            emd,
+            steps=steps,
+            speech_guard=speech_guard,
+        )
         validate_final_json(json_text)
         last_json_text = json_text
         return (json_text,)
@@ -274,7 +333,7 @@ Commonは`Emd.common_prompt`へ文書順で保存する。JSONGENはScene preamb
 - SubjectとAudioの両方がある行は両条件を満たす場合だけ適用する。
 - Commonの参照だけでSubject又はAudioをアクティブにしない。
 - Audio参照は正規形の`<Audio 1>`～`<Audio 3>`だけを許可する。
-- 未定義Subject、不正Audio参照、ダイレクトスピーチ、肯定的な発声指示又はユーザー入力の`(Sx)`を含むCommonはエラー。
+- 未定義Subject、不正Audio参照、ダイレクトスピーチ又はユーザー入力の`(Sx)`を含むCommonはエラー。肯定的な英語発声指示は`speech_guard`でエラー又はWARNING継続とする。
 
 選択したCommon行は`detailed_description`内でScene preambleより前に出す。
 
@@ -300,7 +359,7 @@ MDPARSEは正規形をShot行の元位置に保持する。JSONGENは通常の�
 
 同じAudioがSceneの`BGM再利用`にも指定されている場合、そのリップシンクは独立した発話音声ではなく、再利用BGM内の元ボーカルを人物が歌唱演技する指定として展開する。記載された台詞は歌詞の正本であり、元BGMのボーカル信号、語句及びタイミングを保持して、置換又は追加ボーカルを生成しない。
 
-構造化リップシンク行自体が発声又は歌唱指示を兼ねる。別のShot行へダイレクトスピーチのない肯定的な発声又は歌唱指示を追加した場合は、通常の発声安全規則によりエラーとする。
+構造化リップシンク行自体が発声又は歌唱指示を兼ねる。別のShot行へダイレクトスピーチのない肯定的な発声又は歌唱指示を追加した場合は、通常の発声安全規則により`strict`ではエラー、`warn`では警告付きで通過させる。
 
 字句解析では、`リップシンク:`又は`リップシンク：`で始まるバレットだけを構造化リップシンクとして認識する。`リップシンク中は...`等のコロンを伴わない通常文は、Common、Scene preamble又はShot本文の通常翻訳レコードとして扱う。
 
@@ -453,6 +512,12 @@ H3のBGM生成はランダム性が高く、BGM再利用の固定文及び時間
 3. SceneのVocalizationが`EXPLICIT_DIALOGUE_ONLY`である。
 
 さらに、肯定的な発声動詞を持つ行は同じ行にダイレクトスピーチを必要とする。別行又は別Shotの台詞で条件を満たしたことにしない。話者IDはSubject番号から内部生成し、ユーザー指定を受理しない。
+
+この発声動詞検査だけは`speech_guard`で挙動を選択できる。`strict`は従来どおりエラーにし、`warn`はCommon、Scene preamble又はShotの位置と検出語を`LOGGER.warning()`で記録してJSON生成を続行する。警告文にはMiniMax H3が想定外の人物発声を生成し得ることを含める。`warn`は検出行を書き換えず、Audio又は発声許可を追加せず、Soundscapeから生成される無音指定も変更しない。
+
+検出語は会話、ナレーション、朗読、歌唱及び人物由来の非言語発声（笑い、息を呑む、溜め息、鼻歌、うめき等）を対象とする。Environment又はSound effectsとして指定する非人物音は対象外である。
+
+保護台詞があるのにVocalizationが無効、Vocalizationが`EXPLICIT_DIALOGUE_ONLY`なのに保護台詞がない、又は構造化リップシンク、参照若しくはSoundscapeが不正な場合は、`warn`でもエラーとする。
 
 構造化リップシンクも同じ発声許可を必要とする。台詞は必須で、Audioから推測又は自動文字起こしを行わない。純粋なリップシンクだけのSubjectでは、Subject定義内のAudio声質参照を有効化せず、リップシンクバレットのAudioを信号再利用として有効化する。
 
@@ -636,6 +701,7 @@ set "FORCE_CMAKE=1"
 - Subject番号に一致する話者IDの内部生成
 - 発声三重条件
 - 肯定的発声指示の同一行台詞要件
+- speech_guardのstrictエラー、warnログ継続及び構造エラー非緩和
 - Audioの条件付き定義・削除
 - Audio再利用リップシンクの定義、summary、`partially_copy`及びShot展開
 - BGM Audioの`fully_copy`/`partially_copy`、時間範囲の1:1割当て、無Subject Scene及び同一Audio内ボーカルリップシンク
@@ -658,8 +724,18 @@ set "FORCE_CMAKE=1"
 - モデル保持と解放
 - failure時履歴保持
 - retry_max転送
+- speech_guardのUI既定値、値検証及びJSONGEN転送
+- ストリーミング応答の連結、finish reason及びusage保持
+- ComfyUI進捗の開始、逐次更新、検証成功時完了及びattempt切替
+- 長時間推論中のheartbeatと終了時停止
 - debug bundle
 - workflows内の新構文
+- `CLAudioPad`の登録、UI既定値及び出力メタデータ
+- UI秒数、H3 Planフレーム数及び追加マージンからのサンプル数計算
+- `end`、`start`、`both`のPCM値0.0配置
+- dtype、デバイス、チャンネル、サンプルレート及び付加AUDIOメタデータの保持
+- 十分長い音声を切らないことと不正AUDIO/Plan/パラメータの拒否
+- 同梱BGM workflowがパディング後の同一AUDIOをLoop Start、Current及びAssembleへ渡すこと
 
 実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、Common、話者ID自動生成、Audio声質参照、Audio再利用リップシンク、BGM生成、BGM Audio再利用、BGM内ボーカルリップシンク、Retention、長文再試行を確認する。
 
@@ -684,6 +760,7 @@ READMEは少なくとも次を含む。
 - 6セクションJSON例
 - Suno等を使う後編集前提
 - 全UI入力
+- PCM無音パディングノードのPlan自動計算、UI目標、追加マージン及び接続例
 - デバッグ出力と機密性注意
 - テスト手順
 - ライセンス
@@ -702,4 +779,5 @@ READMEは少なくとも次を含む。
 - BGM Audio再利用を指定された`fully_copy`又は`partially_copy`へ変換し、同じAudio内のボーカルリップシンクと統合する。
 - BGM生成又はBGM再利用を`non_diegetic_music`へ出力し、省略時は`N/A`とする。
 - `llama-cpp-python`を自動変更しない。
+- H3 Plan又はUI秒数に対する不足音声を`CLAudioPad`がサンプル単位で自動計算し、原音を切らずPCM値0.0で補完する。
 - 全自動テストが成功する。

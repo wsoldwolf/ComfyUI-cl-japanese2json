@@ -29,6 +29,10 @@ from .structures import (
 
 LOGGER = logging.getLogger("cl_japanese2json")
 
+SPEECH_GUARD_STRICT = "strict"
+SPEECH_GUARD_WARN = "warn"
+SPEECH_GUARD_MODES = frozenset({SPEECH_GUARD_STRICT, SPEECH_GUARD_WARN})
+
 SUBJECT_RE = re.compile(r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>")
 AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
 ANY_AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio\s*[0-9]+\s*(?<!\\)>")
@@ -44,6 +48,11 @@ SPEECH_CUE_RE = re.compile(
     r"whisper|whispers|whispered|whispering|shout|shouts|shouted|shouting|"
     r"yell|yells|yelled|yelling|murmur|murmurs|murmured|murmuring|"
     r"groan|groans|groaned|groaning|grumble|grumbles|grumbled|grumbling|"
+    r"narrate|narrates|narrated|narrating|narration|"
+    r"recite|recites|recited|reciting|"
+    r"laugh|laughs|laughed|laughing|gasp|gasps|gasped|gasping|"
+    r"sigh|sighs|sighed|sighing|hum|hums|hummed|humming|"
+    r"moan|moans|moaned|moaning|"
     r"chant|chants|chanted|chanting|sing|sings|sang|sung|singing|"
     r"announce|announces|announced|announcing|"
     r"exclaim|exclaims|exclaimed|exclaiming|"
@@ -165,15 +174,38 @@ def _shot_subject_locations(scene: Scene, subject_number: int) -> list[int]:
     return locations
 
 
-def _scene_requests_speech(scene: Scene) -> bool:
-    for line in _scene_lines(scene):
-        if DIRECT_SPEECH_RE.search(line):
-            return True
-        for match in SPEECH_CUE_RE.finditer(line):
-            prefix = line[max(0, match.start() - 80):match.start()]
-            if not NEGATED_SPEECH_PREFIX_RE.search(prefix):
-                return True
-    return False
+def _positive_speech_cues(line: str) -> list[str]:
+    cues: list[str] = []
+    for match in SPEECH_CUE_RE.finditer(line):
+        prefix = line[max(0, match.start() - 80):match.start()]
+        if not NEGATED_SPEECH_PREFIX_RE.search(prefix):
+            cues.append(match.group(0))
+    return cues
+
+
+def _handle_unprotected_speech_cues(
+    *,
+    context: str,
+    cues: list[str],
+    speech_guard: str,
+) -> None:
+    if not cues:
+        return
+    cue = cues[0]
+    if speech_guard == SPEECH_GUARD_STRICT:
+        raise JSONGenerationError(
+            f"{context} contains a speech or vocalization instruction without "
+            "protected direct speech"
+        )
+    for value in cues:
+        LOGGER.warning(
+            "[cl_japanese2json] %s contains the unprotected speech/vocalization "
+            "cue %r. "
+            "Continuing because speech_guard=warn; MiniMax H3 may generate "
+            "unintended vocalization.",
+            context,
+            value,
+        )
 
 
 def _scene_has_direct_speech(scene: Scene) -> bool:
@@ -297,36 +329,48 @@ def _validate_soundscape(
                 )
 
 
-def _scene_allows_dialogue(scene: Scene, scene_number: int) -> bool:
+def _scene_allows_dialogue(
+    scene: Scene,
+    scene_number: int,
+    *,
+    speech_guard: str,
+) -> bool:
     mode = scene.soundscape.vocalization
-    requests_speech = _scene_requests_speech(scene)
     has_direct_speech = _scene_has_direct_speech(scene)
-
-    for line_number, line in enumerate(_scene_lines(scene), start=1):
-        has_line_dialogue = DIRECT_SPEECH_RE.search(line) is not None
-        for match in SPEECH_CUE_RE.finditer(line):
-            prefix = line[max(0, match.start() - 80):match.start()]
-            if not NEGATED_SPEECH_PREFIX_RE.search(prefix) and not has_line_dialogue:
-                raise JSONGenerationError(
-                    f"Scene {scene_number} line {line_number} contains a speech instruction without protected direct speech"
-                )
 
     if mode == VOCALIZATION_EXPLICIT_DIALOGUE_ONLY:
         if not has_direct_speech:
             raise JSONGenerationError(
                 f"Scene {scene_number} enables explicit dialogue but contains no protected direct speech"
             )
-        return True
-    if mode not in {None, SOUND_NONE}:
+    elif mode not in {None, SOUND_NONE}:
         raise JSONGenerationError(
             f"Scene {scene_number} has an invalid vocalization mode"
         )
-    if requests_speech:
+    elif has_direct_speech:
         raise JSONGenerationError(
-            f"Scene {scene_number} contains a speech instruction, but vocalization is not enabled; "
+            f"Scene {scene_number} contains protected direct speech, but vocalization is not enabled; "
             "add '* 発声: 指定台詞のみ' under '## 音響'"
         )
-    return False
+
+    for line_number, line in enumerate(scene.preamble, start=1):
+        if DIRECT_SPEECH_RE.search(line) is None:
+            _handle_unprotected_speech_cues(
+                context=f"Scene {scene_number} preamble line {line_number}",
+                cues=_positive_speech_cues(line),
+                speech_guard=speech_guard,
+            )
+    for shot_number, shot in enumerate(scene.shots, start=1):
+        for line_number, line in enumerate(shot.lines, start=1):
+            if DIRECT_SPEECH_RE.search(line) is None:
+                _handle_unprotected_speech_cues(
+                    context=(
+                        f"Scene {scene_number} Shot {shot_number} line {line_number}"
+                    ),
+                    cues=_positive_speech_cues(line),
+                    speech_guard=speech_guard,
+                )
+    return mode == VOCALIZATION_EXPLICIT_DIALOGUE_ONLY
 
 
 def _line_dialogue_subject_matches(
@@ -1023,7 +1067,7 @@ def _validate_retention_rules(emd: Emd) -> None:
             )
 
 
-def _validate_common_prompt(emd: Emd) -> None:
+def _validate_common_prompt(emd: Emd, *, speech_guard: str) -> None:
     if not isinstance(emd.common_prompt, list):
         raise JSONGenerationError("common_prompt must be a list of strings")
     for line_number, line in enumerate(emd.common_prompt, start=1):
@@ -1053,12 +1097,11 @@ def _validate_common_prompt(emd: Emd) -> None:
                 raise JSONGenerationError(
                     f"Common prompt line {line_number} references undefined <Subject {subject}>"
                 )
-        for speech_match in SPEECH_CUE_RE.finditer(line):
-            prefix = line[max(0, speech_match.start() - 80):speech_match.start()]
-            if not NEGATED_SPEECH_PREFIX_RE.search(prefix):
-                raise JSONGenerationError(
-                    f"Common prompt line {line_number} cannot contain a positive speech instruction"
-                )
+        _handle_unprotected_speech_cues(
+            context=f"Common prompt line {line_number}",
+            cues=_positive_speech_cues(line),
+            speech_guard=speech_guard,
+        )
 
 
 def _validate_no_user_speaker_ids(emd: Emd) -> None:
@@ -1113,6 +1156,8 @@ def _shot_object(
     scene: Scene,
     index: int,
     scene_speakers: dict[int, int],
+    *,
+    speech_guard: str,
 ) -> dict[str, Any]:
     scene_number = index + 1
     _validate_scene_structure(scene, scene_number)
@@ -1121,7 +1166,11 @@ def _shot_object(
         context=f"Scene {scene_number}",
         duration_seconds=scene.duration,
     )
-    allows_dialogue = _scene_allows_dialogue(scene, scene_number)
+    allows_dialogue = _scene_allows_dialogue(
+        scene,
+        scene_number,
+        speech_guard=speech_guard,
+    )
     generated_dialogue_subjects = _generated_dialogue_subjects(scene)
     reused_audio = _reused_audio_bindings(scene, scene_number=scene_number)
     active_subjects = _referenced_subjects(scene)
@@ -1254,26 +1303,39 @@ def _shot_object(
     return result
 
 
-def generate_json(emd: Emd, *, steps: int = 8) -> str:
+def generate_json(
+    emd: Emd,
+    *,
+    steps: int = 8,
+    speech_guard: str = SPEECH_GUARD_STRICT,
+) -> str:
     """Generate deterministic JSON and verify that it can be parsed back."""
 
     if not isinstance(emd, Emd):
         raise JSONGenerationError("JSONGEN requires an Emd value")
     if not isinstance(steps, int) or isinstance(steps, bool) or not 1 <= steps <= 10000:
         raise JSONGenerationError("steps must be an integer between 1 and 10000")
+    if not isinstance(speech_guard, str) or speech_guard not in SPEECH_GUARD_MODES:
+        raise JSONGenerationError("speech_guard must be strict or warn")
     if not 1 <= len(emd.scenes) <= 128:
         raise JSONGenerationError(
             f"Scene count must be between 1 and 128; got {len(emd.scenes)}"
         )
     _validate_no_user_speaker_ids(emd)
     _validate_retention_rules(emd)
-    _validate_common_prompt(emd)
+    _validate_common_prompt(emd, speech_guard=speech_guard)
     scene_speakers = _scene_speaker_bindings(emd)
     plan = {
         "prompt_prefix": "",
         "defaults": {"duration_seconds": 5, "steps": steps},
         "shots": [
-            _shot_object(emd, scene, index, scene_speakers[index])
+            _shot_object(
+                emd,
+                scene,
+                index,
+                scene_speakers[index],
+                speech_guard=speech_guard,
+            )
             for index, scene in enumerate(emd.scenes)
         ],
     }

@@ -1,6 +1,6 @@
 # ComfyUI-cl-japanese2json
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGMに加えて、既存BGM Audioの再利用と、そのBGMに含まれるボーカルへのリップシンクも構造化して指定できます。
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGMに加えて、既存BGM Audioの再利用と、そのBGMに含まれるボーカルへのリップシンクも構造化して指定できます。`CL Audio Pad (PCM Silence)`は、音源がH3 Planより短い場合の不足サンプルを自動計算して無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -54,7 +54,7 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 1. このディレクトリ全体を`ComfyUI/custom_nodes/ComfyUI-cl-japanese2json/`へ配置します。
 2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。サブディレクトリも再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。ファイル名に`mmproj`を含むGGUFは除外します。
 3. 使用環境向けの`llama-cpp-python`がComfyUIのPythonからimportできることを確認します。
-4. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`を追加します。
+4. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`を追加します。
 
 モデルの自動ダウンロードは行いません。
 
@@ -102,7 +102,7 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 
 `# サブジェクト`、`# 保持分析`、`# 共通プロンプト`は不要なら省略できます。この順序で、最初の`# シーン`より前に各1回まで置きます。シーンは1～128個です。
 
-`# 共通プロンプト`はグローバルなスタイル、背景、画面上の制約を簡潔に書く場所です。参照を含まない行は全シーンへ適用します。`<Subject N>`又は`<Audio N>`を含む行は、その行で参照する全Subjectと全Audioがシーンのプリンブル、ショット又は音響設定で実際に有効な場合だけ適用します。共通文だけではSubject又はAudioをアクティブにしません。Commonで使用できるAudioは正規形の`<Audio 1>`～`<Audio 3>`です。台詞、`(Sx)`及び肯定的な発声指示は書けません。出力時は、適用された共通文、シーンプリンブル、`[Shot 1]`以降の順で`detailed_description`へ配置します。
+`# 共通プロンプト`はグローバルなスタイル、背景、画面上の制約を簡潔に書く場所です。参照を含まない行は全シーンへ適用します。`<Subject N>`又は`<Audio N>`を含む行は、その行で参照する全Subjectと全Audioがシーンのプリンブル、ショット又は音響設定で実際に有効な場合だけ適用します。共通文だけではSubject又はAudioをアクティブにしません。Commonで使用できるAudioは正規形の`<Audio 1>`～`<Audio 3>`です。台詞と`(Sx)`は書けません。肯定的な英語発声指示は`speech_guard`で検査します。出力時は、適用された共通文、シーンプリンブル、`[Shot 1]`以降の順で`detailed_description`へ配置します。
 
 ### コメント
 
@@ -206,7 +206,9 @@ Pythonは各台詞の直前にある最も近い`<Subject N>`を話者とし、J
 * 発声: 指定台詞のみ
 ```
 
-台詞があるのに許可がない、許可があるのに台詞がない、台詞より前の同じ行に`<Subject N>`がない、肯定的な発声指示に同じ行の台詞がない場合はコンパイルエラーです。これにより未指定の声、掛け声、疑似言語を促す曖昧な結果を拒否します。
+台詞があるのに許可がない、許可があるのに台詞がない、又は台詞より前の同じ行に`<Subject N>`がない場合は、常にコンパイルエラーです。肯定的な英語発声指示に同じ行の台詞がない場合は、`speech_guard=strict`ではエラー、`speech_guard=warn`ではComfyUIログへWARNINGを出してJSON生成を続行します。`warn`はAudio参照又は発声許可を自動追加せず、無音指定と発声らしい詳細記述が同居し得るため、MiniMax H3が想定外の人物音声を生成する可能性があります。
+
+検出対象には会話、ナレーション、歌唱に加え、笑い、息を呑む、溜め息、鼻歌、うめき等の人物由来の非言語発声も含みます。風音、足音、衝突音などの環境音・効果音はこの検査の対象外です。
 
 アクティブな話者のSubject定義に`<Audio N>`があるときだけ、独立したAudio定義と`reference`保持分析を生成します。Audioはその話者の明記された台詞の声質と話し方だけに使用し、元音声信号や元の発話内容はコピーしません。台詞のないシーンではSubject定義からAudio句を取り除きます。
 
@@ -263,7 +265,7 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
 
 この例では、`<Audio 1>`の20～28秒の音楽と元ボーカルをシーン全体へ割り当て、映像上の`<Subject 1> (S1)`を歌詞とタイミングへ同期します。別の歌声は生成しません。`発声: 指定台詞のみ`はリップシンクでも必須です。
 
-`リップシンク`バレット自体が歌唱・発声指示を兼ねます。別のバレットへ「歌う」「発声する」などの肯定的な発声指示だけを書かないでください。追加する場合は、身体動作、視線、表情、カメラなど発声以外の演技だけを記述します。
+`リップシンク`バレット自体が歌唱・発声指示を兼ねます。別のバレットへ「歌う」「発声する」などの肯定的な発声指示だけを書かないでください。追加する場合は、身体動作、視線、表情、カメラなど発声以外の演技だけを記述します。翻訳結果に発声語が残った場合、`speech_guard=warn`なら警告付きで通過させられますが、追加発声の抑止は保証されません。
 
 構造化バレットとして予約されるのは、`リップシンク:`又は`リップシンク：`で始まる行だけです。`リップシンク中は顔を明瞭に表示する`のようにコロンを伴わない通常文は、Common、Scene preamble及びShot本文で通常の翻訳対象として使用できます。
 
@@ -363,12 +365,17 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
 | `steps` | JSONの`defaults.steps`。既定値8、範囲1～10000。翻訳には影響しません。 |
 | `retry_max` | 検証失敗後の最大再試行回数。既定3、`0`はなし、`-1`は成功又は中断まで無制限です。 |
 | `save_debug_output` | 中間情報をComfyUIのoutput下へ保存します。既定`False`。 |
+| `speech_guard` | 保護台詞のない肯定的発声語の扱い。`strict`（既定）はエラー、`warn`はWARNINGを記録してJSON生成を続行します。 |
 
-モデルファイル又は`gpu_layers`、`n_batch`、`n_ctx`、`flash_attn`、`kv_cache_type`、`op_offload`が変わると再ロードします。生成パラメータだけの変更では保持中モデルを再ロードしません。
+モデルファイル又は`gpu_layers`、`n_batch`、`n_ctx`、`flash_attn`、`kv_cache_type`、`op_offload`が変わると再ロードします。`speech_guard`を含む生成・検証パラメータだけの変更では保持中モデルを再ロードしません。
 
 ## 翻訳と再試行
 
 文書全体のディレクティブ、各箇条書き先頭、参照タグ、日本語台詞を索引付きプレースホルダへ置き換え、残る日本語本文を1本の保護翻訳ストリームとして送ります。実効コンテキストへ収まる場合は文書全体を1回で推論します。収まらない場合だけ、箇条書きを途中分割せず複数バッチにします。話者IDは翻訳後のJSON生成時にPythonが付与します。
+
+翻訳推論はllama.cppのストリーミング応答を使用し、生成済み出力チャンク数を`max_tokens`に対する概算進捗としてComfyUIのノード上へ表示します。応答が上限より前に終了する場合があるため、バーは厳密な残り時間を示すものではなく、検証成功時に完了位置へ進みます。再試行又は次のバッチへ移ると、新しい推論としてバーが先頭から始まります。
+
+推論中は約10秒ごとに、バッチ、attempt、経過秒及び受信済みストリームチャンク数を通常ログへ出力します。入力評価中など、まだ最初の出力チャンクが得られていない場合も`streamed_chunks=0`のハートビートで処理中であることを確認できます。プロンプト本文や生成途中の翻訳文は通常ログへ出しません。
 
 応答では構造と保護プレースホルダの個数・順序・所有区間、コードフェンス、thinking、日本語残留などを検証します。失敗時は検証済み区間を保持し、未解決区間だけを新しいseedで`retry_max`まで再送します。正常に閉じた先頭`<think>...</think>`を1個だけ無視できます。
 
@@ -380,6 +387,31 @@ system promptは`prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み�
 
 `json_text`をMiniMax H3 Contex-Loop Planノードの`plan_json_input`へ接続します。出力は説明やコードフェンスを含まない1個の`STRING`で、`json.loads()`による再検証済み、末尾は1個のLFです。
 
+## PCM無音パディング
+
+`CL Audio Pad (PCM Silence)`は、汎用の`Load Audio`とH3又はContex-Loopの間へ挿入します。Python側で必要サンプル数を求め、元波形と同じdtype、デバイス、バッチ、チャンネル及びサンプルレートのままPCM値`0.0`を追加します。元音声は切断、リサンプル又は音量変更しません。
+
+推奨接続は次のとおりです。
+
+```text
+Load Audio ── audio ───────────────┐
+                                   v
+Contex-Loop Plan ── plan ──> CL Audio Pad ── padded_audio ──┬─> Loop Start.source_audio
+                                                            ├─> Current.source_audio
+                                                            └─> Assemble.source_audio
+```
+
+Contex-Loop Planを接続すると、`total_delivered_frames / fps`から必要な音声サンプル数を自動計算します。Math、Empty Audio、Concatenate Audioノードは不要です。Loop Start、Current及びAssembleには必ず同じ`padded_audio`を渡してください。別々の音声を渡すと、音声ハッシュ不一致又は長さ不足になります。
+
+| 名前 | 意味 |
+| --- | --- |
+| `target_duration_seconds` | Planを接続しない場合の最小出力尺。`0`は無効です。Planと併用した場合は長い方を採用します。 |
+| `extra_padding_seconds` | 必要尺を満たした後へ加える安全マージン。PlanもUI目標もない場合は固定パディング秒数になります。 |
+| `pad_position` | `end`（既定）、`start`、`both`。リップシンクでは原音開始を動かさない`end`を使用します。 |
+| `plan` | 任意の`H3_CHAIN_PLAN`。接続時は完成フレーム数に自動追従します。 |
+
+出力にはパディング済みAUDIOのほか、元尺、出力尺、追加秒数及び状態文字列があります。音源が既に十分長く、追加マージンも0なら入力をそのまま返します。最終Assembleで`audio_source: source`を使うと、Planを超える安全マージンだけが動画尺で切られ、元音源部分は維持されます。
+
 ## 主なエラー
 
 - GGUFがない: `ComfyUI/models/LLM/GGUF`以下へモデルを置き、ComfyUIを再起動します。
@@ -387,7 +419,7 @@ system promptは`prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み�
 - `Windows Error 0xc000001d`: 実行CPUが対応しない命令を含むwheelの可能性があります。上記の`GGML_NATIVE=OFF`、AVX-512/AMX無効化設定でリビルドします。
 - コンテキスト不足: `n_ctx`又は`max_tokens`を見直します。
 - プレースホルダ欠落: `retry_max`を増やすか、標準的なinstruction-tuned GGUFを試します。診断には`save_debug_output=True`を使います。
-- 台詞エラー: 同じショット行で台詞より前に`<Subject N>`を書き、`「...」`と発声動詞を記述し、シーン末尾で`発声: 指定台詞のみ`を許可します。`(Sx)`は入力しません。
+- 台詞エラー: 同じショット行で台詞より前に`<Subject N>`を書き、`「...」`と発声動詞を記述し、シーン末尾で`発声: 指定台詞のみ`を許可します。`(Sx)`は入力しません。視覚的比喩などが英語発声語として誤検出される場合は、意味を視覚表現へ書き換えるか、`speech_guard=warn`で想定外の発声リスクを承知して続行できます。
 - リップシンクエラー: Shot内で`リップシンク: <Subject N> <- <Audio N> 「正確な台詞」`と書き、`発声: 指定台詞のみ`を許可します。同一Audioの役割競合も確認します。
 - BGMエラー: 生成用`BGM`にはAudio参照、台詞又は具体的な歌詞を書かず、既存Audioは`BGM再利用`で指定します。`BGM`と`BGM再利用`は併用できません。`完全コピー`では同じBGM Audio内のボーカルリップシンクを除き、別の音響層を追加できません。
 - ショットエラー: 最初は`## ショット`、2個目以降は昇順の`## ショット N秒`にします。

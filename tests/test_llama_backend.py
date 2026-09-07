@@ -70,6 +70,70 @@ class FakeLoadedLlama:
         return {"choices": [{"message": {"content": "ok"}}]}
 
 
+class FakeStreamingLoadedLlama(FakeLoadedLlama):
+    def create_chat_completion(
+        self,
+        *,
+        messages,
+        max_tokens,
+        temperature,
+        top_p,
+        repeat_penalty,
+        seed,
+        stop=None,
+        response_format=None,
+        enable_thinking=True,
+        chat_template_kwargs=None,
+        reasoning=True,
+        stream=False,
+    ):
+        self.completion_kwargs = {
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "repeat_penalty": repeat_penalty,
+            "seed": seed,
+            "stop": stop,
+            "response_format": response_format,
+            "enable_thinking": enable_thinking,
+            "chat_template_kwargs": chat_template_kwargs,
+            "reasoning": reasoning,
+            "stream": stream,
+        }
+        if not stream:
+            return {"choices": [{"message": {"content": "ok"}}]}
+        return iter(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {"role": "assistant", "content": "Hello"},
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {"content": " world"},
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 7,
+                        "completion_tokens": 2,
+                        "total_tokens": 9,
+                    },
+                },
+            ]
+        )
+
+
 class LlamaBackendTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeLoadedLlama.instances.clear()
@@ -176,6 +240,35 @@ class LlamaBackendTests(unittest.TestCase):
                 {"enable_thinking": False},
             )
             self.assertIs(loaded.completion_kwargs["reasoning"], False)
+
+    def test_streaming_completion_reports_progress_and_rebuilds_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "qwen3-model.gguf"
+            path.write_bytes(b"x")
+            backend = backend_module.LlamaBackend(
+                llama_module=FakeLlamaModule,
+                llama_class=FakeStreamingLoadedLlama,
+            )
+            loaded = self._load(backend, path)
+            progress = []
+            response = backend.complete_chat(
+                messages=[{"role": "user", "content": "translate"}],
+                max_tokens=32,
+                temperature=0.1,
+                top_p=0.9,
+                repeat_penalty=1.05,
+                seed=1,
+                stop=["CLJT0ENDX"],
+                progress_callback=progress.append,
+            )
+
+            self.assertTrue(loaded.completion_kwargs["stream"])
+            self.assertEqual(progress, [1, 2])
+            self.assertEqual(
+                response["choices"][0]["message"]["content"], "Hello world"
+            )
+            self.assertEqual(response["choices"][0]["finish_reason"], "stop")
+            self.assertEqual(response["usage"]["total_tokens"], 9)
 
     def test_missing_constants_raise_compatibility_error(self) -> None:
         class OldModule:
