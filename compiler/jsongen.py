@@ -222,7 +222,12 @@ def _validate_scene_structure(scene: Scene, scene_number: int) -> None:
         )
 
 
-def _validate_soundscape(soundscape: Soundscape, *, context: str) -> None:
+def _validate_soundscape(
+    soundscape: Soundscape,
+    *,
+    context: str,
+    duration_seconds: int,
+) -> None:
     if not isinstance(soundscape, Soundscape):
         raise JSONGenerationError(f"{context} soundscape must be a Soundscape value")
     for label, value in (
@@ -263,6 +268,33 @@ def _validate_soundscape(soundscape: Soundscape, *, context: str) -> None:
             raise JSONGenerationError(
                 f"{context} cannot combine generated background music with background music reuse"
             )
+        source_start = music_reuse.source_start_ms
+        source_end = music_reuse.source_end_ms
+        if (source_start is None) != (source_end is None):
+            raise JSONGenerationError(
+                f"{context} background music source range must contain both a start and an end"
+            )
+        if source_start is not None:
+            if music_reuse.relationship != "partially_copy":
+                raise JSONGenerationError(
+                    f"{context} background music source range is allowed only with partially_copy"
+                )
+            if (
+                not isinstance(source_start, int)
+                or isinstance(source_start, bool)
+                or not isinstance(source_end, int)
+                or isinstance(source_end, bool)
+                or source_start < 0
+                or source_end <= source_start
+            ):
+                raise JSONGenerationError(
+                    f"{context} background music source range must be increasing non-negative integer milliseconds"
+                )
+            if source_end - source_start != duration_seconds * 1000:
+                raise JSONGenerationError(
+                    f"{context} background music source range must exactly match the "
+                    f"{duration_seconds}-second Scene duration"
+                )
 
 
 def _scene_allows_dialogue(scene: Scene, scene_number: int) -> bool:
@@ -415,7 +447,19 @@ def _non_diegetic_music(
             text = (
                 f"<Audio {audio}> is directly reused 1:1 as the target video's "
                 "complete audience-only music and final audio track, preserving all "
-                "original audio layers, timing, and mix."
+                "original audio layers, timing, and mix without recomposition, "
+                "regeneration, restyling, retiming, looping, or restarting."
+            )
+        elif music_reuse.source_start_ms is not None:
+            source_range = _background_music_source_range(music_reuse)
+            text = (
+                f"<Audio {audio}>'s exact {source_range} is directly copied "
+                "1:1 as this target scene's complete audience-only score, beginning "
+                "at the target scene's first frame and ending at its final frame. "
+                "Preserve the original music, vocal signal, arrangement, "
+                "instrumentation, tempo, rhythm, timing, and internal mix without "
+                "recomposition, regeneration, restyling, retiming, looping, "
+                "restarting, or crossfading."
             )
         else:
             text = (
@@ -603,15 +647,17 @@ def _subject_block(
             background_music_reuse is not None
             and audio == background_music_reuse.audio_number
         ):
+            source_range = _background_music_source_range(background_music_reuse)
+            range_text = "" if source_range is None else f" for the exact {source_range}"
             if binding is None:
                 audio_definitions[audio] = (
                     f"<Audio {audio}> is the directly reused audience-only "
-                    "background-music signal."
+                    f"background-music signal{range_text}."
                 )
             else:
                 audio_definitions[audio] = (
                     f"<Audio {audio}> is the directly reused audience-only "
-                    "background-music signal whose original vocal layer is performed "
+                    f"background-music signal{range_text}. Its original vocal layer is performed "
                     f"in exact lip synchronization by <Subject {binding.subject}> "
                     f"(S{binding.speaker}) in {_shot_list_text(binding.shot_numbers)}."
                 )
@@ -680,10 +726,16 @@ def _summary_block(
         )
     if background_music_reuse is not None:
         audio = background_music_reuse.audio_number
+        source_range = _background_music_source_range(background_music_reuse)
         body += (
             f" <Audio {audio}> is directly reused as the audience-only background "
             f"music with the {background_music_reuse.relationship} relationship."
         )
+        if source_range is not None:
+            body += (
+                f" Its exact {source_range} is mapped 1:1 from the first through "
+                "the final frame of this target scene without recomposition."
+            )
         if audio in reused_audio:
             body += " Its original vocal layer drives the specified lip synchronization."
     return SUMMARY_PREFIX + prefix + " " + body
@@ -777,6 +829,13 @@ def _retention_block(
                 "the complete source audio is reused 1:1 as the target video's "
                 "complete final audio track"
             )
+        elif background_music_reuse.source_start_ms is not None:
+            source_range = _background_music_source_range(background_music_reuse)
+            description = (
+                f"the exact {source_range} is copied 1:1 from its original timeline "
+                "as this scene's complete audience-only score without recomposition, "
+                "regeneration, restyling, retiming, looping, or restarting"
+            )
         else:
             description = (
                 "the source background-music signal is copied as the audience-only "
@@ -799,6 +858,18 @@ def _format_timestamp(milliseconds: int) -> str:
     minutes, remainder = divmod(milliseconds, 60_000)
     seconds, millis = divmod(remainder, 1000)
     return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def _background_music_source_range(
+    music_reuse: BackgroundMusicReuse,
+) -> str | None:
+    if music_reuse.source_start_ms is None or music_reuse.source_end_ms is None:
+        return None
+    return (
+        "source interval from "
+        f"{_format_timestamp(music_reuse.source_start_ms)} to "
+        f"{_format_timestamp(music_reuse.source_end_ms)}"
+    )
 
 
 def _shot_generated_dialogue_subjects(shot: Shot) -> set[int]:
@@ -857,10 +928,29 @@ def _detailed_description_block(
     common_lines: list[str],
     scene: Scene,
     voice_audio: dict[int, tuple[int, int]],
-    background_music_audio: int | None,
+    background_music_reuse: BackgroundMusicReuse | None,
 ) -> str:
     parts = [_sentence(line) for line in common_lines]
     parts.extend(_sentence(line) for line in scene.preamble)
+    background_music_audio = (
+        None
+        if background_music_reuse is None
+        else background_music_reuse.audio_number
+    )
+    if (
+        background_music_reuse is not None
+        and background_music_reuse.source_start_ms is not None
+    ):
+        source_range = _background_music_source_range(background_music_reuse)
+        parts.append(
+            f"Use <Audio {background_music_audio}>'s exact {source_range} throughout "
+            "this target scene, mapped 1:1 from its first frame through its final "
+            "frame. Preserve "
+            "the original music and vocal waveform content, arrangement, "
+            "instrumentation, tempo, rhythm, timing, and internal mix without "
+            "recomposition, regeneration, restyling, retiming, looping, restarting, "
+            "or crossfading."
+        )
     audio_by_subject: dict[int, list[tuple[int, int]]] = {}
     for audio, (subject, speaker) in voice_audio.items():
         audio_by_subject.setdefault(subject, []).append((audio, speaker))
@@ -1026,7 +1116,11 @@ def _shot_object(
 ) -> dict[str, Any]:
     scene_number = index + 1
     _validate_scene_structure(scene, scene_number)
-    _validate_soundscape(scene.soundscape, context=f"Scene {scene_number}")
+    _validate_soundscape(
+        scene.soundscape,
+        context=f"Scene {scene_number}",
+        duration_seconds=scene.duration,
+    )
     allows_dialogue = _scene_allows_dialogue(scene, scene_number)
     generated_dialogue_subjects = _generated_dialogue_subjects(scene)
     reused_audio = _reused_audio_bindings(scene, scene_number=scene_number)
@@ -1089,7 +1183,7 @@ def _shot_object(
         common_lines,
         scene,
         voice_audio,
-        background_music_audio,
+        background_music_reuse,
     )
     detailed_audio = {
         int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(detailed)

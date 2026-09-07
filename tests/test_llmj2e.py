@@ -522,21 +522,25 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIn("* Background music: NONE", output)
 
     def test_background_music_reuse_is_canonicalized_without_llm_translation(self) -> None:
-        for japanese, canonical in (
-            ("完全コピー", "fully_copy"),
-            ("部分コピー", "partially_copy"),
+        for japanese_value, canonical_value in (
+            ("<Audio 1> 完全コピー", "<Audio 1> fully_copy"),
+            ("<Audio 1> 部分コピー", "<Audio 1> partially_copy"),
+            (
+                "<Audio 1> 部分コピー 00:10.000-00:15.000",
+                "<Audio 1> partially_copy 00:10.000-00:15.000",
+            ),
         ):
-            with self.subTest(japanese=japanese):
+            with self.subTest(japanese_value=japanese_value):
                 source = (
                     "# シーン\n## ショット\n* 動作。\n## 音響\n"
-                    f"* BGM再利用: <Audio 1> {japanese}"
+                    f"* BGM再利用: {japanese_value}"
                 )
                 llm = FakeLLM()
                 output = llmj2e.translate_markdown(
                     source, llm, "sys", max_tokens=64
                 )
                 self.assertIn(
-                    f"* Background music reuse: <Audio 1> {canonical}",
+                    f"* Background music reuse: {canonical_value}",
                     output,
                 )
                 records = request_records(llm.calls[0]["messages"])
@@ -551,6 +555,12 @@ class LLMJ2ETests(unittest.TestCase):
             "* BGM再利用: <Audio 01> 完全コピー",
             "# シーン\n## ショット\n* 動作。\n## 音響\n"
             "* BGM再利用: <Audio 1> 参照",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 1> 完全コピー 00:00.000-00:05.000",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 1> 部分コピー 00:05.000-00:05.000",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 1> 部分コピー 0:00.000-00:05.000",
             "# シーン\n## ショット\n* 動作。\n## 音響\n"
             "* BGM: ピアノ。\n* BGM再利用: <Audio 1> 部分コピー",
             "# シーン\n## ショット\n* 動作。\n## 音響\n"

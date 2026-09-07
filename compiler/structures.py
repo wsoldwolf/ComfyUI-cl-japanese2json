@@ -27,6 +27,8 @@ RETENTION_RELATIONSHIPS = frozenset(
 class BackgroundMusicReuse:
     audio_number: int
     relationship: str
+    source_start_ms: int | None = None
+    source_end_ms: int | None = None
 
 
 @dataclass

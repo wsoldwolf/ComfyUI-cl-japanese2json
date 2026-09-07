@@ -614,6 +614,32 @@ class JSONGenerationTests(unittest.TestCase):
         self.assertIn("Sound effects: A soft transition whoosh.", prompt[4])
         self.assertIn("background-music signal from <Audio 2>", prompt[5])
 
+    def test_ranged_background_music_segment_is_preserved_across_sections(self) -> None:
+        scene = Scene(
+            duration=10,
+            shots=[make_shot("<Subject 1> performs to the music.")],
+            soundscape=Soundscape(
+                background_music_reuse=BackgroundMusicReuse(
+                    1,
+                    "partially_copy",
+                    source_start_ms=20_000,
+                    source_end_ms=30_000,
+                )
+            ),
+        )
+        prompt = json.loads(
+            jsongen.generate_json(Emd(subjects=["a singer."], scenes=[scene]))
+        )["shots"][0]["prompt"]
+        source_range = "source interval from 00:20.000 to 00:30.000"
+        self.assertIn(source_range, prompt[0])
+        self.assertIn(source_range, prompt[1])
+        self.assertIn(source_range, prompt[2])
+        self.assertIn(source_range, prompt[3])
+        self.assertIn(source_range, prompt[5])
+        self.assertIn("without recomposition", prompt[2])
+        self.assertIn("without recomposition", prompt[3])
+        self.assertIn("without recomposition", prompt[5])
+
     def test_fully_copied_background_music_rejects_added_audio_layers(self) -> None:
         invalid_scenes = (
             Scene(
@@ -668,6 +694,11 @@ class JSONGenerationTests(unittest.TestCase):
             BackgroundMusicReuse(True, "fully_copy"),
             BackgroundMusicReuse(1, "reference"),
             BackgroundMusicReuse(1, ["fully_copy"]),
+            BackgroundMusicReuse(1, "fully_copy", 0, 5_000),
+            BackgroundMusicReuse(1, "partially_copy", 0, None),
+            BackgroundMusicReuse(1, "partially_copy", -1, 4_999),
+            BackgroundMusicReuse(1, "partially_copy", 5_000, 5_000),
+            BackgroundMusicReuse(1, "partially_copy", 0, 4_000),
         )
         for value in invalid_values:
             scene = Scene(

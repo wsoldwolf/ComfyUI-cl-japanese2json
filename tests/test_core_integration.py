@@ -104,18 +104,56 @@ class CoreIntegrationTests(unittest.TestCase):
 * リップシンク: <Subject 1> <- <Audio 1> 「夜空を越えて、君のもとへ。」
 ## 音響
 * 発声: 指定台詞のみ
-* BGM再利用: <Audio 1> 完全コピー"""
+* BGM再利用: <Audio 1> 部分コピー 00:00.000-00:08.000"""
         canonical = llmj2e.translate_markdown(
             source, FakeLLM(), "system", max_tokens=128
         )
         self.assertIn(
-            "* Background music reuse: <Audio 1> fully_copy", canonical
+            "* Background music reuse: <Audio 1> partially_copy "
+            "00:00.000-00:08.000",
+            canonical,
         )
         parsed = jsongen.validate_final_json(
             jsongen.generate_json(mdparse.parse_markdown(canonical))
         )
         prompt = parsed["shots"][0]["prompt"]
-        self.assertIn("<Audio 1>: fully_copy", prompt[2])
+        self.assertIn("<Audio 1>: partially_copy", prompt[2])
+        self.assertIn("source interval from 00:00.000 to 00:08.000", prompt[2])
         self.assertIn("<Audio 1>", prompt[3].split("[Shot 1]", 1)[0])
         self.assertIn("visually performs and lip-syncs exactly", prompt[3])
-        self.assertIn("<Audio 1> is directly reused 1:1", prompt[5])
+        self.assertIn("directly copied 1:1", prompt[5])
+
+    def test_54_second_bgm_is_sliced_across_six_scenes(self) -> None:
+        ranges = (
+            (10, "00:00.000-00:10.000"),
+            (10, "00:10.000-00:20.000"),
+            (10, "00:20.000-00:30.000"),
+            (10, "00:30.000-00:40.000"),
+            (10, "00:40.000-00:50.000"),
+            (4, "00:50.000-00:54.000"),
+        )
+        scene_blocks = []
+        for index, (duration, source_range) in enumerate(ranges):
+            continuation = "" if index == 0 else " 継続"
+            scene_blocks.append(
+                f"# シーン {duration}秒{continuation}\n"
+                "## ショット\n"
+                "* 人物が音楽に合わせて動く。\n"
+                "## 音響\n"
+                f"* BGM再利用: <Audio 1> 部分コピー {source_range}"
+            )
+        canonical = llmj2e.translate_markdown(
+            "\n\n".join(scene_blocks), FakeLLM(), "system", max_tokens=256
+        )
+        parsed = jsongen.validate_final_json(
+            jsongen.generate_json(mdparse.parse_markdown(canonical))
+        )
+        self.assertEqual(
+            [shot["duration_seconds"] for shot in parsed["shots"]],
+            [10, 10, 10, 10, 10, 4],
+        )
+        for shot, (_duration, source_range) in zip(parsed["shots"], ranges):
+            start, end = source_range.split("-", 1)
+            expected = f"source interval from {start} to {end}"
+            self.assertIn(expected, shot["prompt"][3])
+            self.assertIn(expected, shot["prompt"][5])

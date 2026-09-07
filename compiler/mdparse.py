@@ -34,7 +34,9 @@ SOUNDSCAPE_LINE_RE = re.compile(
 )
 BACKGROUND_MUSIC_REUSE_LINE_RE = re.compile(
     r"^\* Background music reuse: <Audio ([1-3])> "
-    r"(fully_copy|partially_copy)$"
+    r"(fully_copy|partially_copy)"
+    r"(?: ([0-9]{2,}:[0-5][0-9]\.[0-9]{3})-"
+    r"([0-9]{2,}:[0-5][0-9]\.[0-9]{3}))?$"
 )
 LIP_SYNC_LINE_RE = re.compile(
     r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>: "
@@ -85,6 +87,16 @@ def _seconds_text_to_ms(value: str) -> int:
     return milliseconds
 
 
+def _source_timestamp_to_ms(value: str) -> int:
+    minutes_text, seconds_text = value.split(":", 1)
+    seconds, milliseconds = seconds_text.split(".", 1)
+    return (
+        int(minutes_text) * 60_000
+        + int(seconds) * 1000
+        + int(milliseconds)
+    )
+
+
 def _set_soundscape_value(
     soundscape: Soundscape,
     line: str,
@@ -100,14 +112,30 @@ def _set_soundscape_value(
             raise MarkdownParseError(
                 f"Duplicate or conflicting canonical background music value at line {line_number}"
             )
-        audio_text, relationship = reuse_match.groups()
+        audio_text, relationship, source_start, source_end = reuse_match.groups()
         if relationship not in AUDIO_COPY_RELATIONSHIPS:
             raise MarkdownParseError(
                 f"Invalid canonical background music reuse relationship at line {line_number}"
             )
+        if source_start is not None and relationship != "partially_copy":
+            raise MarkdownParseError(
+                f"Canonical background music source range at line {line_number} is allowed only with partially_copy"
+            )
+        source_start_ms = (
+            None if source_start is None else _source_timestamp_to_ms(source_start)
+        )
+        source_end_ms = (
+            None if source_end is None else _source_timestamp_to_ms(source_end)
+        )
+        if source_start_ms is not None and source_end_ms <= source_start_ms:
+            raise MarkdownParseError(
+                f"Canonical background music source range at line {line_number} must have an end later than its start"
+            )
         soundscape.background_music_reuse = BackgroundMusicReuse(
             audio_number=int(audio_text),
             relationship=relationship,
+            source_start_ms=source_start_ms,
+            source_end_ms=source_end_ms,
         )
         return
 
@@ -189,6 +217,14 @@ def _validate_scene(scene: Scene, scene_number: int) -> None:
         if not shot.lines:
             raise MarkdownParseError(
                 f"Scene {scene_number} Shot {shot_number} must contain at least one bullet"
+            )
+    music_reuse = scene.soundscape.background_music_reuse
+    if music_reuse is not None and music_reuse.source_start_ms is not None:
+        source_duration = music_reuse.source_end_ms - music_reuse.source_start_ms
+        if source_duration != scene.duration * 1000:
+            raise MarkdownParseError(
+                f"Scene {scene_number} background music source range must exactly match "
+                f"the {scene.duration}-second Scene duration"
             )
 
 

@@ -127,12 +127,15 @@ class MarkdownParserTests(unittest.TestCase):
     def test_background_music_reuse_is_stored_as_structured_scene_data(self) -> None:
         emd = parse_markdown(
             "# Scene\n## Shot\n* Action.\n## Soundscape\n"
-            "* Background music reuse: <Audio 2> partially_copy"
+            "* Background music reuse: <Audio 2> partially_copy "
+            "00:10.000-00:15.000"
         )
         reuse = emd.scenes[0].soundscape.background_music_reuse
         self.assertIsNotNone(reuse)
         self.assertEqual(reuse.audio_number, 2)
         self.assertEqual(reuse.relationship, "partially_copy")
+        self.assertEqual(reuse.source_start_ms, 10_000)
+        self.assertEqual(reuse.source_end_ms, 15_000)
         self.assertIsNone(emd.scenes[0].soundscape.background_music)
 
     def test_invalid_or_conflicting_background_music_reuse_is_rejected(self) -> None:
@@ -141,6 +144,15 @@ class MarkdownParserTests(unittest.TestCase):
             "* Background music reuse: <Audio 4> fully_copy",
             "# Scene\n## Shot\n* Action.\n## Soundscape\n"
             "* Background music reuse: <Audio 1> reference",
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 1> fully_copy "
+            "00:00.000-00:05.000",
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 1> partially_copy "
+            "00:05.000-00:05.000",
+            "# Scene 5sec\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 1> partially_copy "
+            "00:00.000-00:04.000",
             "# Scene\n## Shot\n* Action.\n## Soundscape\n"
             "* Background music: Piano.\n"
             "* Background music reuse: <Audio 1> partially_copy",

@@ -119,6 +119,8 @@ JAPANESE_LIP_SYNC_RE = re.compile(
 )
 JAPANESE_BGM_REUSE_RE = re.compile(
     r"<Audio ([0-9]+)>\s+(完全コピー|部分コピー)"
+    r"(?:\s+([0-9]{2,}:[0-5][0-9]\.[0-9]{3})-"
+    r"([0-9]{2,}:[0-5][0-9]\.[0-9]{3}))?"
 )
 BGM_REUSE_RELATIONSHIPS = {
     "完全コピー": "fully_copy",
@@ -128,6 +130,16 @@ USER_SPEAKER_ID_RE = re.compile(r"\(S[1-9][0-9]*\)")
 COMMON_AUDIO_RE = re.compile(r"<Audio ([1-9][0-9]*)>")
 COMMON_ANY_AUDIO_RE = re.compile(r"<Audio\s*[0-9]+\s*>")
 COMMON_DIRECT_SPEECH_RE = re.compile(r"<d>|</d>|「|」")
+
+
+def _source_timestamp_to_ms(value: str) -> int:
+    minutes_text, seconds_text = value.split(":", 1)
+    seconds, milliseconds = seconds_text.split(".", 1)
+    return (
+        int(minutes_text) * 60_000
+        + int(seconds) * 1000
+        + int(milliseconds)
+    )
 
 
 def _canonical_scene_directive(line: str, line_number: int) -> str:
@@ -572,17 +584,37 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                     reuse_match = JAPANESE_BGM_REUSE_RE.fullmatch(value)
                     if reuse_match is None:
                         raise TranslationError(
-                            f"Invalid BGM reuse value at line {line_number}; use '<Audio N> 完全コピー' or '<Audio N> 部分コピー'"
+                            f"Invalid BGM reuse value at line {line_number}; use "
+                            "'<Audio N> 完全コピー', '<Audio N> 部分コピー', or "
+                            "'<Audio N> 部分コピー MM:SS.mmm-MM:SS.mmm'"
                         )
-                    audio_text, japanese_relationship = reuse_match.groups()
+                    (
+                        audio_text,
+                        japanese_relationship,
+                        source_start,
+                        source_end,
+                    ) = reuse_match.groups()
                     audio = int(audio_text)
                     if audio_text != str(audio) or not 1 <= audio <= 3:
                         raise TranslationError(
                             f"BGM reuse Audio at line {line_number} must be in the Audio 1-3 range"
                         )
+                    if source_start is not None:
+                        if japanese_relationship != "部分コピー":
+                            raise TranslationError(
+                                f"BGM reuse source range at line {line_number} is allowed only with 部分コピー"
+                            )
+                        if _source_timestamp_to_ms(source_end) <= _source_timestamp_to_ms(source_start):
+                            raise TranslationError(
+                                f"BGM reuse source range at line {line_number} must have an end later than its start"
+                            )
+                    source_range = (
+                        "" if source_start is None else f" {source_start}-{source_end}"
+                    )
                     translated = (
                         f"<Audio {audio}> "
                         f"{BGM_REUSE_RELATIONSHIPS[japanese_relationship]}"
+                        f"{source_range}"
                     )
                     payload = None
                 elif label == "発声":

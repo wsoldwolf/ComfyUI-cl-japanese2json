@@ -327,19 +327,24 @@ Soundscapeは各Sceneの`Soundscape`値へ保存する。フィールドはEnvir
 ```text
 * BGM再利用: <Audio 1> 完全コピー
 * BGM再利用: <Audio 2> 部分コピー
+* BGM再利用: <Audio 3> 部分コピー 00:20.000-00:30.000
 ```
 
-上の2行は選択肢の例であり、同一Sceneには1行だけ記載する。LLMJ2Eは本文をLLMへ送らず、Audio番号と関係を検証して次のどちらかへ固定変換する。
+上の3行は選択肢の例であり、同一Sceneには1行だけ記載する。LLMJ2Eは本文をLLMへ送らず、Audio番号、関係及び任意の元音源時間範囲を検証して次のいずれかへ固定変換する。
 
 ```text
 * Background music reuse: <Audio 1> fully_copy
 * Background music reuse: <Audio 2> partially_copy
+* Background music reuse: <Audio 3> partially_copy 00:20.000-00:30.000
 ```
 
-MDPARSEは`BackgroundMusicReuse(audio_number, relationship)`としてSceneのSoundscapeへ保存する。生成`BGM`と`BGM再利用`は相互排他である。
+MDPARSEは`BackgroundMusicReuse(audio_number, relationship, source_start_ms, source_end_ms)`としてSceneのSoundscapeへ保存する。生成`BGM`と`BGM再利用`は相互排他である。
 
-- `fully_copy`は元Audio全体を最終音声トラックとして1:1再利用する。Environment、Sound effects、生成台詞又は別Audioのリップシンクを同じSceneへ追加しない。同じAudio内のボーカルへのリップシンクだけは、追加音声を生成しないため許可する。
+- `fully_copy`は元Audio全体を最終音声トラックとして1:1再利用する。元Audio全体とSceneの長さが一致する用途を前提とし、時間範囲を受理しない。Environment、Sound effects、生成台詞又は別Audioのリップシンクを同じSceneへ追加しない。同じAudio内のボーカルへのリップシンクだけは、追加音声を生成しないため許可する。
 - `partially_copy`は元AudioのBGM層をaudience-only scoreとして再利用し、Environment、Sound effects、生成台詞又は許可されたリップシンクを別音響層として混在できる。
+- `partially_copy`には`MM:SS.mmm-MM:SS.mmm`形式の元音源時間範囲を任意で指定できる。分は2桁以上、秒は`00`～`59`、ミリ秒は3桁、区切りはASCIIハイフンとする。
+- 時間範囲は増加順で、その長さをScene durationとミリ秒単位で一致させる。JSONGENは元区間をScene先頭から末尾へ1:1で割り当てる。
+- 時間範囲付き`partially_copy`は、元区間の音楽、ボーカル、編曲、楽器構成、テンポ、リズム、タイミング及び内部ミックスを保持し、再構成、再生成、スタイル変更、リタイミング、ループ、再開始及びクロスフェードを禁止する固定英文を出力する。
 - BGM内ボーカルへ同期する場合は、Shotの`リップシンク`と`BGM再利用`に同じAudio番号を書き、実際のボーカルと同じ正確な歌詞をリップシンクへ記載する。
 - Audio内容の文字起こし又は歌詞推測は行わない。
 
@@ -396,7 +401,7 @@ BGM再利用だけが有効な無Subject Sceneでは、無Subject固定文の後
 
 Audio声質参照は`reference`を使い、元信号及び元発話をコピーしないことを明示する。通常リップシンクAudioは`partially_copy`を使い、対象Shot、対象Subject及び他の音響層が別生成であることを明示する。
 
-BGM再利用Audioは入力どおり`fully_copy`又は`partially_copy`を使う。前者は元Audio全体を最終音声トラックとして1:1保持し、後者はBGM信号を保持しながら他音響層を別生成できることを記述する。同じAudio内のボーカルへ同期する場合は対象SubjectとShotを同じAudio行へ統合する。このセクションへ`(Sx)`を書かない。
+BGM再利用Audioは入力どおり`fully_copy`又は`partially_copy`を使う。前者は元Audio全体を最終音声トラックとして1:1保持し、後者はBGM信号を保持しながら他音響層を別生成できることを記述する。時間範囲付き`partially_copy`では正確な始端と終端及び非再構成制約を記述する。同じAudio内のボーカルへ同期する場合は対象SubjectとShotを同じAudio行へ統合する。このセクションへ`(Sx)`を書かない。
 
 ### 10.4 detailed_description
 
@@ -416,6 +421,8 @@ Scene-wide style and premise.
 
 同じAudioがBGM再利用にも指定されていれば、元BGM内のボーカル、歌詞及びタイミングを保持した歌唱演技として展開する。独立した置換ボーカル又は追加ボーカルを生成しない。
 
+時間範囲付きBGM再利用では、適用Common及びScene preambleの後、`[Shot 1]`より前に、元区間をScene全体へ1:1で割り当てて再構成、再生成又はリタイミングしない固定文を追加する。
+
 ### 10.5 overall_soundscape
 
 Environment、Sound effects及び許可済み明示台詞だけを連結する。明示台詞を許可した場合でも台詞本文はここへ複製せず、shot-synchronizedな指定台詞だけが唯一の人物発声であると記述する。全音響が無効なら`Complete silence.`。生成BGMだけが有効なら、環境音、物理音及び人物発声がないことを明示し、BGMと矛盾する`Complete silence.`を使用しない。
@@ -431,9 +438,9 @@ non_diegetic_music:
 N/A
 ```
 
-生成BGMが指定されれば翻訳済み本文を出力する。BGM再利用ではAudio番号、`fully_copy`又は`partially_copy`の意味、audience-only scoreであることを出力する。同じAudio内のボーカルへリップシンクする場合は対象Subject、話者ID及びShotを追加し、元ボーカルを置換又は重複生成しない。
+生成BGMが指定されれば翻訳済み本文を出力する。BGM再利用ではAudio番号、`fully_copy`又は`partially_copy`の意味、audience-only scoreであることを出力する。時間範囲があれば、正確な始端と終端、Scene先頭から末尾への1:1割当て及び非再構成制約を追加する。同じAudio内のボーカルへリップシンクする場合は対象Subject、話者ID及びShotを追加し、元ボーカルを置換又は重複生成しない。
 
-H3のBGM生成はランダム性が高いため、再現性又は品質を優先する場合は`BGM: なし`とし、Suno等で生成した音楽を後編集する運用も維持する。
+H3のBGM生成はランダム性が高く、BGM再利用の固定文及び時間範囲も元波形の同一性を保証しない。再現性、品質又は波形同一性を優先する場合は、Suno等で用意した元音源を保持し、動画生成後にH3生成音声を元音源へ差し替える運用も維持する。
 
 ## 11. 発声安全規則
 
@@ -592,7 +599,7 @@ set "FORCE_CMAKE=1"
 - Shot時刻の推論前検証
 - Soundscape固定値
 - リップシンクの固定正規化と推論対象外化
-- BGM再利用の固定正規化、推論対象外化、関係及びAudio番号検証
+- BGM再利用の固定正規化、推論対象外化、関係、Audio番号及び元音源時間範囲検証
 - BGM本文の保護付き翻訳
 - ユーザー入力の`(Sx)`拒否
 - 全文1推論
@@ -629,7 +636,7 @@ set "FORCE_CMAKE=1"
 - 肯定的発声指示の同一行台詞要件
 - Audioの条件付き定義・削除
 - Audio再利用リップシンクの定義、summary、`partially_copy`及びShot展開
-- BGM Audioの`fully_copy`/`partially_copy`、無Subject Scene及び同一Audio内ボーカルリップシンク
+- BGM Audioの`fully_copy`/`partially_copy`、時間範囲の1:1割当て、無Subject Scene及び同一Audio内ボーカルリップシンク
 - `fully_copy`と追加音響層の競合拒否
 - 声質参照と信号再利用の競合拒否
 - `retention_analysis`に`(Sx)`がないこと
