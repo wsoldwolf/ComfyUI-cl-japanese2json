@@ -90,3 +90,32 @@ class CoreIntegrationTests(unittest.TestCase):
         self.assertIn("<Audio 1>: partially_copy", prompt[2])
         self.assertIn("<d>[Japanese]こんにちは！</d>", prompt[3])
         self.assertIn("non_diegetic_music:\nA defined audible sound", prompt[5])
+
+    def test_reused_background_music_vocal_lip_sync_end_to_end(self) -> None:
+        source = """# サブジェクト
+* <Picture 1>を外観参照として使用する歌手。
+
+# 共通プロンプト
+* <Audio 1>の音楽時間軸をシーン間で維持する。
+
+# シーン 8秒
+## ショット
+* <Subject 1>がカメラを見ながら音楽に合わせて身体を動かす。
+* リップシンク: <Subject 1> <- <Audio 1> 「夜空を越えて、君のもとへ。」
+## 音響
+* 発声: 指定台詞のみ
+* BGM再利用: <Audio 1> 完全コピー"""
+        canonical = llmj2e.translate_markdown(
+            source, FakeLLM(), "system", max_tokens=128
+        )
+        self.assertIn(
+            "* Background music reuse: <Audio 1> fully_copy", canonical
+        )
+        parsed = jsongen.validate_final_json(
+            jsongen.generate_json(mdparse.parse_markdown(canonical))
+        )
+        prompt = parsed["shots"][0]["prompt"]
+        self.assertIn("<Audio 1>: fully_copy", prompt[2])
+        self.assertIn("<Audio 1>", prompt[3].split("[Shot 1]", 1)[0])
+        self.assertIn("visually performs and lip-syncs exactly", prompt[3])
+        self.assertIn("<Audio 1> is directly reused 1:1", prompt[5])

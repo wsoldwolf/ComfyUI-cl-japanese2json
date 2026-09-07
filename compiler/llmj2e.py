@@ -93,6 +93,7 @@ SOUNDSCAPE_PREFIXES = {
     "環境音": "* Environment: ",
     "効果音": "* Sound effects: ",
     "BGM": "* Background music: ",
+    "BGM再利用": "* Background music reuse: ",
 }
 SOUNDSCAPE_FIXED_VALUES = {
     "なし": "NONE",
@@ -116,8 +117,16 @@ JAPANESE_LIP_SYNC_RE = re.compile(
     r"リップシンク\s*[:：]\s*"
     r"<Subject ([0-9]+)>\s*<-\s*<Audio ([0-9]+)>\s*(.+)"
 )
+JAPANESE_BGM_REUSE_RE = re.compile(
+    r"<Audio ([0-9]+)>\s+(完全コピー|部分コピー)"
+)
+BGM_REUSE_RELATIONSHIPS = {
+    "完全コピー": "fully_copy",
+    "部分コピー": "partially_copy",
+}
 USER_SPEAKER_ID_RE = re.compile(r"\(S[1-9][0-9]*\)")
-COMMON_AUDIO_RE = re.compile(r"<Audio [1-9][0-9]*>")
+COMMON_AUDIO_RE = re.compile(r"<Audio ([1-9][0-9]*)>")
+COMMON_ANY_AUDIO_RE = re.compile(r"<Audio\s*[0-9]+\s*>")
 COMMON_DIRECT_SPEECH_RE = re.compile(r"<d>|</d>|「|」")
 
 
@@ -482,10 +491,19 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                     f"Speaker IDs are generated internally; remove '(Sx)' at line {line_number}"
                 )
             if current.section == "Common":
-                if COMMON_AUDIO_RE.search(body):
-                    raise TranslationError(
-                        f"# 共通プロンプト cannot contain <Audio N> at line {line_number}"
-                    )
+                for audio_tag in COMMON_ANY_AUDIO_RE.finditer(body):
+                    canonical = COMMON_AUDIO_RE.fullmatch(audio_tag.group(0))
+                    if canonical is None:
+                        raise TranslationError(
+                            f"# 共通プロンプト Audio reference at line {line_number} "
+                            "must use canonical '<Audio N>' syntax"
+                        )
+                    audio = int(canonical.group(1))
+                    if not 1 <= audio <= 3:
+                        raise TranslationError(
+                            f"# 共通プロンプト Audio reference at line {line_number} "
+                            "must be in the Audio 1-3 range"
+                        )
                 if COMMON_DIRECT_SPEECH_RE.search(body):
                     raise TranslationError(
                         f"# 共通プロンプト cannot contain direct speech at line {line_number}"
@@ -518,10 +536,13 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 )
                 continue
             if current.section == "Soundscape":
-                match = re.fullmatch(r"(環境音|効果音|発声|BGM)\s*[:：]\s*(.*)", body)
+                match = re.fullmatch(
+                    r"(環境音|効果音|発声|BGM再利用|BGM)\s*[:：]\s*(.*)",
+                    body,
+                )
                 if match is None:
                     raise TranslationError(
-                        f"Invalid soundscape bullet at line {line_number}; expected Environment, Sound effects, Vocalization, or BGM"
+                        f"Invalid soundscape bullet at line {line_number}; expected Environment, Sound effects, Vocalization, BGM, or BGM reuse"
                     )
                 label, raw_value = match.groups()
                 value = raw_value.strip()
@@ -539,7 +560,32 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                     raise TranslationError(
                         f"Duplicate {label} soundscape bullet at line {line_number}"
                     )
-                if label == "発声":
+                music_prefixes = {
+                    SOUNDSCAPE_PREFIXES["BGM"],
+                    SOUNDSCAPE_PREFIXES["BGM再利用"],
+                }
+                if output_prefix in music_prefixes and used_prefixes & music_prefixes:
+                    raise TranslationError(
+                        f"BGM and BGM reuse are mutually exclusive at line {line_number}"
+                    )
+                if label == "BGM再利用":
+                    reuse_match = JAPANESE_BGM_REUSE_RE.fullmatch(value)
+                    if reuse_match is None:
+                        raise TranslationError(
+                            f"Invalid BGM reuse value at line {line_number}; use '<Audio N> 完全コピー' or '<Audio N> 部分コピー'"
+                        )
+                    audio_text, japanese_relationship = reuse_match.groups()
+                    audio = int(audio_text)
+                    if audio_text != str(audio) or not 1 <= audio <= 3:
+                        raise TranslationError(
+                            f"BGM reuse Audio at line {line_number} must be in the Audio 1-3 range"
+                        )
+                    translated = (
+                        f"<Audio {audio}> "
+                        f"{BGM_REUSE_RELATIONSHIPS[japanese_relationship]}"
+                    )
+                    payload = None
+                elif label == "発声":
                     if value not in SOUNDSCAPE_FIXED_VALUES:
                         raise TranslationError(
                             f"Invalid vocalization value at line {line_number}; use なし or 指定台詞のみ"

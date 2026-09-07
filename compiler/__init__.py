@@ -3,9 +3,10 @@
 from .jsongen import generate_json, validate_final_json
 from .llmj2e import translate_markdown
 from .mdparse import parse_markdown
-from .structures import Emd, RetentionRule, Scene, Shot, Soundscape
+from .structures import BackgroundMusicReuse, Emd, RetentionRule, Scene, Shot, Soundscape
 
 __all__ = [
+    "BackgroundMusicReuse",
     "Emd",
     "RetentionRule",
     "Scene",

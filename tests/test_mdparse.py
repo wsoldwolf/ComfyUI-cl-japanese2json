@@ -124,6 +124,36 @@ class MarkdownParserTests(unittest.TestCase):
         self.assertEqual(soundscape.vocalization, "NONE")
         self.assertEqual(soundscape.background_music, "Sparse piano.")
 
+    def test_background_music_reuse_is_stored_as_structured_scene_data(self) -> None:
+        emd = parse_markdown(
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 2> partially_copy"
+        )
+        reuse = emd.scenes[0].soundscape.background_music_reuse
+        self.assertIsNotNone(reuse)
+        self.assertEqual(reuse.audio_number, 2)
+        self.assertEqual(reuse.relationship, "partially_copy")
+        self.assertIsNone(emd.scenes[0].soundscape.background_music)
+
+    def test_invalid_or_conflicting_background_music_reuse_is_rejected(self) -> None:
+        invalid_documents = (
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 4> fully_copy",
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 1> reference",
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music: Piano.\n"
+            "* Background music reuse: <Audio 1> partially_copy",
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 1> partially_copy\n"
+            "* Background music: Piano.",
+        )
+        for text in invalid_documents:
+            with self.subTest(text=text), self.assertRaises(
+                errors.MarkdownParseError
+            ):
+                parse_markdown(text)
+
     def test_canonical_lip_sync_is_preserved_in_shot_order(self) -> None:
         emd = parse_markdown(
             "# Subjects\n* one.\n# Scene\n## Shot\n"
@@ -179,10 +209,19 @@ class MarkdownParserTests(unittest.TestCase):
     def test_common_restrictions_and_empty_section_are_rejected(self) -> None:
         invalid = (
             "# Common\n# Scene\n## Shot\n* Action.",
-            "# Common\n* Use <Audio 1>.\n# Scene\n## Shot\n* Action.",
+            "# Common\n* Use <Audio 4>.\n# Scene\n## Shot\n* Action.",
+            "# Common\n* Use <Audio 01>.\n# Scene\n## Shot\n* Action.",
             "# Common\n* Someone says <d>[Japanese]x</d>.\n# Scene\n## Shot\n* Action.",
             "# Scene\n## Shot\n* <Subject 1> (S1) says <d>[Japanese]x</d>.",
         )
         for text in invalid:
             with self.subTest(text=text), self.assertRaises(errors.MarkdownParseError):
                 parse_markdown(text)
+
+    def test_common_accepts_canonical_audio_references(self) -> None:
+        emd = parse_markdown(
+            "# Common\n* Keep <Audio 1> continuous.\n"
+            "# Scene\n## Shot\n* Action.\n## Soundscape\n"
+            "* Background music reuse: <Audio 1> partially_copy"
+        )
+        self.assertEqual(emd.common_prompt, ["Keep <Audio 1> continuous."])

@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 
 SOUND_NONE = "NONE"
 VOCALIZATION_EXPLICIT_DIALOGUE_ONLY = "EXPLICIT_DIALOGUE_ONLY"
+AUDIO_FULLY_COPY = "fully_copy"
+AUDIO_PARTIALLY_COPY = "partially_copy"
+AUDIO_COPY_RELATIONSHIPS = frozenset({AUDIO_FULLY_COPY, AUDIO_PARTIALLY_COPY})
 
 RETENTION_FULLY_PRESERVED = "fully_preserved"
 RETENTION_PARTIALLY_PRESERVED = "partially_preserved"
@@ -21,11 +24,18 @@ RETENTION_RELATIONSHIPS = frozenset(
 
 
 @dataclass
+class BackgroundMusicReuse:
+    audio_number: int
+    relationship: str
+
+
+@dataclass
 class Soundscape:
     environment: str | None = None
     sound_effects: str | None = None
     vocalization: str | None = None
     background_music: str | None = None
+    background_music_reuse: BackgroundMusicReuse | None = None
 
 
 @dataclass

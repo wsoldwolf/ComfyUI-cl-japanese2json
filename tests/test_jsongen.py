@@ -14,6 +14,7 @@ RetentionRule = structures.RetentionRule
 Scene = structures.Scene
 Shot = structures.Shot
 Soundscape = structures.Soundscape
+BackgroundMusicReuse = structures.BackgroundMusicReuse
 EXPLICIT_DIALOGUE_ONLY = structures.VOCALIZATION_EXPLICIT_DIALOGUE_ONLY
 
 
@@ -430,9 +431,47 @@ class JSONGenerationTests(unittest.TestCase):
         self.assertLess(detailed.index("Global style."), detailed.index("Scene-specific setting."))
         self.assertLess(detailed.index("Scene-specific setting."), detailed.index("[Shot 1]"))
 
+    def test_common_audio_is_filtered_without_activating_audio(self) -> None:
+        emd = Emd(
+            common_prompt=[
+                "Keep <Audio 1> continuous.",
+                "Keep <Audio 2> continuous.",
+            ],
+            scenes=[
+                Scene(shots=[make_shot("A landscape remains visible.")]),
+                Scene(
+                    shots=[make_shot("The next landscape remains visible.")],
+                    soundscape=Soundscape(
+                        background_music_reuse=BackgroundMusicReuse(
+                            1, "partially_copy"
+                        )
+                    ),
+                ),
+                Scene(
+                    shots=[make_shot("The final landscape remains visible.")],
+                    soundscape=Soundscape(
+                        background_music_reuse=BackgroundMusicReuse(
+                            2, "partially_copy"
+                        )
+                    ),
+                ),
+            ],
+        )
+        parsed = json.loads(jsongen.generate_json(emd))
+        first = parsed["shots"][0]["prompt"][3]
+        second = parsed["shots"][1]["prompt"][3]
+        third = parsed["shots"][2]["prompt"][3]
+        self.assertNotIn("<Audio 1>", first)
+        self.assertNotIn("<Audio 2>", first)
+        self.assertIn("Keep <Audio 1> continuous.", second)
+        self.assertNotIn("<Audio 2>", second)
+        self.assertNotIn("<Audio 1>", third)
+        self.assertIn("Keep <Audio 2> continuous.", third)
+
     def test_invalid_common_prompt_content_is_rejected(self) -> None:
         for line in (
-            "Use <Audio 1>.",
+            "Use <Audio 4>.",
+            "Use <Audio 01>.",
             "Someone says <d>[Japanese]x</d>.",
             "Use (S1).",
             "A character speaks loudly.",
@@ -519,6 +558,142 @@ class JSONGenerationTests(unittest.TestCase):
         )
         prompt = json.loads(jsongen.generate_json(Emd(scenes=[scene])))["shots"][0]["prompt"]
         self.assertEqual(prompt[5], jsongen.NON_DIEGETIC_MUSIC)
+
+    def test_reused_background_music_vocal_drives_exact_lip_sync(self) -> None:
+        scene = Scene(
+            duration=8,
+            shots=[
+                make_shot(
+                    "<Subject 1> faces the camera.",
+                    "Lip sync: <Subject 1> <- <Audio 1>: "
+                    "<d>[Japanese]夜空を越えて、君のもとへ。</d>",
+                )
+            ],
+            soundscape=Soundscape(
+                vocalization=EXPLICIT_DIALOGUE_ONLY,
+                background_music_reuse=BackgroundMusicReuse(1, "fully_copy"),
+            ),
+        )
+        text = jsongen.generate_json(Emd(subjects=["a singer."], scenes=[scene]))
+        prompt = jsongen.validate_final_json(text)["shots"][0]["prompt"]
+        self.assertIn("audience-only background-music signal", prompt[0])
+        self.assertIn("<Subject 1> (S1)", prompt[0])
+        self.assertIn("[reference generation + audio reuse]", prompt[1])
+        self.assertIn("<Audio 1>: fully_copy", prompt[2])
+        self.assertIn("complete final audio track", prompt[2])
+        self.assertIn("visually performs and lip-syncs exactly", prompt[3])
+        self.assertIn("<d>[Japanese]夜空を越えて、君のもとへ。</d>", prompt[3])
+        self.assertIn("no replacement", prompt[3])
+        self.assertIn("no new voice is generated", prompt[4])
+        self.assertIn("No other separately generated ambience", prompt[4])
+        self.assertNotIn(
+            "No other ambience, physical sound, or character vocalization is present.",
+            prompt[4],
+        )
+        self.assertIn("<Audio 1> is directly reused 1:1", prompt[5])
+        self.assertIn("original vocal layer", prompt[5])
+
+    def test_partially_copied_background_music_can_mix_other_sound_layers(self) -> None:
+        scene = Scene(
+            shots=[make_shot("A city skyline remains visible.")],
+            soundscape=Soundscape(
+                environment="Distant traffic.",
+                sound_effects="A soft transition whoosh.",
+                background_music_reuse=BackgroundMusicReuse(
+                    2, "partially_copy"
+                ),
+            ),
+        )
+        prompt = json.loads(
+            jsongen.generate_json(Emd(scenes=[scene]))
+        )["shots"][0]["prompt"]
+        self.assertIn("No character subject", prompt[0])
+        self.assertIn("<Audio 2> is the directly reused", prompt[0])
+        self.assertIn("<Audio 2>: partially_copy", prompt[2])
+        self.assertIn("Environment: Distant traffic.", prompt[4])
+        self.assertIn("Sound effects: A soft transition whoosh.", prompt[4])
+        self.assertIn("background-music signal from <Audio 2>", prompt[5])
+
+    def test_fully_copied_background_music_rejects_added_audio_layers(self) -> None:
+        invalid_scenes = (
+            Scene(
+                shots=[make_shot("Action.")],
+                soundscape=Soundscape(
+                    environment="Wind.",
+                    background_music_reuse=BackgroundMusicReuse(1, "fully_copy"),
+                ),
+            ),
+            Scene(
+                shots=[make_shot("<Subject 1> says <d>[Japanese]台詞。</d>.")],
+                soundscape=Soundscape(
+                    vocalization=EXPLICIT_DIALOGUE_ONLY,
+                    background_music_reuse=BackgroundMusicReuse(1, "fully_copy"),
+                ),
+            ),
+            Scene(
+                shots=[
+                    make_shot(
+                        "Lip sync: <Subject 1> <- <Audio 2>: "
+                        "<d>[Japanese]台詞。</d>"
+                    )
+                ],
+                soundscape=Soundscape(
+                    vocalization=EXPLICIT_DIALOGUE_ONLY,
+                    background_music_reuse=BackgroundMusicReuse(1, "fully_copy"),
+                ),
+            ),
+        )
+        for scene in invalid_scenes:
+            with self.subTest(scene=scene), self.assertRaisesRegex(
+                errors.JSONGenerationError, "fully_copy"
+            ):
+                jsongen.generate_json(Emd(subjects=["one."], scenes=[scene]))
+
+    def test_generated_and_reused_background_music_are_mutually_exclusive(self) -> None:
+        scene = Scene(
+            shots=[make_shot("Action.")],
+            soundscape=Soundscape(
+                background_music="Piano.",
+                background_music_reuse=BackgroundMusicReuse(1, "partially_copy"),
+            ),
+        )
+        with self.assertRaisesRegex(errors.JSONGenerationError, "cannot combine"):
+            jsongen.generate_json(Emd(scenes=[scene]))
+
+    def test_invalid_background_music_reuse_structure_is_rejected(self) -> None:
+        invalid_values = (
+            "not structured",
+            BackgroundMusicReuse(0, "fully_copy"),
+            BackgroundMusicReuse(4, "partially_copy"),
+            BackgroundMusicReuse(True, "fully_copy"),
+            BackgroundMusicReuse(1, "reference"),
+            BackgroundMusicReuse(1, ["fully_copy"]),
+        )
+        for value in invalid_values:
+            scene = Scene(
+                shots=[make_shot("Action.")],
+                soundscape=Soundscape(background_music_reuse=value),
+            )
+            with self.subTest(value=value), self.assertRaises(
+                errors.JSONGenerationError
+            ):
+                jsongen.generate_json(Emd(scenes=[scene]))
+
+    def test_background_music_reuse_cannot_share_a_voice_reference_role(self) -> None:
+        scene = Scene(
+            shots=[make_shot("<Subject 1> says <d>[Japanese]台詞。</d>.")],
+            soundscape=Soundscape(
+                vocalization=EXPLICIT_DIALOGUE_ONLY,
+                background_music_reuse=BackgroundMusicReuse(1, "partially_copy"),
+            ),
+        )
+        with self.assertRaisesRegex(errors.JSONGenerationError, "both as"):
+            jsongen.generate_json(
+                Emd(
+                    subjects=["a character whose voice is based on <Audio 1>."],
+                    scenes=[scene],
+                )
+            )
 
     def test_soundscape_text_cannot_bypass_vocalization_policy(self) -> None:
         for soundscape in (

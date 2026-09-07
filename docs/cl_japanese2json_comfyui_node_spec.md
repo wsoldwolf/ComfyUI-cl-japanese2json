@@ -4,7 +4,7 @@
 
 本書は`cl_japanese2json`コンパイラを独立したComfyUI V1カスタムノードとして提供する実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`である。
 
-本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、条件付きCommon、Python生成の話者ID、Retention、Audio再利用リップシンク、任意BGM及びFull-Reference 6セクションを対象とする。
+本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、条件付きCommon、Python生成の話者ID、Retention、Audio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
@@ -266,12 +266,15 @@ with instance_lock:
 
 ### 9.2 Common
 
-Commonは`Emd.common_prompt`へ文書順で保存する。JSONGENはScene preamble及びShot本文だけからアクティブSubjectを確定してから、Commonの各行を次のように選択する。
+Commonは`Emd.common_prompt`へ文書順で保存する。JSONGENはScene preamble及びShot本文からアクティブSubjectを、声質参照、リップシンク及びBGM再利用からアクティブAudioを確定してから、Commonの各行を次のように選択する。
 
-- Subject参照のない行は全Sceneへ適用する。
+- Subject又はAudio参照のない行は全Sceneへ適用する。
 - Subject参照がある行は、その全SubjectがSceneでアクティブな場合だけ適用する。
-- Commonの参照だけでSubjectをアクティブにしない。
-- 未定義Subject、Audio参照、ダイレクトスピーチ、肯定的な発声指示又はユーザー入力の`(Sx)`を含むCommonはエラー。
+- Audio参照がある行は、その全AudioがSceneで別途アクティブな場合だけ適用する。
+- SubjectとAudioの両方がある行は両条件を満たす場合だけ適用する。
+- Commonの参照だけでSubject又はAudioをアクティブにしない。
+- Audio参照は正規形の`<Audio 1>`～`<Audio 3>`だけを許可する。
+- 未定義Subject、不正Audio参照、ダイレクトスピーチ、肯定的な発声指示又はユーザー入力の`(Sx)`を含むCommonはエラー。
 
 選択したCommon行は`detailed_description`内でScene preambleより前に出す。
 
@@ -293,7 +296,11 @@ Subject 1～4、Audio 1～3及び空でない台詞1個を必須とする。LLMJ
 * Lip sync: <Subject N> <- <Audio N>: <d>[Japanese]正確な台詞</d>
 ```
 
-MDPARSEは正規形をShot行の元位置に保持する。JSONGENは`audio reuse`、`partially_copy`及び対象Subjectの`(SN)`へ展開する。同じAudioを複数Subjectへ割り当てること、又は同一Sceneで声質参照と信号再利用へ競合させることはエラーとする。
+MDPARSEは正規形をShot行の元位置に保持する。JSONGENは通常の発話Audio再利用を`audio reuse`、`partially_copy`及び対象Subjectの`(SN)`へ展開する。同じAudioを複数Subjectへ割り当てること、又は同一Sceneで声質参照と信号再利用へ競合させることはエラーとする。
+
+同じAudioがSceneの`BGM再利用`にも指定されている場合、そのリップシンクは独立した発話音声ではなく、再利用BGM内の元ボーカルを人物が歌唱演技する指定として展開する。記載された台詞は歌詞の正本であり、元BGMのボーカル信号、語句及びタイミングを保持して、置換又は追加ボーカルを生成しない。
+
+構造化リップシンク行自体が発声又は歌唱指示を兼ねる。別のShot行へダイレクトスピーチのない肯定的な発声又は歌唱指示を追加した場合は、通常の発声安全規則によりエラーとする。
 
 ### 9.4 Retention
 
@@ -311,9 +318,30 @@ MDPARSEは正規形をShot行の元位置に保持する。JSONGENは`audio reus
 
 ### 9.6 Soundscape
 
-Soundscapeは各Sceneの`Soundscape`値へ保存する。フィールドはEnvironment、Sound effects、Vocalization及びBackground musicである。発声省略又は`なし`は無発声、BGM省略又は`なし`は`non_diegetic_music: N/A`である。全項目の省略は完全無音である。
+Soundscapeは各Sceneの`Soundscape`値へ保存する。フィールドはEnvironment、Sound effects、Vocalization、Background music及び構造化されたBackground music reuseである。発声省略又は`なし`は無発声、BGM生成とBGM再利用の両方を省略すれば`non_diegetic_music: N/A`である。全項目の省略は完全無音である。
 
-Background musicは任意の日本語説明をLLMで英訳する。楽器、テンポ、リズム及び音量変化を対象とし、Audio参照、ダイレクトスピーチ又は具体的な歌詞は受理しない。劇中人物にも聞こえる音楽はBackground musicではなくShot本文へ書く。
+生成BGMは任意の日本語説明をLLMで英訳する。楽器、テンポ、リズム及び音量変化を対象とし、Audio参照、ダイレクトスピーチ又は具体的な歌詞は受理しない。劇中人物にも聞こえる音楽は生成BGMではなくShot本文へ書く。
+
+既存BGM Audioは次の構造化バレットで指定する。
+
+```text
+* BGM再利用: <Audio 1> 完全コピー
+* BGM再利用: <Audio 2> 部分コピー
+```
+
+上の2行は選択肢の例であり、同一Sceneには1行だけ記載する。LLMJ2Eは本文をLLMへ送らず、Audio番号と関係を検証して次のどちらかへ固定変換する。
+
+```text
+* Background music reuse: <Audio 1> fully_copy
+* Background music reuse: <Audio 2> partially_copy
+```
+
+MDPARSEは`BackgroundMusicReuse(audio_number, relationship)`としてSceneのSoundscapeへ保存する。生成`BGM`と`BGM再利用`は相互排他である。
+
+- `fully_copy`は元Audio全体を最終音声トラックとして1:1再利用する。Environment、Sound effects、生成台詞又は別Audioのリップシンクを同じSceneへ追加しない。同じAudio内のボーカルへのリップシンクだけは、追加音声を生成しないため許可する。
+- `partially_copy`は元AudioのBGM層をaudience-only scoreとして再利用し、Environment、Sound effects、生成台詞又は許可されたリップシンクを別音響層として混在できる。
+- BGM内ボーカルへ同期する場合は、Shotの`リップシンク`と`BGM再利用`に同じAudio番号を書き、実際のボーカルと同じ正確な歌詞をリップシンクへ記載する。
+- Audio内容の文字起こし又は歌詞推測は行わない。
 
 ## 10. Full-Reference 6セクション
 
@@ -349,15 +377,26 @@ No character subject or reference-image person is active.
 <Audio N> is the directly reused spoken-audio signal performed by <Subject M> (Sx) for exact lip synchronization in [Shot K].
 ```
 
+BGM再利用Audioも独立行で定義する。BGM内ボーカルのリップシンクがある場合は、同じAudio定義へ対象Subject、話者ID及びShotを統合する。
+
+```text
+<Audio N> is the directly reused audience-only background-music signal.
+<Audio N> is the directly reused audience-only background-music signal whose original vocal layer is performed in exact lip synchronization by <Subject M> (Sx) in [Shot K].
+```
+
+BGM再利用だけが有効な無Subject Sceneでは、無Subject固定文の後へAudio定義を追加する。
+
 ### 10.2 summary
 
-タスク種別は`[reference generation]`を基底とする。声質参照Audioがあれば`audio reference`、リップシンクAudioがあれば`audio reuse`を追加する。両方があれば`[reference generation + audio reuse + audio reference]`とする。`継続`はContex-Loopのガイド設定であり、公式Full-Referenceの`video continuation`参照種別とは扱わない。
+タスク種別は`[reference generation]`を基底とする。声質参照Audioがあれば`audio reference`、通常リップシンク又はBGM再利用Audioがあれば`audio reuse`を追加する。両方があれば`[reference generation + audio reuse + audio reference]`とする。BGM再利用ではAudio番号、コピー関係及び同じAudio内のボーカルがリップシンクを駆動するかを記述する。`継続`はContex-Loopのガイド設定であり、公式Full-Referenceの`video continuation`参照種別とは扱わない。
 
 ### 10.3 retention_analysis
 
 グローバルRetention規則をSceneのアクティブSubjectへだけ適用する。明示規則がなければ`fully_preserved`とする。属性転送の両Subjectが同一Sceneでアクティブでなければエラー。
 
-Audio声質参照は`reference`を使い、元信号及び元発話をコピーしないことを明示する。リップシンクAudioは`partially_copy`を使い、対象Shot、対象Subject及び他の音響層が別生成であることを明示する。このセクションへ`(Sx)`を書かない。
+Audio声質参照は`reference`を使い、元信号及び元発話をコピーしないことを明示する。通常リップシンクAudioは`partially_copy`を使い、対象Shot、対象Subject及び他の音響層が別生成であることを明示する。
+
+BGM再利用Audioは入力どおり`fully_copy`又は`partially_copy`を使う。前者は元Audio全体を最終音声トラックとして1:1保持し、後者はBGM信号を保持しながら他音響層を別生成できることを記述する。同じAudio内のボーカルへ同期する場合は対象SubjectとShotを同じAudio行へ統合する。このセクションへ`(Sx)`を書かない。
 
 ### 10.4 detailed_description
 
@@ -375,20 +414,26 @@ Scene-wide style and premise.
 
 構造化リップシンク行は、指定Subjectが指定Audioの元信号と正確な台詞を物理的に発声し、その信号へ口を正確に同期する自然文へ置換する。置換、反復又は追加発声を禁止する固定文を続ける。
 
+同じAudioがBGM再利用にも指定されていれば、元BGM内のボーカル、歌詞及びタイミングを保持した歌唱演技として展開する。独立した置換ボーカル又は追加ボーカルを生成しない。
+
 ### 10.5 overall_soundscape
 
-Environment、Sound effects及び許可済み明示台詞だけを連結する。明示台詞を許可した場合でも台詞本文はここへ複製せず、shot-synchronizedな指定台詞だけが唯一の人物発声であると記述する。全音響が無効なら`Complete silence.`。BGMだけが有効なら、環境音、物理音及び人物発声がないことを明示し、BGMと矛盾する`Complete silence.`を使用しない。
+Environment、Sound effects及び許可済み明示台詞だけを連結する。明示台詞を許可した場合でも台詞本文はここへ複製せず、shot-synchronizedな指定台詞だけが唯一の人物発声であると記述する。全音響が無効なら`Complete silence.`。生成BGMだけが有効なら、環境音、物理音及び人物発声がないことを明示し、BGMと矛盾する`Complete silence.`を使用しない。
+
+BGM再利用だけが有効なら、元トラックに含まれる可能性があるボーカル又は他音響層を否定せず、別生成の環境音、物理音及び人物発声を追加しないと記述する。同じBGM内のボーカルへリップシンクする場合、その元ボーカルが唯一の同期発声であり、新しい声を生成しないと記述する。
 
 ### 10.6 non_diegetic_music
 
-Background musicが省略又は`NONE`なら次とする。
+生成BGMとBGM再利用がともに省略されるか、生成BGMが`NONE`なら次とする。
 
 ```text
 non_diegetic_music:
 N/A
 ```
 
-Background musicが指定されれば翻訳済み本文を出力する。H3のBGM生成はランダム性が高いため、再現性又は品質を優先する場合は`BGM: なし`とし、Suno等で生成した音楽を後編集する運用も維持する。
+生成BGMが指定されれば翻訳済み本文を出力する。BGM再利用ではAudio番号、`fully_copy`又は`partially_copy`の意味、audience-only scoreであることを出力する。同じAudio内のボーカルへリップシンクする場合は対象Subject、話者ID及びShotを追加し、元ボーカルを置換又は重複生成しない。
+
+H3のBGM生成はランダム性が高いため、再現性又は品質を優先する場合は`BGM: なし`とし、Suno等で生成した音楽を後編集する運用も維持する。
 
 ## 11. 発声安全規則
 
@@ -410,7 +455,9 @@ Background musicが指定されれば翻訳済み本文を出力する。H3のBG
 - detailed_descriptionにAudioを残さない。
 - overall_soundscapeへ人物発声を追加しない。
 
-Environment、Sound effects又はBackground musicにAudio参照又は台詞がある場合はエラーとし、発声許可を迂回させない。
+Environment、Sound effects又は生成BGM本文にAudio参照又は台詞がある場合はエラーとし、発声許可を迂回させない。BGM Audioは構造化された`BGM再利用`だけで指定する。
+
+`fully_copy`のBGM再利用は元Audio全体を最終音声として使用するため、別生成のEnvironment、Sound effects、通常台詞又は別Audioのリップシンクと併用できない。同じAudio内のボーカルリップシンクは、元信号を増やさず映像だけを同期するため例外として許可する。BGM再利用Audioを同じSceneの声質参照としても使うことはできない。
 
 ## 12. 最終JSON検証
 
@@ -428,6 +475,8 @@ Environment、Sound effects又はBackground musicにAudio参照又は台詞が�
 - 6要素の接頭辞と順序はFull-Reference形式に一致。
 - 6セクションは全て非空。
 - detailed_descriptionのShot番号は1始まりの連番。
+- non_diegetic_music内のAudio参照はsubject_definitions及びretention_analysisにも存在する。
+- BGMが有効なSceneでoverall_soundscapeが`Complete silence.`にならない。
 - durationは1～60のinteger。
 - 継続Sceneは`continuation_mode=guide`だけを持つ。
 - 非継続Sceneはvisual/audio context lengthを0にする。
@@ -537,11 +586,13 @@ set "FORCE_CMAKE=1"
 - 入れ子、未閉鎖、対応しないブロックコメント及びHTMLコメントの拒否
 - 新ディレクティブ正規化
 - Common正規化、順序及び禁止要素
+- Common Audio参照の条件付き適用と非アクティブ化
 - 旧Scene構文拒否
 - Retention固定マーカー
 - Shot時刻の推論前検証
 - Soundscape固定値
 - リップシンクの固定正規化と推論対象外化
+- BGM再利用の固定正規化、推論対象外化、関係及びAudio番号検証
 - BGM本文の保護付き翻訳
 - ユーザー入力の`(Sx)`拒否
 - 全文1推論
@@ -561,6 +612,7 @@ set "FORCE_CMAKE=1"
 - SceneローカルSoundscape
 - 構造化リップシンク正規形
 - Background music格納
+- Background music reuseの構造化格納と生成BGMとの競合拒否
 - 改行差
 
 ### 17.5 JSONGEN
@@ -569,7 +621,7 @@ set "FORCE_CMAKE=1"
 - 空`prompt_prefix`
 - Subject抽出とSubjectless固定文
 - RetentionのSceneフィルタと既定値
-- CommonのSceneフィルタ、配置及び非アクティブ化
+- CommonのSubject/Audio Sceneフィルタ、配置及び非アクティブ化
 - 属性転送の両端検証
 - Shot labelとtimestamp
 - Subject番号に一致する話者IDの内部生成
@@ -577,10 +629,13 @@ set "FORCE_CMAKE=1"
 - 肯定的発声指示の同一行台詞要件
 - Audioの条件付き定義・削除
 - Audio再利用リップシンクの定義、summary、`partially_copy`及びShot展開
+- BGM Audioの`fully_copy`/`partially_copy`、無Subject Scene及び同一Audio内ボーカルリップシンク
+- `fully_copy`と追加音響層の競合拒否
 - 声質参照と信号再利用の競合拒否
 - `retention_analysis`に`(Sx)`がないこと
 - Soundscape許可リストと完全無音
 - BGM生成と`N/A`フォールバック
+- BGM再利用の`non_diegetic_music`展開
 - continuation/reset
 - steps反映
 - 最終JSON再検証
@@ -597,7 +652,7 @@ set "FORCE_CMAKE=1"
 - debug bundle
 - workflows内の新構文
 
-実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、Common、話者ID自動生成、Audio声質参照、Audio再利用リップシンク、BGM生成、Retention、長文再試行を確認する。
+実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、Common、話者ID自動生成、Audio声質参照、Audio再利用リップシンク、BGM生成、BGM Audio再利用、BGM内ボーカルリップシンク、Retention、長文再試行を確認する。
 
 ## 18. README要件
 
@@ -609,13 +664,14 @@ READMEは少なくとも次を含む。
 - 導入手順とGGUF探索先
 - 新Markdownのコピー可能な例
 - Cスタイルコメント構文と制約
-- Commonの条件付き適用
+- CommonのSubject及びAudioに基づく条件付き適用
 - Retentionマーカー
 - Shot時刻規則
 - 話者IDと発声許可
 - Audio再利用リップシンク構文
+- BGM Audio再利用とBGM内ボーカルリップシンク構文
 - 無音フォールバックとAudio除去
-- BGM生成と省略時`N/A`
+- BGM生成、BGM再利用と省略時`N/A`
 - 6セクションJSON例
 - Suno等を使う後編集前提
 - 全UI入力
@@ -627,13 +683,14 @@ READMEは少なくとも次を含む。
 
 - 仕様書、README、実装、system prompt、テスト、同梱workflowが同じ新構文を使用する。
 - コメントを推論前に安全に除外し、改行、行番号及び台詞本文を保持する。
-- CommonがSceneのアクティブSubject集合に従って適用され、それだけでSubjectを有効化しない。
+- CommonがSceneのアクティブSubject及びAudio集合に従って適用され、それだけでSubject又はAudioを有効化しない。
 - ユーザー入力に話者IDがなく、JSONGENがSubject番号に一致するIDを生成する。
 - 暗黙Shotが残っていない。ただし拒否テストは除く。
 - 各Scene promptがFull-Referenceの6セクションを公式順で持つ。
 - Retentionと話者IDの公式制約を満たす。
 - 無発声時にAudio又は人物発声を有効化しない。
-- リップシンクを`audio reuse`と`partially_copy`へ決定論的に変換する。
-- BGMを`non_diegetic_music`へ出力し、省略時は`N/A`とする。
+- 通常リップシンクを`audio reuse`と`partially_copy`へ決定論的に変換する。
+- BGM Audio再利用を指定された`fully_copy`又は`partially_copy`へ変換し、同じAudio内のボーカルリップシンクと統合する。
+- BGM生成又はBGM再利用を`non_diegetic_music`へ出力し、省略時は`N/A`とする。
 - `llama-cpp-python`を自動変更しない。
 - 全自動テストが成功する。

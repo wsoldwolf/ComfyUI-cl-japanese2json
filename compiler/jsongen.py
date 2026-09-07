@@ -11,6 +11,9 @@ from typing import Any, Iterable
 from .errors import JSONGenerationError, JSONValidationError, ProtectedTextError
 from .protected_text import remove_direct_speech
 from .structures import (
+    AUDIO_COPY_RELATIONSHIPS,
+    AUDIO_FULLY_COPY,
+    BackgroundMusicReuse,
     Emd,
     RETENTION_ATTRIBUTE_TRANSFER,
     RETENTION_FULLY_PRESERVED,
@@ -28,6 +31,7 @@ LOGGER = logging.getLogger("cl_japanese2json")
 
 SUBJECT_RE = re.compile(r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>")
 AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
+ANY_AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio\s*[0-9]+\s*(?<!\\)>")
 DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
 LIP_SYNC_LINE_RE = re.compile(
     r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>: "
@@ -83,6 +87,11 @@ NO_DIEGETIC_SOUND = (
     OVERALL_SOUNDSCAPE_PREFIX
     + "No ambience, physical sound, or character vocalization is present."
 )
+NO_SEPARATELY_GENERATED_DIEGETIC_SOUND = (
+    OVERALL_SOUNDSCAPE_PREFIX
+    + "No separately generated ambience, physical sound, or character "
+    "vocalization is added."
+)
 NO_ACTIVE_SUBJECT_BLOCK = (
     SUBJECT_DEFINITIONS_PREFIX
     + "No character subject or reference-image person is active."
@@ -120,15 +129,25 @@ def _referenced_subjects(scene: Scene) -> list[int]:
     return sorted(referenced)
 
 
-def _common_lines_for_scene(emd: Emd, active_subjects: list[int]) -> list[str]:
-    active_set = set(active_subjects)
+def _common_lines_for_scene(
+    emd: Emd,
+    active_subjects: list[int],
+    active_audio: set[int],
+) -> list[str]:
+    active_subject_set = set(active_subjects)
     selected: list[str] = []
     for line in emd.common_prompt:
         searchable = _searchable(line, context="common prompt")
-        referenced = {
+        referenced_subjects = {
             int(match.group(1)) for match in SUBJECT_RE.finditer(searchable)
         }
-        if referenced.issubset(active_set):
+        referenced_audio = {
+            int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(searchable)
+        }
+        if (
+            referenced_subjects.issubset(active_subject_set)
+            and referenced_audio.issubset(active_audio)
+        ):
             selected.append(line)
     return selected
 
@@ -219,6 +238,31 @@ def _validate_soundscape(soundscape: Soundscape, *, context: str) -> None:
                 raise JSONGenerationError(
                     f"{context} {label} cannot contain direct speech or an Audio reference"
                 )
+    music_reuse = soundscape.background_music_reuse
+    if music_reuse is not None:
+        if not isinstance(music_reuse, BackgroundMusicReuse):
+            raise JSONGenerationError(
+                f"{context} background music reuse must be a BackgroundMusicReuse value"
+            )
+        if (
+            not isinstance(music_reuse.audio_number, int)
+            or isinstance(music_reuse.audio_number, bool)
+            or not 1 <= music_reuse.audio_number <= 3
+        ):
+            raise JSONGenerationError(
+                f"{context} background music reuse Audio must be in the Audio 1-3 range"
+            )
+        if (
+            not isinstance(music_reuse.relationship, str)
+            or music_reuse.relationship not in AUDIO_COPY_RELATIONSHIPS
+        ):
+            raise JSONGenerationError(
+                f"{context} has an invalid background music reuse relationship"
+            )
+        if soundscape.background_music is not None:
+            raise JSONGenerationError(
+                f"{context} cannot combine generated background music with background music reuse"
+            )
 
 
 def _scene_allows_dialogue(scene: Scene, scene_number: int) -> bool:
@@ -301,7 +345,13 @@ def _sentence(value: str) -> str:
 
 
 def _overall_soundscape(
-    scene: Scene, allows_dialogue: bool, *, has_background_music: bool
+    scene: Scene,
+    allows_dialogue: bool,
+    *,
+    has_background_music: bool,
+    reuses_background_music: bool,
+    has_generated_dialogue: bool,
+    has_bgm_lip_sync: bool,
 ) -> str:
     environment = (
         []
@@ -321,19 +371,65 @@ def _overall_soundscape(
             "Sound effects: " + " ".join(_sentence(value) for value in sound_effects)
         )
     if allows_dialogue:
-        parts.append(
-            "The only character vocalization is the exact shot-synchronized dialogue "
-            "explicitly specified in this scene."
-        )
+        if has_bgm_lip_sync and not has_generated_dialogue:
+            parts.append(
+                "The only synchronized character vocalization is the exact vocal "
+                "performance already contained in the directly reused audience-only "
+                "music track; no new voice is generated."
+            )
+        else:
+            parts.append(
+                "The only character vocalization is the exact shot-synchronized dialogue "
+                "explicitly specified in this scene."
+            )
+            if has_bgm_lip_sync:
+                parts.append(
+                    "The BGM-linked vocal is reused from the music track rather than "
+                    "generated again."
+                )
     if not parts:
+        if reuses_background_music:
+            return NO_SEPARATELY_GENERATED_DIEGETIC_SOUND
         return NO_DIEGETIC_SOUND if has_background_music else COMPLETE_SILENCE
-    parts.append(
-        "No other ambience, physical sound, or character vocalization is present."
-    )
+    if reuses_background_music:
+        parts.append(
+            "No other separately generated ambience, physical sound, or character "
+            "vocalization is added."
+        )
+    else:
+        parts.append(
+            "No other ambience, physical sound, or character vocalization is present."
+        )
     return OVERALL_SOUNDSCAPE_PREFIX + " ".join(parts)
 
 
-def _non_diegetic_music(scene: Scene) -> str:
+def _non_diegetic_music(
+    scene: Scene,
+    reused_audio: dict[int, ReusedAudioBinding],
+) -> str:
+    music_reuse = scene.soundscape.background_music_reuse
+    if music_reuse is not None:
+        audio = music_reuse.audio_number
+        binding = reused_audio.get(audio)
+        if music_reuse.relationship == AUDIO_FULLY_COPY:
+            text = (
+                f"<Audio {audio}> is directly reused 1:1 as the target video's "
+                "complete audience-only music and final audio track, preserving all "
+                "original audio layers, timing, and mix."
+            )
+        else:
+            text = (
+                f"The background-music signal from <Audio {audio}> is directly reused "
+                "as the audience-only score, preserving its copied layers and timing "
+                "while other audio layers may be generated separately."
+            )
+        if binding is not None:
+            text += (
+                f" Its original vocal layer is used for exact lip synchronization by "
+                f"<Subject {binding.subject}> (S{binding.speaker}) in "
+                f"{_shot_list_text(binding.shot_numbers)}; no replacement vocal is generated."
+            )
+        return NON_DIEGETIC_MUSIC_PREFIX + text
     music = scene.soundscape.background_music
     if music in {None, SOUND_NONE}:
         return NON_DIEGETIC_MUSIC
@@ -475,11 +571,14 @@ def _subject_block(
     active_subjects: list[int],
     voice_audio: dict[int, tuple[int, int]],
     reused_audio: dict[int, ReusedAudioBinding],
+    background_music_reuse: BackgroundMusicReuse | None,
 ) -> str:
-    if not active_subjects:
+    if not active_subjects and background_music_reuse is None:
         return NO_ACTIVE_SUBJECT_BLOCK
 
-    definitions: list[str] = []
+    definitions: list[str] = [] if active_subjects else [
+        "No character subject or reference-image person is active."
+    ]
     for number in active_subjects:
         if number > len(emd.subjects):
             raise JSONGenerationError(
@@ -487,24 +586,43 @@ def _subject_block(
             )
         definition = _without_audio_references(emd.subjects[number - 1])
         definitions.append(f"<Subject {number}> is {definition}")
-    audio_definitions = {
-        audio: (
-            f"<Audio {audio}> is the voice-timbre reference for "
-            f"<Subject {subject}> (S{speaker})."
-        )
-        for audio, (subject, speaker) in voice_audio.items()
-    }
-    audio_definitions.update(
-        {
-            audio: (
+    audio_numbers = set(voice_audio) | set(reused_audio)
+    if background_music_reuse is not None:
+        audio_numbers.add(background_music_reuse.audio_number)
+    audio_definitions: dict[int, str] = {}
+    for audio in sorted(audio_numbers):
+        if audio in voice_audio:
+            subject, speaker = voice_audio[audio]
+            audio_definitions[audio] = (
+                f"<Audio {audio}> is the voice-timbre reference for "
+                f"<Subject {subject}> (S{speaker})."
+            )
+            continue
+        binding = reused_audio.get(audio)
+        if (
+            background_music_reuse is not None
+            and audio == background_music_reuse.audio_number
+        ):
+            if binding is None:
+                audio_definitions[audio] = (
+                    f"<Audio {audio}> is the directly reused audience-only "
+                    "background-music signal."
+                )
+            else:
+                audio_definitions[audio] = (
+                    f"<Audio {audio}> is the directly reused audience-only "
+                    "background-music signal whose original vocal layer is performed "
+                    f"in exact lip synchronization by <Subject {binding.subject}> "
+                    f"(S{binding.speaker}) in {_shot_list_text(binding.shot_numbers)}."
+                )
+            continue
+        if binding is not None:
+            audio_definitions[audio] = (
                 f"<Audio {audio}> is the directly reused spoken-audio signal "
                 f"performed by <Subject {binding.subject}> (S{binding.speaker}) "
                 f"for exact lip synchronization in "
                 f"{_shot_list_text(binding.shot_numbers)}."
             )
-            for audio, binding in reused_audio.items()
-        }
-    )
     definitions.extend(audio_definitions[audio] for audio in sorted(audio_definitions))
     return SUBJECT_DEFINITIONS_PREFIX + "\n".join(definitions)
 
@@ -514,9 +632,10 @@ def _summary_block(
     active_subjects: list[int],
     voice_audio: dict[int, tuple[int, int]],
     reused_audio: dict[int, ReusedAudioBinding],
+    background_music_reuse: BackgroundMusicReuse | None,
 ) -> str:
     task_types = ["reference generation"]
-    if reused_audio:
+    if reused_audio or background_music_reuse is not None:
         task_types.append("audio reuse")
     if voice_audio:
         task_types.append("audio reference")
@@ -535,8 +654,8 @@ def _summary_block(
         )
     else:
         body = (
-            "The target video is an effects-only scene with no active character "
-            "subject or reference-image person."
+            "The target video has no active character subject or reference-image "
+            "person."
         )
     if scene.is_continue:
         body += " The scene continues the preceding generated scene."
@@ -547,13 +666,26 @@ def _summary_block(
             if len(voice_audio) == 1
             else f" {audio_labels} are referenced only for the explicitly specified dialogue."
         )
-    if reused_audio:
-        audio_labels = ", ".join(f"<Audio {number}>" for number in sorted(reused_audio))
+    lip_only_audio = set(reused_audio)
+    if background_music_reuse is not None:
+        lip_only_audio.discard(background_music_reuse.audio_number)
+    if lip_only_audio:
+        audio_labels = ", ".join(
+            f"<Audio {number}>" for number in sorted(lip_only_audio)
+        )
         body += (
             f" {audio_labels} is directly reused for the explicitly transcribed lip-synced dialogue."
-            if len(reused_audio) == 1
+            if len(lip_only_audio) == 1
             else f" {audio_labels} are directly reused for the explicitly transcribed lip-synced dialogue."
         )
+    if background_music_reuse is not None:
+        audio = background_music_reuse.audio_number
+        body += (
+            f" <Audio {audio}> is directly reused as the audience-only background "
+            f"music with the {background_music_reuse.relationship} relationship."
+        )
+        if audio in reused_audio:
+            body += " Its original vocal layer drives the specified lip synchronization."
     return SUMMARY_PREFIX + prefix + " " + body
 
 
@@ -567,8 +699,14 @@ def _retention_block(
     active_subjects: list[int],
     voice_audio: dict[int, tuple[int, int]],
     reused_audio: dict[int, ReusedAudioBinding],
+    background_music_reuse: BackgroundMusicReuse | None,
 ) -> str:
-    if not active_subjects and not voice_audio and not reused_audio:
+    if (
+        not active_subjects
+        and not voice_audio
+        and not reused_audio
+        and background_music_reuse is None
+    ):
         return NO_ACTIVE_RETENTION
 
     rules = {rule.subject_number: rule for rule in emd.retention_rules}
@@ -611,7 +749,7 @@ def _retention_block(
             f"{_sentence(rule.description)}"
         )
 
-    audio_lines = {
+    audio_lines: dict[int, str] = {
         audio: (
             f"<Audio {audio}>: reference - only the voice timbre and delivery are "
             f"referenced for <Subject {subject}>; the source signal and "
@@ -619,17 +757,40 @@ def _retention_block(
         )
         for audio, (subject, _speaker) in voice_audio.items()
     }
-    audio_lines.update(
-        {
-            audio: (
-                f"<Audio {audio}>: partially_copy - the specified spoken-audio "
-                f"signal is copied for <Subject {binding.subject}>'s synchronized "
-                f"dialogue in {_shot_list_text(binding.shot_numbers)}, while other "
-                "audio layers are generated separately."
+    for audio, binding in reused_audio.items():
+        if (
+            background_music_reuse is not None
+            and audio == background_music_reuse.audio_number
+        ):
+            continue
+        audio_lines[audio] = (
+            f"<Audio {audio}>: partially_copy - the specified spoken-audio "
+            f"signal is copied for <Subject {binding.subject}>'s synchronized "
+            f"dialogue in {_shot_list_text(binding.shot_numbers)}, while other "
+            "audio layers are generated separately."
+        )
+    if background_music_reuse is not None:
+        audio = background_music_reuse.audio_number
+        binding = reused_audio.get(audio)
+        if background_music_reuse.relationship == AUDIO_FULLY_COPY:
+            description = (
+                "the complete source audio is reused 1:1 as the target video's "
+                "complete final audio track"
             )
-            for audio, binding in reused_audio.items()
-        }
-    )
+        else:
+            description = (
+                "the source background-music signal is copied as the audience-only "
+                "score while other audio layers may be generated separately"
+            )
+        if binding is not None:
+            description += (
+                f"; its original vocal layer drives <Subject {binding.subject}>'s "
+                f"exact lip synchronization in {_shot_list_text(binding.shot_numbers)}"
+            )
+        audio_lines[audio] = (
+            f"<Audio {audio}>: {background_music_reuse.relationship} - "
+            f"{description}."
+        )
     lines.extend(audio_lines[audio] for audio in sorted(audio_lines))
     return RETENTION_ANALYSIS_PREFIX + "\n".join(lines)
 
@@ -664,13 +825,26 @@ def _with_internal_speaker_ids(line: str, *, context: str) -> str:
     return rendered
 
 
-def _render_shot_line(line: str, *, context: str) -> str:
+def _render_shot_line(
+    line: str,
+    *,
+    context: str,
+    background_music_audio: int | None,
+) -> str:
     lip_sync = LIP_SYNC_LINE_RE.fullmatch(line)
     if lip_sync is None:
         return _with_internal_speaker_ids(line, context=context)
     subject = int(lip_sync.group(1))
     audio = int(lip_sync.group(2))
     dialogue = lip_sync.group(3)
+    if audio == background_music_audio:
+        return (
+            f"<Subject {subject}> (S{subject}) visually performs and lip-syncs "
+            f"exactly to the original vocal line {dialogue} in the directly reused "
+            f"audience-only background music from <Audio {audio}>. The original "
+            "music and vocal signal, words, and timing are preserved; no replacement, "
+            "repetition, or additional vocal is generated."
+        )
     return (
         f"<Subject {subject}> (S{subject}) physically performs the directly reused "
         f"spoken audio from <Audio {audio}> and lip-syncs exactly to {dialogue}. "
@@ -683,6 +857,7 @@ def _detailed_description_block(
     common_lines: list[str],
     scene: Scene,
     voice_audio: dict[int, tuple[int, int]],
+    background_music_audio: int | None,
 ) -> str:
     parts = [_sentence(line) for line in common_lines]
     parts.extend(_sentence(line) for line in scene.preamble)
@@ -696,6 +871,7 @@ def _detailed_description_block(
                 _render_shot_line(
                     line,
                     context=f"Shot {shot_number} line {line_number}",
+                    background_music_audio=background_music_audio,
                 )
             )
             for line_number, line in enumerate(shot.lines, start=1)
@@ -765,10 +941,13 @@ def _validate_common_prompt(emd: Emd) -> None:
             raise JSONGenerationError(
                 f"Common prompt line {line_number} must be a non-empty string"
             )
-        if AUDIO_REFERENCE_RE.search(line):
-            raise JSONGenerationError(
-                f"Common prompt line {line_number} cannot contain an Audio reference"
-            )
+        for audio_tag in ANY_AUDIO_REFERENCE_RE.finditer(line):
+            canonical = AUDIO_REFERENCE_RE.fullmatch(audio_tag.group(0))
+            if canonical is None or not 1 <= int(canonical.group(1)) <= 3:
+                raise JSONGenerationError(
+                    f"Common prompt line {line_number} Audio reference must use "
+                    "canonical <Audio 1>-<Audio 3> syntax"
+                )
         if DIRECT_SPEECH_RE.search(line):
             raise JSONGenerationError(
                 f"Common prompt line {line_number} cannot contain direct speech"
@@ -865,21 +1044,57 @@ def _shot_object(
         allows_dialogue=allows_dialogue,
         generated_dialogue_subjects=generated_dialogue_subjects,
     )
-    conflicting_audio = set(voice_audio) & set(reused_audio)
+    background_music_reuse = scene.soundscape.background_music_reuse
+    background_music_audio = (
+        None
+        if background_music_reuse is None
+        else background_music_reuse.audio_number
+    )
+    reused_audio_numbers = set(reused_audio)
+    if background_music_audio is not None:
+        reused_audio_numbers.add(background_music_audio)
+    conflicting_audio = set(voice_audio) & reused_audio_numbers
     if conflicting_audio:
         labels = ", ".join(
             f"<Audio {number}>" for number in sorted(conflicting_audio)
         )
         raise JSONGenerationError(
             f"Scene {scene_number} assigns {labels} both as a voice-timbre "
-            "reference and as a directly reused lip-sync signal"
+            "reference and as a directly reused audio signal"
         )
-    common_lines = _common_lines_for_scene(emd, active_subjects)
-    detailed = _detailed_description_block(common_lines, scene, voice_audio)
+    if (
+        background_music_reuse is not None
+        and background_music_reuse.relationship == AUDIO_FULLY_COPY
+    ):
+        extra_lip_sync_audio = set(reused_audio) - {background_music_audio}
+        has_separate_sound = any(
+            value not in {None, SOUND_NONE}
+            for value in (
+                scene.soundscape.environment,
+                scene.soundscape.sound_effects,
+            )
+        )
+        if generated_dialogue_subjects or extra_lip_sync_audio or has_separate_sound:
+            raise JSONGenerationError(
+                f"Scene {scene_number} uses fully_copy for background music, so it "
+                "cannot add generated dialogue, another reused vocal signal, "
+                "environment, or sound effects"
+            )
+    common_lines = _common_lines_for_scene(
+        emd,
+        active_subjects,
+        set(voice_audio) | reused_audio_numbers,
+    )
+    detailed = _detailed_description_block(
+        common_lines,
+        scene,
+        voice_audio,
+        background_music_audio,
+    )
     detailed_audio = {
         int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(detailed)
     }
-    expected_audio = set(voice_audio) | set(reused_audio)
+    expected_audio = set(voice_audio) | reused_audio_numbers
     unexpected_audio = detailed_audio - expected_audio
     if unexpected_audio:
         labels = ", ".join(f"<Audio {number}>" for number in sorted(unexpected_audio))
@@ -887,19 +1102,49 @@ def _shot_object(
             f"Scene {scene_number} uses Audio reference(s) without an active voice-reference or lip-sync binding: {labels}"
         )
 
-    has_background_music = scene.soundscape.background_music not in {None, SOUND_NONE}
+    has_background_music = (
+        scene.soundscape.background_music not in {None, SOUND_NONE}
+        or background_music_reuse is not None
+    )
+    has_bgm_lip_sync = (
+        background_music_audio is not None
+        and background_music_audio in reused_audio
+    )
 
     prompt = [
-        _subject_block(emd, scene_number, active_subjects, voice_audio, reused_audio),
-        _summary_block(scene, active_subjects, voice_audio, reused_audio),
-        _retention_block(emd, scene, active_subjects, voice_audio, reused_audio),
+        _subject_block(
+            emd,
+            scene_number,
+            active_subjects,
+            voice_audio,
+            reused_audio,
+            background_music_reuse,
+        ),
+        _summary_block(
+            scene,
+            active_subjects,
+            voice_audio,
+            reused_audio,
+            background_music_reuse,
+        ),
+        _retention_block(
+            emd,
+            scene,
+            active_subjects,
+            voice_audio,
+            reused_audio,
+            background_music_reuse,
+        ),
         detailed,
         _overall_soundscape(
             scene,
             allows_dialogue,
             has_background_music=has_background_music,
+            reuses_background_music=background_music_reuse is not None,
+            has_generated_dialogue=bool(generated_dialogue_subjects),
+            has_bgm_lip_sync=has_bgm_lip_sync,
         ),
-        _non_diegetic_music(scene),
+        _non_diegetic_music(scene, reused_audio),
     ]
 
     result: dict[str, Any] = {
@@ -1010,10 +1255,17 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
                     f"Shot {index} prompt section {position + 1} must not be empty"
                 )
         music = prompt[5][len(NON_DIEGETIC_MUSIC_PREFIX):].strip()
-        if AUDIO_REFERENCE_RE.search(music) or DIRECT_SPEECH_RE.search(music):
+        if DIRECT_SPEECH_RE.search(music):
             raise JSONValidationError(
-                f"Shot {index} non_diegetic_music cannot contain an Audio reference or direct speech"
+                f"Shot {index} non_diegetic_music cannot contain direct speech"
             )
+        for audio_match in AUDIO_REFERENCE_RE.finditer(music):
+            audio_label = audio_match.group(0)
+            if audio_label not in prompt[0] or audio_label not in prompt[2]:
+                raise JSONValidationError(
+                    f"Shot {index} non_diegetic_music uses {audio_label} without "
+                    "matching subject_definitions and retention_analysis entries"
+                )
         if music != "N/A" and prompt[4] == COMPLETE_SILENCE:
             raise JSONValidationError(
                 f"Shot {index} overall_soundscape cannot claim complete silence when background music is active"

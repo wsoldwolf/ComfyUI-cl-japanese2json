@@ -423,18 +423,22 @@ class LLMJ2ETests(unittest.TestCase):
     def test_common_directive_is_translated_once_and_rebuilt(self) -> None:
         llm = FakeLLM()
         output = llmj2e.translate_markdown(
-            "# 共通プロンプト\n* 共通。\n# シーン\n## ショット\n* 動作。",
+            "# 共通プロンプト\n* <Audio 1>の時間軸を維持する。\n"
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 1> 部分コピー",
             llm,
             "sys",
             max_tokens=64,
         )
         self.assertIn("# Common", output)
+        self.assertIn("<Audio 1>", output)
         records = request_records(llm.calls[0]["messages"])
         self.assertEqual([record["section"] for record in records], ["Common", "Scene"])
 
     def test_common_restrictions_and_explicit_speaker_ids_fail_before_inference(self) -> None:
         invalid = (
-            "# 共通プロンプト\n* <Audio 1>を使う。\n# シーン\n## ショット\n* 動作。",
+            "# 共通プロンプト\n* <Audio 4>を使う。\n# シーン\n## ショット\n* 動作。",
+            "# 共通プロンプト\n* <Audio 01>を使う。\n# シーン\n## ショット\n* 動作。",
             "# 共通プロンプト\n* 「台詞」。\n# シーン\n## ショット\n* 動作。",
             "# シーン\n## ショット\n* <Subject 1> (S1)が「台詞」と言う。",
         )
@@ -516,6 +520,48 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIn("* Sound effects: NONE", output)
         self.assertIn("* Vocalization: EXPLICIT_DIALOGUE_ONLY", output)
         self.assertIn("* Background music: NONE", output)
+
+    def test_background_music_reuse_is_canonicalized_without_llm_translation(self) -> None:
+        for japanese, canonical in (
+            ("完全コピー", "fully_copy"),
+            ("部分コピー", "partially_copy"),
+        ):
+            with self.subTest(japanese=japanese):
+                source = (
+                    "# シーン\n## ショット\n* 動作。\n## 音響\n"
+                    f"* BGM再利用: <Audio 1> {japanese}"
+                )
+                llm = FakeLLM()
+                output = llmj2e.translate_markdown(
+                    source, llm, "sys", max_tokens=64
+                )
+                self.assertIn(
+                    f"* Background music reuse: <Audio 1> {canonical}",
+                    output,
+                )
+                records = request_records(llm.calls[0]["messages"])
+                self.assertEqual(len(records), 1)
+                self.assertNotIn("Audio", records[0]["text"])
+
+    def test_invalid_background_music_reuse_fails_before_inference(self) -> None:
+        invalid_documents = (
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 4> 完全コピー",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 01> 完全コピー",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 1> 参照",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM: ピアノ。\n* BGM再利用: <Audio 1> 部分コピー",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* BGM再利用: <Audio 1> 部分コピー\n* BGM: ピアノ。",
+        )
+        for text in invalid_documents:
+            with self.subTest(text=text):
+                llm = FakeLLM()
+                with self.assertRaises(errors.TranslationError):
+                    llmj2e.translate_markdown(text, llm, "sys", max_tokens=64)
+                self.assertEqual(llm.calls, [])
 
     def test_soundscape_is_scene_only_and_rejects_invalid_bullets(self) -> None:
         invalid_documents = (

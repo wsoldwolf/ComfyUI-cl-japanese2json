@@ -8,6 +8,8 @@ import re
 from .comments import strip_c_comments
 from .errors import MarkdownParseError
 from .structures import (
+    AUDIO_COPY_RELATIONSHIPS,
+    BackgroundMusicReuse,
     Emd,
     RETENTION_ATTRIBUTE_TRANSFER,
     RETENTION_RELATIONSHIPS,
@@ -30,6 +32,10 @@ VALID_SHOT_RE = re.compile(r"^## Shot(?: ((?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)sec
 SOUNDSCAPE_LINE_RE = re.compile(
     r"^\* (Environment|Sound effects|Vocalization|Background music): (.+)$"
 )
+BACKGROUND_MUSIC_REUSE_LINE_RE = re.compile(
+    r"^\* Background music reuse: <Audio ([1-3])> "
+    r"(fully_copy|partially_copy)$"
+)
 LIP_SYNC_LINE_RE = re.compile(
     r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>: "
     r"(<d>(?:(?!<d>|</d>).)+</d>)$"
@@ -40,7 +46,8 @@ RETENTION_LINE_RE = re.compile(
     r"(?: -> <Subject ([1-9][0-9]*)>)?: (.+)$"
 )
 SPEAKER_ID_RE = re.compile(r"(?<!\\)\(S[1-9][0-9]*\)")
-AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio [1-9][0-9]*(?<!\\)>")
+AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
+ANY_AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio\s*[0-9]+\s*(?<!\\)>")
 DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
 
 
@@ -84,6 +91,26 @@ def _set_soundscape_value(
     *,
     line_number: int,
 ) -> None:
+    reuse_match = BACKGROUND_MUSIC_REUSE_LINE_RE.fullmatch(line)
+    if reuse_match is not None:
+        if (
+            soundscape.background_music is not None
+            or soundscape.background_music_reuse is not None
+        ):
+            raise MarkdownParseError(
+                f"Duplicate or conflicting canonical background music value at line {line_number}"
+            )
+        audio_text, relationship = reuse_match.groups()
+        if relationship not in AUDIO_COPY_RELATIONSHIPS:
+            raise MarkdownParseError(
+                f"Invalid canonical background music reuse relationship at line {line_number}"
+            )
+        soundscape.background_music_reuse = BackgroundMusicReuse(
+            audio_number=int(audio_text),
+            relationship=relationship,
+        )
+        return
+
     match = SOUNDSCAPE_LINE_RE.fullmatch(line)
     if match is None:
         raise MarkdownParseError(
@@ -96,6 +123,10 @@ def _set_soundscape_value(
         attribute = "sound_effects"
     elif label == "Background music":
         attribute = "background_music"
+        if soundscape.background_music_reuse is not None:
+            raise MarkdownParseError(
+                f"Duplicate or conflicting canonical background music value at line {line_number}"
+            )
     else:
         attribute = "vocalization"
         if value not in {SOUND_NONE, VOCALIZATION_EXPLICIT_DIALOGUE_ONLY}:
@@ -240,6 +271,7 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                         current_scene.soundscape.sound_effects,
                         current_scene.soundscape.vocalization,
                         current_scene.soundscape.background_music,
+                        current_scene.soundscape.background_music_reuse,
                     )
                 ):
                     raise MarkdownParseError(
@@ -362,10 +394,13 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                 )
             )
         elif state == "COMMON":
-            if AUDIO_REFERENCE_RE.search(body):
-                raise MarkdownParseError(
-                    f"Common prompt cannot contain an Audio reference at line {line_number}"
-                )
+            for audio_tag in ANY_AUDIO_REFERENCE_RE.finditer(body):
+                canonical = AUDIO_REFERENCE_RE.fullmatch(audio_tag.group(0))
+                if canonical is None or not 1 <= int(canonical.group(1)) <= 3:
+                    raise MarkdownParseError(
+                        f"Common prompt Audio reference at line {line_number} "
+                        "must use canonical <Audio 1>-<Audio 3> syntax"
+                    )
             if DIRECT_SPEECH_RE.search(body):
                 raise MarkdownParseError(
                     f"Common prompt cannot contain direct speech at line {line_number}"
@@ -408,6 +443,7 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                 current_scene.soundscape.sound_effects,
                 current_scene.soundscape.vocalization,
                 current_scene.soundscape.background_music,
+                current_scene.soundscape.background_music_reuse,
             )
         ):
             raise MarkdownParseError(
