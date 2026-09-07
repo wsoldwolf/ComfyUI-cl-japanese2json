@@ -15,6 +15,7 @@ from .structures import (
     RETENTION_RELATIONSHIPS,
     SOUND_NONE,
     VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
+    VOCALIZATION_REFERENCE_AUDIO_ONLY,
     RetentionRule,
     Scene,
     Shot,
@@ -39,8 +40,8 @@ BACKGROUND_MUSIC_REUSE_LINE_RE = re.compile(
     r"([0-9]{2,}:[0-5][0-9]\.[0-9]{3}))?$"
 )
 LIP_SYNC_LINE_RE = re.compile(
-    r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>: "
-    r"(<d>(?:(?!<d>|</d>).)+</d>)$"
+    r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>"
+    r"(?:: (<d>(?:(?!<d>|</d>).)+</d>))?$"
 )
 RETENTION_LINE_RE = re.compile(
     r"^\* <Subject ([1-9][0-9]*)> "
@@ -157,7 +158,11 @@ def _set_soundscape_value(
             )
     else:
         attribute = "vocalization"
-        if value not in {SOUND_NONE, VOCALIZATION_EXPLICIT_DIALOGUE_ONLY}:
+        if value not in {
+            SOUND_NONE,
+            VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
+            VOCALIZATION_REFERENCE_AUDIO_ONLY,
+        }:
             raise MarkdownParseError(
                 f"Invalid canonical vocalization value at line {line_number}"
             )
@@ -455,14 +460,16 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                     raise MarkdownParseError(
                         f"Invalid canonical lip-sync bullet at line {line_number}"
                     )
-                transcript = lip_sync.group(3)[3:-4]
-                spoken_text = re.sub(
-                    r"^\[[^\]]+\]", "", transcript, count=1
-                ).strip()
-                if not spoken_text:
-                    raise MarkdownParseError(
-                        f"Canonical lip-sync dialogue at line {line_number} must not be empty"
-                    )
+                protected_dialogue = lip_sync.group(3)
+                if protected_dialogue is not None:
+                    transcript = protected_dialogue[3:-4]
+                    spoken_text = re.sub(
+                        r"^\[[^\]]+\]", "", transcript, count=1
+                    ).strip()
+                    if not spoken_text:
+                        raise MarkdownParseError(
+                            f"Canonical lip-sync dialogue at line {line_number} must not be empty"
+                        )
             current_shot.lines.append(body)
         elif state == "SOUNDSCAPE" and current_soundscape is not None:
             _set_soundscape_value(current_soundscape, line, line_number=line_number)

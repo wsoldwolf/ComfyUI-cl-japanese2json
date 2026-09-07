@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 from typing import Any
 
 from .compiler.errors import CLJapaneseToJSONError
@@ -23,6 +24,7 @@ from .system_prompt import load_system_prompt, system_prompt_fingerprint
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
+PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 0.25
 
 try:  # Available only when loaded by ComfyUI.
     from comfy.utils import ProgressBar as _ComfyProgressBar  # type: ignore
@@ -293,7 +295,12 @@ class CLJapaneseToJSONGGUF:
                 return (self.last_json_text,)
 
             debug_events: list[dict[str, Any]] = []
-            progress_state: dict[str, Any] = {"key": None, "bar": None}
+            progress_state: dict[str, Any] = {
+                "key": None,
+                "bar": None,
+                "last_update_at": 0.0,
+                "last_value": -1,
+            }
 
             def report_translation_progress(
                 batch_number: int,
@@ -308,7 +315,26 @@ class CLJapaneseToJSONGGUF:
                 if progress_state["key"] != key:
                     progress_state["key"] = key
                     progress_state["bar"] = _ComfyProgressBar(total)
+                    progress_state["last_update_at"] = 0.0
+                    progress_state["last_value"] = -1
+                now = time.monotonic()
+                force_update = current <= 0 or (
+                    current >= total and progress_state["last_value"] < total
+                )
+                if (
+                    not force_update
+                    and current == progress_state["last_value"]
+                ):
+                    return
+                if (
+                    not force_update
+                    and now - progress_state["last_update_at"]
+                    < PROGRESS_UI_UPDATE_INTERVAL_SECONDS
+                ):
+                    return
                 progress_state["bar"].update_absolute(current, total)
+                progress_state["last_update_at"] = now
+                progress_state["last_value"] = current
 
             translation_progress = (
                 report_translation_progress

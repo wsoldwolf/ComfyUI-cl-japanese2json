@@ -20,6 +20,7 @@ from .structures import (
     RETENTION_RELATIONSHIPS,
     SOUND_NONE,
     VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
+    VOCALIZATION_REFERENCE_AUDIO_ONLY,
     RetentionRule,
     Scene,
     Shot,
@@ -38,8 +39,8 @@ AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
 ANY_AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio\s*[0-9]+\s*(?<!\\)>")
 DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
 LIP_SYNC_LINE_RE = re.compile(
-    r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>: "
-    r"(<d>(?:(?!<d>|</d>).)+</d>)$"
+    r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>"
+    r"(?:: (<d>(?:(?!<d>|</d>).)+</d>))?$"
 )
 SPEAKER_ID_RE = re.compile(r"(?<!\\)\(S([1-9][0-9]*)\)")
 SPEECH_CUE_RE = re.compile(
@@ -115,6 +116,11 @@ class ReusedAudioBinding:
     subject: int
     speaker: int
     shot_numbers: list[int] = field(default_factory=list)
+    audio_driven_shot_numbers: list[int] = field(default_factory=list)
+
+    @property
+    def is_audio_driven(self) -> bool:
+        return bool(self.audio_driven_shot_numbers)
 
 
 def _scene_lines(scene: Scene) -> Iterable[str]:
@@ -210,6 +216,14 @@ def _handle_unprotected_speech_cues(
 
 def _scene_has_direct_speech(scene: Scene) -> bool:
     return any(DIRECT_SPEECH_RE.search(line) is not None for line in _scene_lines(scene))
+
+
+def _scene_has_audio_driven_lip_sync(scene: Scene) -> bool:
+    for line in _scene_lines(scene):
+        match = LIP_SYNC_LINE_RE.fullmatch(line)
+        if match is not None and match.group(3) is None:
+            return True
+    return False
 
 
 def _validate_scene_structure(scene: Scene, scene_number: int) -> None:
@@ -337,11 +351,30 @@ def _scene_allows_dialogue(
 ) -> bool:
     mode = scene.soundscape.vocalization
     has_direct_speech = _scene_has_direct_speech(scene)
+    has_audio_driven_lip_sync = _scene_has_audio_driven_lip_sync(scene)
 
     if mode == VOCALIZATION_EXPLICIT_DIALOGUE_ONLY:
+        if has_audio_driven_lip_sync:
+            raise JSONGenerationError(
+                f"Scene {scene_number} uses transcript-free lip synchronization, "
+                "but vocalization is set to explicit dialogue; use "
+                "'* 発声: 参照音声のみ' under '## 音響'"
+            )
         if not has_direct_speech:
             raise JSONGenerationError(
                 f"Scene {scene_number} enables explicit dialogue but contains no protected direct speech"
+            )
+    elif mode == VOCALIZATION_REFERENCE_AUDIO_ONLY:
+        if has_direct_speech:
+            raise JSONGenerationError(
+                f"Scene {scene_number} enables reference-audio-only vocalization but "
+                "contains protected direct speech; remove the transcript or use "
+                "'* 発声: 指定台詞のみ' under '## 音響'"
+            )
+        if not has_audio_driven_lip_sync:
+            raise JSONGenerationError(
+                f"Scene {scene_number} enables reference-audio-only vocalization but "
+                "contains no transcript-free lip-sync bullet"
             )
     elif mode not in {None, SOUND_NONE}:
         raise JSONGenerationError(
@@ -351,6 +384,12 @@ def _scene_allows_dialogue(
         raise JSONGenerationError(
             f"Scene {scene_number} contains protected direct speech, but vocalization is not enabled; "
             "add '* 発声: 指定台詞のみ' under '## 音響'"
+        )
+    elif has_audio_driven_lip_sync:
+        raise JSONGenerationError(
+            f"Scene {scene_number} contains transcript-free lip synchronization, but "
+            "reference-audio-only vocalization is not enabled; add "
+            "'* 発声: 参照音声のみ' under '## 音響'"
         )
 
     for line_number, line in enumerate(scene.preamble, start=1):
@@ -370,7 +409,10 @@ def _scene_allows_dialogue(
                     cues=_positive_speech_cues(line),
                     speech_guard=speech_guard,
                 )
-    return mode == VOCALIZATION_EXPLICIT_DIALOGUE_ONLY
+    return mode in {
+        VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
+        VOCALIZATION_REFERENCE_AUDIO_ONLY,
+    }
 
 
 def _line_dialogue_subject_matches(
@@ -428,6 +470,7 @@ def _overall_soundscape(
     reuses_background_music: bool,
     has_generated_dialogue: bool,
     has_bgm_lip_sync: bool,
+    has_audio_driven_lip_sync: bool,
 ) -> str:
     environment = (
         []
@@ -449,9 +492,15 @@ def _overall_soundscape(
     if allows_dialogue:
         if has_bgm_lip_sync and not has_generated_dialogue:
             parts.append(
-                "The only synchronized character vocalization is the exact vocal "
+                "The only synchronized character vocalization is the original vocal "
                 "performance already contained in the directly reused audience-only "
                 "music track; no new voice is generated."
+            )
+        elif has_audio_driven_lip_sync:
+            parts.append(
+                "The only synchronized character vocalization is the original human-"
+                "vocal signal directly reused from the specified reference audio; no "
+                "new voice or words are generated."
             )
         else:
             parts.append(
@@ -512,8 +561,13 @@ def _non_diegetic_music(
                 "while other audio layers may be generated separately."
             )
         if binding is not None:
+            synchronization = (
+                "audio-driven lip synchronization"
+                if binding.is_audio_driven
+                else "exact lip synchronization"
+            )
             text += (
-                f" Its original vocal layer is used for exact lip synchronization by "
+                f" Its original vocal layer is used for {synchronization} by "
                 f"<Subject {binding.subject}> (S{binding.speaker}) in "
                 f"{_shot_list_text(binding.shot_numbers)}; no replacement vocal is generated."
             )
@@ -631,15 +685,17 @@ def _reused_audio_bindings(
                 )
             subject = int(match.group(1))
             audio = int(match.group(2))
-            transcript = match.group(3)[3:-4]
-            spoken_text = re.sub(
-                r"^\[[^\]]+\]", "", transcript, count=1
-            ).strip()
-            if not spoken_text:
-                raise JSONGenerationError(
-                    f"Scene {scene_number} Shot {shot_number} line {line_number} "
-                    "has an empty lip-sync transcript"
-                )
+            protected_dialogue = match.group(3)
+            if protected_dialogue is not None:
+                transcript = protected_dialogue[3:-4]
+                spoken_text = re.sub(
+                    r"^\[[^\]]+\]", "", transcript, count=1
+                ).strip()
+                if not spoken_text:
+                    raise JSONGenerationError(
+                        f"Scene {scene_number} Shot {shot_number} line {line_number} "
+                        "has an empty lip-sync transcript"
+                    )
             existing = bindings.get(audio)
             if existing is not None and existing.subject != subject:
                 raise JSONGenerationError(
@@ -650,6 +706,11 @@ def _reused_audio_bindings(
                 bindings[audio] = existing
             if shot_number not in existing.shot_numbers:
                 existing.shot_numbers.append(shot_number)
+            if (
+                protected_dialogue is None
+                and shot_number not in existing.audio_driven_shot_numbers
+            ):
+                existing.audio_driven_shot_numbers.append(shot_number)
     return bindings
 
 
@@ -699,20 +760,33 @@ def _subject_block(
                     f"background-music signal{range_text}."
                 )
             else:
+                synchronization = (
+                    "audio-driven lip synchronization"
+                    if binding.is_audio_driven
+                    else "exact lip synchronization"
+                )
                 audio_definitions[audio] = (
                     f"<Audio {audio}> is the directly reused audience-only "
                     f"background-music signal{range_text}. Its original vocal layer is performed "
-                    f"in exact lip synchronization by <Subject {binding.subject}> "
+                    f"in {synchronization} by <Subject {binding.subject}> "
                     f"(S{binding.speaker}) in {_shot_list_text(binding.shot_numbers)}."
                 )
             continue
         if binding is not None:
-            audio_definitions[audio] = (
-                f"<Audio {audio}> is the directly reused spoken-audio signal "
-                f"performed by <Subject {binding.subject}> (S{binding.speaker}) "
-                f"for exact lip synchronization in "
-                f"{_shot_list_text(binding.shot_numbers)}."
-            )
+            if binding.is_audio_driven:
+                audio_definitions[audio] = (
+                    f"<Audio {audio}> is the directly reused human-vocal audio signal "
+                    f"performed by <Subject {binding.subject}> (S{binding.speaker}) "
+                    "for audio-driven lip synchronization in "
+                    f"{_shot_list_text(binding.shot_numbers)}."
+                )
+            else:
+                audio_definitions[audio] = (
+                    f"<Audio {audio}> is the directly reused spoken-audio signal "
+                    f"performed by <Subject {binding.subject}> (S{binding.speaker}) "
+                    "for exact lip synchronization in "
+                    f"{_shot_list_text(binding.shot_numbers)}."
+                )
     definitions.extend(audio_definitions[audio] for audio in sorted(audio_definitions))
     return SUBJECT_DEFINITIONS_PREFIX + "\n".join(definitions)
 
@@ -763,11 +837,16 @@ def _summary_block(
         audio_labels = ", ".join(
             f"<Audio {number}>" for number in sorted(lip_only_audio)
         )
-        body += (
-            f" {audio_labels} is directly reused for the explicitly transcribed lip-synced dialogue."
-            if len(lip_only_audio) == 1
-            else f" {audio_labels} are directly reused for the explicitly transcribed lip-synced dialogue."
+        audio_driven = any(
+            reused_audio[audio].is_audio_driven for audio in lip_only_audio
         )
+        purpose = (
+            "audio-driven lip synchronization"
+            if audio_driven
+            else "the explicitly transcribed lip-synced dialogue"
+        )
+        verb = "is" if len(lip_only_audio) == 1 else "are"
+        body += f" {audio_labels} {verb} directly reused for {purpose}."
     if background_music_reuse is not None:
         audio = background_music_reuse.audio_number
         source_range = _background_music_source_range(background_music_reuse)
@@ -859,12 +938,20 @@ def _retention_block(
             and audio == background_music_reuse.audio_number
         ):
             continue
-        audio_lines[audio] = (
-            f"<Audio {audio}>: partially_copy - the specified spoken-audio "
-            f"signal is copied for <Subject {binding.subject}>'s synchronized "
-            f"dialogue in {_shot_list_text(binding.shot_numbers)}, while other "
-            "audio layers are generated separately."
-        )
+        if binding.is_audio_driven:
+            audio_lines[audio] = (
+                f"<Audio {audio}>: partially_copy - the original human-vocal signal "
+                f"and timing are copied for <Subject {binding.subject}>'s synchronized "
+                f"vocal performance in {_shot_list_text(binding.shot_numbers)}, while "
+                "other audio layers are generated separately."
+            )
+        else:
+            audio_lines[audio] = (
+                f"<Audio {audio}>: partially_copy - the specified spoken-audio "
+                f"signal is copied for <Subject {binding.subject}>'s synchronized "
+                f"dialogue in {_shot_list_text(binding.shot_numbers)}, while other "
+                "audio layers are generated separately."
+            )
     if background_music_reuse is not None:
         audio = background_music_reuse.audio_number
         binding = reused_audio.get(audio)
@@ -886,9 +973,14 @@ def _retention_block(
                 "score while other audio layers may be generated separately"
             )
         if binding is not None:
+            synchronization = (
+                "audio-driven lip synchronization"
+                if binding.is_audio_driven
+                else "exact lip synchronization"
+            )
             description += (
                 f"; its original vocal layer drives <Subject {binding.subject}>'s "
-                f"exact lip synchronization in {_shot_list_text(binding.shot_numbers)}"
+                f"{synchronization} in {_shot_list_text(binding.shot_numbers)}"
             )
         audio_lines[audio] = (
             f"<Audio {audio}>: {background_music_reuse.relationship} - "
@@ -952,6 +1044,32 @@ def _render_shot_line(
     subject = int(lip_sync.group(1))
     audio = int(lip_sync.group(2))
     dialogue = lip_sync.group(3)
+    if dialogue is None:
+        if audio == background_music_audio:
+            return (
+                f"<Subject {subject}> (S{subject}) visually performs and lip-syncs "
+                f"directly to the original vocal layer in the directly reused "
+                f"audience-only background music from <Audio {audio}>. Treat the "
+                "current reference-audio interval as the sole authority for vocal "
+                "content and timing. Match its phoneme timing, visible mouth closures, "
+                "sustained notes, and phrase boundaries without restarting the song "
+                "or vocal phrase at this scene boundary. If a phrase crosses an incoming "
+                "continuation boundary, continue its current mouth shape and timing "
+                "seamlessly. During instrumental passages or any interval without a "
+                "human vocal, keep the lips closed. Preserve the original music and "
+                "vocal signal exactly; do not infer, generate, replace, repeat, "
+                "translate, or add words or vocal sounds."
+            )
+        return (
+            f"<Subject {subject}> (S{subject}) visually performs and lip-syncs "
+            f"directly to the original human-vocal signal from <Audio {audio}>. "
+            "Treat the current reference-audio interval as the sole authority for "
+            "vocal content and timing. Match its phoneme timing, visible mouth "
+            "closures, sustained sounds, and phrase boundaries. During any interval "
+            "without a human vocal, keep the lips closed. Preserve the original audio "
+            "signal exactly; do not infer, generate, replace, repeat, translate, or "
+            "add words or vocal sounds."
+        )
     if audio == background_music_audio:
         return (
             f"<Subject {subject}> (S{subject}) visually performs and lip-syncs "
@@ -1253,6 +1371,9 @@ def _shot_object(
         background_music_audio is not None
         and background_music_audio in reused_audio
     )
+    has_audio_driven_lip_sync = any(
+        binding.is_audio_driven for binding in reused_audio.values()
+    )
 
     prompt = [
         _subject_block(
@@ -1286,6 +1407,7 @@ def _shot_object(
             reuses_background_music=background_music_reuse is not None,
             has_generated_dialogue=bool(generated_dialogue_subjects),
             has_bgm_lip_sync=has_bgm_lip_sync,
+            has_audio_driven_lip_sync=has_audio_driven_lip_sync,
         ),
         _non_diegetic_music(scene, reused_audio),
     ]

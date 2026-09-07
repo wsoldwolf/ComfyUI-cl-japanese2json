@@ -183,6 +183,21 @@ class MarkdownParserTests(unittest.TestCase):
             ],
         )
 
+    def test_audio_driven_lip_sync_and_vocalization_mode_are_preserved(self) -> None:
+        emd = parse_markdown(
+            "# Subjects\n* one.\n# Scene\n## Shot\n"
+            "* Lip sync: <Subject 1> <- <Audio 1>\n"
+            "## Soundscape\n* Vocalization: REFERENCE_AUDIO_ONLY"
+        )
+        self.assertEqual(
+            emd.scenes[0].shots[0].lines,
+            ["Lip sync: <Subject 1> <- <Audio 1>"],
+        )
+        self.assertEqual(
+            emd.scenes[0].soundscape.vocalization,
+            "REFERENCE_AUDIO_ONLY",
+        )
+
     def test_invalid_canonical_lip_sync_is_rejected(self) -> None:
         invalid_lines = (
             "Lip sync: <Subject 1> <- <Audio 1>: missing dialogue",

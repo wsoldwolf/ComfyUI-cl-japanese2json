@@ -123,6 +123,30 @@ class CoreIntegrationTests(unittest.TestCase):
         self.assertIn("visually performs and lip-syncs exactly", prompt[3])
         self.assertIn("directly copied 1:1", prompt[5])
 
+    def test_audio_driven_bgm_lip_sync_without_lyrics_end_to_end(self) -> None:
+        source = """# サブジェクト
+* <Picture 1>を外観参照として使用する歌手。
+
+# シーン 8秒
+## ショット
+* <Subject 1>がカメラを見ながら音楽に合わせて身体を動かす。
+* リップシンク: <Subject 1> <- <Audio 1>
+## 音響
+* 発声: 参照音声のみ
+* BGM再利用: <Audio 1> 完全コピー"""
+        canonical = llmj2e.translate_markdown(
+            source, FakeLLM(), "system", max_tokens=128
+        )
+        self.assertIn("Lip sync: <Subject 1> <- <Audio 1>", canonical)
+        self.assertIn("Vocalization: REFERENCE_AUDIO_ONLY", canonical)
+        parsed = jsongen.validate_final_json(
+            jsongen.generate_json(mdparse.parse_markdown(canonical))
+        )
+        prompt = parsed["shots"][0]["prompt"]
+        self.assertIn("audio-driven lip synchronization", prompt[0])
+        self.assertIn("sole authority for vocal content and timing", prompt[3])
+        self.assertNotIn("<d>", prompt[3])
+
     def test_54_second_bgm_is_sliced_across_six_scenes(self) -> None:
         ranges = (
             (10, "00:00.000-00:10.000"),

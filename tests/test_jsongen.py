@@ -16,6 +16,7 @@ Shot = structures.Shot
 Soundscape = structures.Soundscape
 BackgroundMusicReuse = structures.BackgroundMusicReuse
 EXPLICIT_DIALOGUE_ONLY = structures.VOCALIZATION_EXPLICIT_DIALOGUE_ONLY
+REFERENCE_AUDIO_ONLY = structures.VOCALIZATION_REFERENCE_AUDIO_ONLY
 
 
 def make_shot(*lines: str, start_ms: int = 0) -> Shot:
@@ -180,6 +181,50 @@ class JSONGenerationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(errors.JSONGenerationError, "not enabled"):
             jsongen.generate_json(emd)
+
+    def test_audio_driven_lip_sync_uses_reference_audio_without_transcript(self) -> None:
+        emd = Emd(
+            subjects=["a character based on <Picture 1>."],
+            scenes=[
+                Scene(
+                    shots=[make_shot("Lip sync: <Subject 1> <- <Audio 1>")],
+                    soundscape=Soundscape(vocalization=REFERENCE_AUDIO_ONLY),
+                )
+            ],
+        )
+        prompt = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"]
+        self.assertIn("directly reused human-vocal audio signal", prompt[0])
+        self.assertIn("audio-driven lip synchronization", prompt[1])
+        self.assertIn("original human-vocal signal and timing", prompt[2])
+        self.assertIn("sole authority for vocal content and timing", prompt[3])
+        self.assertIn("During any interval without a human vocal", prompt[3])
+        self.assertIn("do not infer, generate, replace", prompt[3])
+        self.assertNotIn("<d>", prompt[3])
+        self.assertIn("no new voice or words are generated", prompt[4])
+
+    def test_audio_driven_lip_sync_requires_matching_vocalization_mode(self) -> None:
+        transcript_free = "Lip sync: <Subject 1> <- <Audio 1>"
+        transcribed = "Lip sync: <Subject 1> <- <Audio 1>: <d>[Japanese]x</d>"
+        invalid_scenes = (
+            Scene(shots=[make_shot(transcript_free)]),
+            Scene(
+                shots=[make_shot(transcript_free)],
+                soundscape=Soundscape(vocalization=EXPLICIT_DIALOGUE_ONLY),
+            ),
+            Scene(
+                shots=[make_shot(transcribed)],
+                soundscape=Soundscape(vocalization=REFERENCE_AUDIO_ONLY),
+            ),
+            Scene(
+                shots=[make_shot("<Subject 1> moves.")],
+                soundscape=Soundscape(vocalization=REFERENCE_AUDIO_ONLY),
+            ),
+        )
+        for scene in invalid_scenes:
+            with self.subTest(scene=scene), self.assertRaises(
+                errors.JSONGenerationError
+            ):
+                jsongen.generate_json(Emd(subjects=["one."], scenes=[scene]))
 
     def test_audio_cannot_be_voice_reference_and_reused_signal(self) -> None:
         emd = Emd(
@@ -697,6 +742,32 @@ class JSONGenerationTests(unittest.TestCase):
         )
         self.assertIn("<Audio 1> is directly reused 1:1", prompt[5])
         self.assertIn("original vocal layer", prompt[5])
+
+    def test_reused_background_music_drives_audio_only_lip_sync(self) -> None:
+        scene = Scene(
+            duration=8,
+            shots=[
+                make_shot(
+                    "<Subject 1> faces the camera.",
+                    "Lip sync: <Subject 1> <- <Audio 1>",
+                )
+            ],
+            soundscape=Soundscape(
+                vocalization=REFERENCE_AUDIO_ONLY,
+                background_music_reuse=BackgroundMusicReuse(1, "fully_copy"),
+            ),
+        )
+        prompt = json.loads(
+            jsongen.generate_json(Emd(subjects=["a singer."], scenes=[scene]))
+        )["shots"][0]["prompt"]
+        self.assertIn("audio-driven lip synchronization", prompt[0])
+        self.assertIn("original vocal layer", prompt[2])
+        self.assertIn("current reference-audio interval", prompt[3])
+        self.assertIn("without restarting the song", prompt[3])
+        self.assertIn("instrumental passages", prompt[3])
+        self.assertNotIn("<d>", prompt[3])
+        self.assertIn("no new voice is generated", prompt[4])
+        self.assertIn("audio-driven lip synchronization", prompt[5])
 
     def test_partially_copied_background_music_can_mix_other_sound_layers(self) -> None:
         scene = Scene(

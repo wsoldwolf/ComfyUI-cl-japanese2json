@@ -4,7 +4,7 @@
 
 本書は`cl_japanese2json`コンパイラとPCM無音パディング機能を独立したComfyUIカスタムノードとして提供する実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`である。
 
-本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、条件付きCommon、Python生成の話者ID、Retention、Audio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
+本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、条件付きCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
@@ -98,7 +98,7 @@ optionalは次である。
 - `strict`: 保護台詞を同じ行に持たない肯定的な英語発声キューをエラーにする。
 - `warn`: ComfyUIへWARNINGを出し、該当英文を変更せずJSON生成を続行する。Audio参照、話者ID又は発声許可は自動追加せず、無音フォールバックも変更しないため、MiniMax H3が想定外の人物音声を生成する可能性がある。
 
-`warn`でも、台詞とSoundscape発声許可の不一致、不正なダイレクトスピーチ、参照、リップシンク又はSoundscape構造はエラーである。
+`warn`でも、台詞又は台詞なしリップシンクとSoundscape発声許可の不一致、不正なダイレクトスピーチ、参照、リップシンク又はSoundscape構造はエラーである。
 
 各値は実行時にも型と範囲を検証する。Booleanを整数として受理してはならない。
 
@@ -213,9 +213,9 @@ ComfyUIの`folder_names_and_paths`に`LLM`が登録されている場合、各�
 
 ComfyUI実行時は`stream=True`で応答を逐次消費し、チャンクを連結して非ストリーミング時と同じ`choices[0].message.content`及び`finish_reason`を持つ応答へ再構築してからLLMJ2Eへ返す。ストリームがusageを返さない場合だけ、利用可能なtokenizer又は既存の保守的見積りでusageを補完する。翻訳、停止条件及び応答検証規則はストリーミングの有無で変更しない。
 
-各バッチの各attemptはComfyUIの`ProgressBar`を1個作成し、受信した非空contentチャンク数を`max_tokens`に対する概算進捗として通知する。チャンクとトークンは必ずしも1対1ではなく、応答が`max_tokens`より前に終了し得るため、これは残り時間又は厳密なトークン割合ではない。検証成功時は完了値へ進め、再試行又は次バッチでは新しいバーを0から開始する。ComfyUI外での単体利用ではProgressBarを必須としない。
+各バッチの各attemptはComfyUIの`ProgressBar`を1個作成し、受信した非空contentチャンク数を`max_tokens`に対する概算進捗として通知する。内部カウンターは毎チャンク更新する一方、`ProgressBar.update_absolute()`はUI/WebSocketイベントの滞留を避けるため最大4回/秒に制限する。開始値、完了値及びattempt切替は強制通知する。チャンクとトークンは必ずしも1対1ではなく、応答が`max_tokens`より前に終了し得るため、これは残り時間又は厳密なトークン割合ではない。検証成功時は完了値へ進め、再試行又は次バッチでは新しいバーを0から開始する。ComfyUI外での単体利用ではProgressBarを必須としない。
 
-推論呼出し中はdaemon heartbeatを動かし、10秒ごとにバッチ番号、総バッチ数、attempt番号、経過秒及び受信済みcontentチャンク数をINFOログへ記録する。最初のチャンク以前も0件として記録し、入力評価中の死活確認を可能にする。heartbeatは応答又は例外時に必ず停止し、プロンプト本文及び途中の翻訳本文を記録しない。
+推論呼出し中はdaemon heartbeatを動かし、10秒ごとにバッチ番号、総バッチ数、attempt番号、経過秒、受信済みcontentチャンク数、最終チャンクからの経過時間及び進捗callback実行中フラグをINFOログへ記録する。最初のチャンク以前も0件として記録し、入力評価中の死活確認を可能にする。`progress_callback_active=true`のまま最終チャンク時刻だけが古くなる場合はUI通知内の待機、`false`ならllama.cppから次のチャンクを待っている状態と判断できる。heartbeatは応答又は例外時に必ず停止し、プロンプト本文及び途中の翻訳本文を記録しない。
 
 Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追加する。
 
@@ -225,11 +225,13 @@ Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追
 
 ユーザーメッセージ末尾にも`/no_think`を置く。ただし、`/no_think`はsoft switchなのでこれだけをhard switchとして扱わない。Qwen3かつロード済みllama-cpp-pythonが`create_completion()`を提供する場合は、system/userメッセージをChatMLへ変換し、assistant生成開始位置へ空の`<think>\n\n</think>\n\n`を事前配置してtext completionを実行する。戻り値は通常のchat completion形式へ正規化する。停止条件には既存の構造停止トークンに加えて`<|im_end|>`及び`<|endoftext|>`を含める。
 
-ストリーム応答は生本文を応答全体検証より先に保持する。先頭に連続する正常閉鎖thinking blockは除去できる。残留thinking、長さ上限又は構造不正があっても、構造マーカーで安全に分離できる各区間を個別検証し、正常区間を保持して未解決区間だけを再送する。未閉鎖thinking又は余分な前置きが最初の構造マーカーより前にある場合も、後続区間の回収を試みる。重複、欠落又は順序不正マーカーは隣接境界を曖昧にする区間だけを失敗させる。翻訳区間内のthinkingを文字列置換で無条件削除してはならない。
+ストリーム応答は生本文を応答全体検証より先に保持する。位置にかかわらず正常に閉じた完全なthinking blockはQwen制御エンベロープとして除去できるが、不完全なタグを推測して削除しない。残留thinking、長さ上限又は構造不正があっても、構造マーカーで安全に分離できる各区間を個別検証し、正常区間を保持して未解決区間だけを再送する。未閉鎖thinking又は余分な前置きが最初の構造マーカーより前にある場合も、後続区間の回収を試みる。重複、欠落又は順序不正マーカーは隣接境界を曖昧にする区間だけを失敗させる。
+
+未解決区間の再送時は参照用`CLJ...X`へ対応する標準参照タグを一時注釈し、モデルによる代名詞化を抑止する。応答がCLJトークン又は正確な標準参照タグのどちらを維持しても元のCLJトークンへ正規化してから通常検証する。それでも原文の文頭参照が省略された場合は、原文と英文の文境界が一意に対応するときだけ文頭へ決定論的に復元する。文中参照は推測復元しない。日本語台詞プレースホルダは展開しない。
 
 ### 6.6 コンテキスト計算
 
-保持モデルがtokenizerを公開する場合は実トークン数を推定し、利用できない場合はUTF-8バイト長から保守的に見積もる。実効`n_ctx`に収まる範囲で翻訳区間をまとめる。1区間が単独でも入らない場合は明示エラーとし、途中分割しない。
+保持モデルがtokenizerを公開する場合は実トークン数を推定し、利用できない場合はUTF-8バイト長から保守的に見積もる。実効`n_ctx`に収まり、かつ1バッチ最大64区間となる範囲で翻訳区間をまとめる。長文を無制限な単一生成にせず、一方で一行単位推論にも戻さない。1区間が単独でも入らない場合は明示エラーとし、途中分割しない。
 
 ## 7. システムプロンプト
 
@@ -364,17 +366,21 @@ Shot内の構造化リップシンクバレットは次とする。
 
 ```text
 * リップシンク: <Subject N> <- <Audio N> 「正確な台詞」
+* リップシンク: <Subject N> <- <Audio N>
 ```
 
-Subject 1～4、Audio 1～3及び空でない台詞1個を必須とする。LLMJ2Eはこのバレットを翻訳ストリームへ含めず、参照と台詞をPythonで検証して次の正規形へ固定変換する。
+Subject 1～4及びAudio 1～3を必須とする。台詞指定形式は空でない台詞1個を必須とし、参照音声駆動形式は台詞を持たない。LLMJ2Eはどちらのバレットも翻訳ストリームへ含めず、Pythonで検証して次の正規形へ固定変換する。
 
 ```text
 * Lip sync: <Subject N> <- <Audio N>: <d>[Japanese]正確な台詞</d>
+* Lip sync: <Subject N> <- <Audio N>
 ```
 
 MDPARSEは正規形をShot行の元位置に保持する。JSONGENは通常の発話Audio再利用を`audio reuse`、`partially_copy`及び対象Subjectの`(SN)`へ展開する。同じAudioを複数Subjectへ割り当てること、又は同一Sceneで声質参照と信号再利用へ競合させることはエラーとする。
 
 同じAudioがSceneの`BGM再利用`にも指定されている場合、そのリップシンクは独立した発話音声ではなく、再利用BGM内の元ボーカルを人物が歌唱演技する指定として展開する。記載された台詞は歌詞の正本であり、元BGMのボーカル信号、語句及びタイミングを保持して、置換又は追加ボーカルを生成しない。
+
+参照音声駆動形式では、Audioの現在区間を発声内容とタイミングの唯一の正本とする。文字起こし又は歌詞推測は行わず、音素時刻、口の閉鎖、持続音及びフレーズ境界へ同期する固定英文を生成する。人声のない区間又は間奏では口を閉じ、Scene境界で曲若しくは歌唱フレーズを再開始せず、継続境界をまたぐフレーズは現在の口形と時刻を継続する。単語又は歌詞の生成、置換、反復、翻訳及び追加を禁止する。
 
 構造化リップシンク行自体が発声又は歌唱指示を兼ねる。別のShot行へダイレクトスピーチのない肯定的な発声又は歌唱指示を追加した場合は、通常の発声安全規則により`strict`ではエラー、`warn`では警告付きで通過させる。
 
@@ -396,7 +402,7 @@ MDPARSEは正規形をShot行の元位置に保持する。JSONGENは通常の�
 
 ### 9.6 Soundscape
 
-Soundscapeは各Sceneの`Soundscape`値へ保存する。フィールドはEnvironment、Sound effects、Vocalization、Background music及び構造化されたBackground music reuseである。発声省略又は`なし`は無発声、BGM生成とBGM再利用の両方を省略すれば`non_diegetic_music: N/A`である。全項目の省略は完全無音である。
+Soundscapeは各Sceneの`Soundscape`値へ保存する。フィールドはEnvironment、Sound effects、Vocalization、Background music及び構造化されたBackground music reuseである。発声は`なし`、`指定台詞のみ`又は`参照音声のみ`であり、それぞれ`NONE`、`EXPLICIT_DIALOGUE_ONLY`又は`REFERENCE_AUDIO_ONLY`へ固定変換する。発声省略又は`なし`は無発声、BGM生成とBGM再利用の両方を省略すれば`non_diegetic_music: N/A`である。全項目の省略は完全無音である。
 
 生成BGMは任意の日本語説明をLLMで英訳する。楽器、テンポ、リズム及び音量変化を対象とし、Audio参照、ダイレクトスピーチ又は具体的な歌詞は受理しない。劇中人物にも聞こえる音楽は生成BGMではなくShot本文へ書く。
 
@@ -423,8 +429,8 @@ MDPARSEは`BackgroundMusicReuse(audio_number, relationship, source_start_ms, sou
 - `partially_copy`には`MM:SS.mmm-MM:SS.mmm`形式の元音源時間範囲を任意で指定できる。分は2桁以上、秒は`00`～`59`、ミリ秒は3桁、区切りはASCIIハイフンとする。
 - 時間範囲は増加順で、その長さをScene durationとミリ秒単位で一致させる。JSONGENは元区間をScene先頭から末尾へ1:1で割り当てる。
 - 時間範囲付き`partially_copy`は、元区間の音楽、ボーカル、編曲、楽器構成、テンポ、リズム、タイミング及び内部ミックスを保持し、再構成、再生成、スタイル変更、リタイミング、ループ、再開始及びクロスフェードを禁止する固定英文を出力する。
-- BGM内ボーカルへ同期する場合は、Shotの`リップシンク`と`BGM再利用`に同じAudio番号を書き、実際のボーカルと同じ正確な歌詞をリップシンクへ記載する。
-- Audio内容の文字起こし又は歌詞推測は行わない。
+- BGM内ボーカルへ同期する場合は、Shotの`リップシンク`と`BGM再利用`に同じAudio番号を書く。正確な歌詞を持つ台詞指定形式又は歌詞を持たない参照音声駆動形式のどちらかをScene単位で選択する。
+- Audio内容の文字起こし又は歌詞推測は行わない。参照音声駆動形式ではAudio信号自体が正本である。
 
 ## 10. Full-Reference 6セクション
 
@@ -458,6 +464,12 @@ No character subject or reference-image person is active.
 
 ```text
 <Audio N> is the directly reused spoken-audio signal performed by <Subject M> (Sx) for exact lip synchronization in [Shot K].
+```
+
+参照音声駆動形式では次の役割を使用する。
+
+```text
+<Audio N> is the directly reused human-vocal audio signal performed by <Subject M> (Sx) for audio-driven lip synchronization in [Shot K].
 ```
 
 BGM再利用Audioも独立行で定義する。BGM内ボーカルのリップシンクがある場合は、同じAudio定義へ対象Subject、話者ID及びShotを統合する。
@@ -495,7 +507,9 @@ Scene-wide style and premise.
 
 有効Audioがその話者のShot本文に明示されていなければ、声質とdeliveryだけを使い、元の音声信号又は元発話を追加しない固定文をShotへ追加する。
 
-構造化リップシンク行は、指定Subjectが指定Audioの元信号と正確な台詞を物理的に発声し、その信号へ口を正確に同期する自然文へ置換する。置換、反復又は追加発声を禁止する固定文を続ける。
+台詞指定の構造化リップシンク行は、指定Subjectが指定Audioの元信号と正確な台詞を物理的に発声し、その信号へ口を正確に同期する自然文へ置換する。置換、反復又は追加発声を禁止する固定文を続ける。
+
+参照音声駆動の構造化リップシンク行は、Audioの現在区間を唯一の内容及び時刻情報として口形を同期し、人声のない区間で口を閉じ、Scene境界で再開始せず、歌詞を推測又は生成しない固定文へ置換する。
 
 同じAudioがBGM再利用にも指定されていれば、元BGM内のボーカル、歌詞及びタイミングを保持した歌唱演技として展開する。独立した置換ボーカル又は追加ボーカルを生成しない。
 
@@ -522,11 +536,13 @@ H3のBGM生成はランダム性が高く、BGM再利用の固定文及び時間
 
 ## 11. 発声安全規則
 
-発声は次の三重条件を満たす場合だけ有効である。
+通常台詞及び台詞指定リップシンクの発声は次の三重条件を満たす場合だけ有効である。
 
 1. Shot本文に`<d>...</d>`がある。
 2. 同じ行で台詞より前に`<Subject N>`がある。
 3. SceneのVocalizationが`EXPLICIT_DIALOGUE_ONLY`である。
+
+参照音声駆動リップシンクは、Shotに台詞なし`Lip sync: <Subject N> <- <Audio N>`があり、SceneのVocalizationが`REFERENCE_AUDIO_ONLY`で、同じSceneに保護台詞がない場合だけ有効である。このモードはAudio区間に既に含まれる人声の視覚同期だけを許可し、新しい発声内容を許可しない。
 
 さらに、肯定的な発声動詞を持つ行は同じ行にダイレクトスピーチを必要とする。別行又は別Shotの台詞で条件を満たしたことにしない。話者IDはSubject番号から内部生成し、ユーザー指定を受理しない。
 
@@ -534,9 +550,9 @@ H3のBGM生成はランダム性が高く、BGM再利用の固定文及び時間
 
 検出語は会話、ナレーション、朗読、歌唱及び人物由来の非言語発声（笑い、息を呑む、溜め息、鼻歌、うめき等）を対象とする。Environment又はSound effectsとして指定する非人物音は対象外である。
 
-保護台詞があるのにVocalizationが無効、Vocalizationが`EXPLICIT_DIALOGUE_ONLY`なのに保護台詞がない、又は構造化リップシンク、参照若しくはSoundscapeが不正な場合は、`warn`でもエラーとする。
+保護台詞があるのにVocalizationが無効、Vocalizationが`EXPLICIT_DIALOGUE_ONLY`なのに保護台詞がない、台詞なしリップシンクと`REFERENCE_AUDIO_ONLY`が対にならない、又は構造化リップシンク、参照若しくはSoundscapeが不正な場合は、`warn`でもエラーとする。
 
-構造化リップシンクも同じ発声許可を必要とする。台詞は必須で、Audioから推測又は自動文字起こしを行わない。純粋なリップシンクだけのSubjectでは、Subject定義内のAudio声質参照を有効化せず、リップシンクバレットのAudioを信号再利用として有効化する。
+台詞指定の構造化リップシンクは`EXPLICIT_DIALOGUE_ONLY`を、参照音声駆動の構造化リップシンクは`REFERENCE_AUDIO_ONLY`を必要とする。Audioから推測又は自動文字起こしを行わない。純粋なリップシンクだけのSubjectでは、Subject定義内のAudio声質参照を有効化せず、リップシンクバレットのAudioを信号再利用として有効化する。
 
 無発声Sceneでは次を行う。
 
@@ -682,12 +698,12 @@ set "FORCE_CMAKE=1"
 - Retention固定マーカー
 - Shot時刻の推論前検証
 - Soundscape固定値
-- リップシンクの固定正規化と推論対象外化
+- 台詞指定及び参照音声駆動リップシンクの固定正規化と推論対象外化
 - BGM再利用の固定正規化、推論対象外化、関係、Audio番号及び元音源時間範囲検証
 - BGM本文の保護付き翻訳
 - ユーザー入力の`(Sx)`拒否
-- 全文1推論
-- コンテキスト時のレコード境界バッチ
+- 64区間以下の短文書を1推論
+- 65区間以上又はコンテキスト不足時のレコード境界バッチ
 - プレースホルダ欠落、重複、移動
 - thinking、コードフェンス、切断、日本語残留
 - 検証済み区間保持と未解決区間再試行
@@ -701,7 +717,7 @@ set "FORCE_CMAKE=1"
 - Shot開始時刻と昇順
 - 空Shotと空Soundscape
 - SceneローカルSoundscape
-- 構造化リップシンク正規形
+- 台詞あり及び台詞なしの構造化リップシンク正規形
 - Background music格納
 - Background music reuseの構造化格納と生成BGMとの競合拒否
 - 改行差
@@ -716,11 +732,11 @@ set "FORCE_CMAKE=1"
 - 属性転送の両端検証
 - Shot labelとtimestamp
 - Subject番号に一致する話者IDの内部生成
-- 発声三重条件
+- 台詞指定の発声三重条件と参照音声駆動モードの対応条件
 - 肯定的発声指示の同一行台詞要件
 - speech_guardのstrictエラー、warnログ継続及び構造エラー非緩和
 - Audioの条件付き定義・削除
-- Audio再利用リップシンクの定義、summary、`partially_copy`及びShot展開
+- 台詞指定及び参照音声駆動Audio再利用リップシンクの定義、summary、`partially_copy`及びShot展開
 - BGM Audioの`fully_copy`/`partially_copy`、時間範囲の1:1割当て、無Subject Scene及び同一Audio内ボーカルリップシンク
 - `fully_copy`と追加音響層の競合拒否
 - 声質参照と信号再利用の競合拒否
@@ -754,7 +770,7 @@ set "FORCE_CMAKE=1"
 - 十分長い音声を切らないことと不正AUDIO/Plan/パラメータの拒否
 - 同梱BGM workflowがパディング後の同一AUDIOをLoop Start、Current及びAssembleへ渡すこと
 
-実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、Common、話者ID自動生成、Audio声質参照、Audio再利用リップシンク、BGM生成、BGM Audio再利用、BGM内ボーカルリップシンク、Retention、長文再試行を確認する。
+実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、Common、話者ID自動生成、Audio声質参照、台詞指定及び参照音声駆動リップシンク、BGM生成、BGM Audio再利用、BGM内ボーカルリップシンク、Retention、長文再試行を確認する。
 
 ## 18. README要件
 
@@ -770,7 +786,7 @@ READMEは少なくとも次を含む。
 - Retentionマーカー
 - Shot時刻規則
 - 話者IDと発声許可
-- Audio再利用リップシンク構文
+- 台詞指定及び参照音声駆動Audio再利用リップシンク構文
 - BGM Audio再利用とBGM内ボーカルリップシンク構文
 - 無音フォールバックとAudio除去
 - BGM生成、BGM再利用と省略時`N/A`
@@ -793,6 +809,7 @@ READMEは少なくとも次を含む。
 - Retentionと話者IDの公式制約を満たす。
 - 無発声時にAudio又は人物発声を有効化しない。
 - 通常リップシンクを`audio reuse`と`partially_copy`へ決定論的に変換する。
+- 歌詞なしリップシンクを`REFERENCE_AUDIO_ONLY`と対応付け、Audio区間駆動の固定英文へ変換する。
 - BGM Audio再利用を指定された`fully_copy`又は`partially_copy`へ変換し、同じAudio内のボーカルリップシンクと統合する。
 - BGM生成又はBGM再利用を`non_diegetic_music`へ出力し、省略時は`N/A`とする。
 - `llama-cpp-python`を自動変更しない。

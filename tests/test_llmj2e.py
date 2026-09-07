@@ -528,6 +528,22 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertNotIn("こんにちは", llm.calls[0]["messages"][-1]["content"])
 
+    def test_audio_driven_lip_sync_is_canonicalized_without_transcript(self) -> None:
+        source = (
+            "# サブジェクト\n* 人物。\n"
+            "# シーン 5秒\n## ショット\n"
+            "* リップシンク: <Subject 1> <- <Audio 1>\n"
+            "## 音響\n* 発声: 参照音声のみ\n"
+            "* BGM再利用: <Audio 1> 完全コピー"
+        )
+        llm = FakeLLM()
+        output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=128)
+        self.assertIn("* Lip sync: <Subject 1> <- <Audio 1>", output)
+        self.assertIn("* Vocalization: REFERENCE_AUDIO_ONLY", output)
+        records = request_records(llm.calls[0]["messages"])
+        self.assertEqual(len(records), 1)
+        self.assertNotIn("Lip sync", llm.calls[0]["messages"][-1]["content"])
+
     def test_lip_sync_word_without_directive_colon_is_ordinary_prose(self) -> None:
         source = (
             "# サブジェクト\n* 人物。\n"
@@ -548,7 +564,6 @@ class LLMJ2ETests(unittest.TestCase):
 
     def test_invalid_lip_sync_fails_before_inference(self) -> None:
         invalid = (
-            "# シーン\n## ショット\n* リップシンク: <Subject 1> <- <Audio 1>",
             "# シーン\n## ショット\n* リップシンク: <Subject 5> <- <Audio 1> 「台詞」",
             "# シーン\n## ショット\n* リップシンク: <Subject 1> <- <Audio 4> 「台詞」",
             "# シーン\n## ショット\n* リップシンク: <Subject 1> <- <Audio 1> 「」",
@@ -573,6 +588,15 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIn("* Sound effects: NONE", output)
         self.assertIn("* Vocalization: EXPLICIT_DIALOGUE_ONLY", output)
         self.assertIn("* Background music: NONE", output)
+
+        audio_only = llmj2e.translate_markdown(
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* 発声: 参照音声のみ",
+            FakeLLM(),
+            "sys",
+            max_tokens=64,
+        )
+        self.assertIn("* Vocalization: REFERENCE_AUDIO_ONLY", audio_only)
 
     def test_background_music_reuse_is_canonicalized_without_llm_translation(self) -> None:
         for japanese_value, canonical_value in (
@@ -665,7 +689,7 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIn("# Scene", output)
         self.assertEqual(len(llm.calls), 1)
         self.assertTrue(
-            any("Ignored 1 leading Qwen thinking block(s)" in line for line in captured.output)
+            any("Ignored 1 closed Qwen thinking block(s)" in line for line in captured.output)
         )
 
     def test_multiple_leading_qwen_thinking_blocks_are_ignored(self) -> None:
@@ -686,10 +710,10 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertIn("# Scene", output)
         self.assertEqual(len(llm.calls), 1)
         self.assertTrue(
-            any("Ignored 2 leading Qwen thinking block(s)" in line for line in captured.output)
+            any("Ignored 2 closed Qwen thinking block(s)" in line for line in captured.output)
         )
 
-    def test_embedded_thinking_retries_only_contaminated_record(self) -> None:
+    def test_embedded_closed_thinking_block_is_removed_without_retry(self) -> None:
         def embedded_think(kwargs):
             records = request_records(kwargs["messages"])
 
@@ -701,25 +725,107 @@ class LLMJ2ETests(unittest.TestCase):
 
             return default_stream_translation(kwargs["messages"], transform=transform)
 
-        retry_record_counts = []
-
-        def retry_response(kwargs):
-            retry_record_counts.append(len(request_records(kwargs["messages"])))
-            return default_stream_translation(kwargs["messages"])
-
         source = "# シーン\n## ショット\n* 一。\n* 二。\n* 三。"
-        llm = FakeLLM([embedded_think, retry_response])
-        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+        llm = FakeLLM([embedded_think])
+        with self.assertLogs("cl_japanese2json", level="INFO") as captured:
             output = llmj2e.translate_markdown(
                 source, llm, "sys", max_tokens=128, retry_max=1
             )
 
         self.assertEqual(output.count("* The action occurs ."), 3)
         self.assertNotIn("<think>", output)
-        self.assertEqual(retry_record_counts, [1])
+        self.assertEqual(len(llm.calls), 1)
         self.assertTrue(
             any(
-                "Recovered 2/3 valid text segment(s)" in line
+                "Ignored 1 closed Qwen thinking block(s)" in line
+                for line in captured.output
+            )
+        )
+
+    def test_retry_annotates_reference_token_and_accepts_reference_alias(self) -> None:
+        def omit_reference(kwargs):
+            return default_stream_translation(
+                kwargs["messages"],
+                transform=lambda _: "The horse remains still. She looks down the road.",
+            )
+
+        def keep_retry_alias(kwargs):
+            records = request_records(kwargs["messages"])
+            token = records[0]["protected_placeholders"][0]
+            self.assertIn(f"{token}(<Subject 1>)", records[0]["text"])
+            return default_stream_translation(
+                kwargs["messages"],
+                transform=lambda _: (
+                    "The horse remains still. <Subject 1> looks down the road."
+                ),
+            )
+
+        source = (
+            "# シーン\n## ショット\n"
+            "* 馬は静止している。<Subject 1>は街道を見る。"
+        )
+        llm = FakeLLM([omit_reference, keep_retry_alias])
+        output = llmj2e.translate_markdown(
+            source, llm, "sys", max_tokens=128, retry_max=1
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn(
+            "* The horse remains still. <Subject 1> looks down the road.",
+            output,
+        )
+
+    def test_retry_annotation_is_removed_when_private_token_is_copied(self) -> None:
+        def omit_reference(kwargs):
+            return default_stream_translation(
+                kwargs["messages"], transform=lambda _: "She looks down the road."
+            )
+
+        def copy_token_and_annotation(kwargs):
+            def transform(record):
+                token = record["protected_placeholders"][0]
+                return f"The action occurs {token}(<Subject 1>)."
+
+            return default_stream_translation(kwargs["messages"], transform=transform)
+
+        source = "# シーン\n## ショット\n* <Subject 1>は街道を見る。"
+        llm = FakeLLM([omit_reference, copy_token_and_annotation])
+        output = llmj2e.translate_markdown(
+            source, llm, "sys", max_tokens=128, retry_max=1
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("* The action occurs <Subject 1>.", output)
+        self.assertNotIn("()", output)
+
+    def test_retry_recovers_omitted_sentence_head_subject_reference(self) -> None:
+        def omit_reference(kwargs):
+            return default_stream_translation(
+                kwargs["messages"],
+                transform=lambda _: (
+                    "The horse remains still. She looks down the road."
+                ),
+            )
+
+        source = (
+            "# シーン\n## ショット\n"
+            "* 馬は静止している。<Subject 1>は街道を見る。"
+        )
+        llm = FakeLLM([omit_reference, omit_reference])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(
+                source, llm, "sys", max_tokens=128, retry_max=1
+            )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn(
+            "* The horse remains still. <Subject 1> looks down the road.",
+            output,
+        )
+        self.assertTrue(
+            any(
+                "Recovered 1 omitted sentence-head reference placeholder(s)"
+                in line
                 for line in captured.output
             )
         )
@@ -832,7 +938,7 @@ class LLMJ2ETests(unittest.TestCase):
                     max_tokens=64,
                 )
 
-    def test_missing_placeholder_is_rejected(self) -> None:
+    def test_mid_sentence_missing_placeholder_is_rejected(self) -> None:
         def missing(kwargs):
             return default_stream_translation(
                 kwargs["messages"],
@@ -841,7 +947,7 @@ class LLMJ2ETests(unittest.TestCase):
 
         with self.assertRaises(errors.TranslationError):
             llmj2e.translate_markdown(
-                "# シーン\n## ショット\n* <Subject 1>が動く。",
+                "# シーン\n## ショット\n* 画面中央で<Subject 1>が動く。",
                 FakeLLM([missing, missing]),
                 "sys",
                 max_tokens=64,
@@ -990,6 +1096,22 @@ class LLMJ2ETests(unittest.TestCase):
             [f"R{index:06d}" for index in range(1, 26)],
         )
 
+    def test_large_document_is_bounded_to_sixty_four_records_per_inference(self) -> None:
+        source = "# シーン\n## ショット\n" + "\n".join(
+            f"* 動作{index}。" for index in range(65)
+        )
+        llm = FakeLLM(n_ctx=65536)
+        output = llmj2e.translate_markdown(
+            source, llm, "sys", max_tokens=128
+        )
+
+        self.assertEqual(output.count("* "), 65)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(
+            [len(request_records(call["messages"])) for call in llm.calls],
+            [64, 1],
+        )
+
     def test_single_record_context_overflow_is_explicit(self) -> None:
         llm = FakeLLM(n_ctx=100)
         with self.assertRaisesRegex(errors.TranslationError, "does not fit"):
@@ -1083,8 +1205,8 @@ class LLMJ2ETests(unittest.TestCase):
         source = (
             "# シーン\n"
             "## ショット\n"
-            "* <Subject 1>が動く。\n"
-            "* <Subject 2>が止まる。"
+            "* 画面左で<Subject 1>が動く。\n"
+            "* 画面右で<Subject 2>が止まる。"
         )
         llm = FakeLLM([fail_both, resolve_first_only])
         output = llmj2e.translate_markdown(

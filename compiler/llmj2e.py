@@ -24,11 +24,15 @@ LOGGER = logging.getLogger("cl_japanese2json")
 MAX_SEED = 4_294_967_295
 RETRY_SEED_STRIDE = 1_000_003
 INFERENCE_HEARTBEAT_SECONDS = 10.0
+MAX_RECORDS_PER_INFERENCE = 64
 CODE_FENCE_RE = re.compile(r"```", re.IGNORECASE)
 THINK_RE = re.compile(r"<\s*/?\s*think\b", re.IGNORECASE)
-LEADING_THINK_BLOCK_RE = re.compile(
-    r"\A\s*<\s*think\s*>.*?<\s*/\s*think\s*>\s*",
+THINK_BLOCK_RE = re.compile(
+    r"<\s*think\s*>.*?<\s*/\s*think\s*>",
     re.IGNORECASE | re.DOTALL,
+)
+REFERENCE_LABEL_RE = re.compile(
+    r"<(?:Picture|Video|Audio|Subject) [1-9][0-9]*>"
 )
 SUBJECT_WRAPPER_RE = re.compile(r"\A<Subject ([1-9][0-9]*)> is (.+)\Z")
 SUBJECT_LABEL_RE = re.compile(
@@ -101,6 +105,7 @@ SOUNDSCAPE_PREFIXES = {
 SOUNDSCAPE_FIXED_VALUES = {
     "なし": "NONE",
     "指定台詞のみ": "EXPLICIT_DIALOGUE_ONLY",
+    "参照音声のみ": "REFERENCE_AUDIO_ONLY",
 }
 RETENTION_MARKERS = {
     "完全に保持": "fully_preserved",
@@ -118,7 +123,8 @@ JAPANESE_SHOT_RE = re.compile(
 )
 JAPANESE_LIP_SYNC_RE = re.compile(
     r"リップシンク\s*[:：]\s*"
-    r"<Subject ([0-9]+)>\s*<-\s*<Audio ([0-9]+)>\s*(.+)"
+    r"<Subject ([0-9]+)>\s*<-\s*<Audio ([0-9]+)>"
+    r"(?:\s+(.+))?"
 )
 JAPANESE_LIP_SYNC_DIRECTIVE_PREFIX_RE = re.compile(r"リップシンク\s*[:：]")
 JAPANESE_BGM_REUSE_RE = re.compile(
@@ -269,6 +275,7 @@ def _lip_sync_record(
     if match is None:
         raise TranslationError(
             f"Invalid lip-sync bullet at line {line_number}; use "
+            "'* リップシンク: <Subject N> <- <Audio N>' or "
             "'* リップシンク: <Subject N> <- <Audio N> 「台詞」'"
         )
     subject_text, audio_text, source_dialogue = match.groups()
@@ -281,6 +288,15 @@ def _lip_sync_record(
     if audio_text != str(audio) or not 1 <= audio <= 3:
         raise TranslationError(
             f"Lip-sync Audio at line {line_number} must be in the Audio 1-3 range"
+        )
+
+    if source_dialogue is None:
+        return TranslationRecord(
+            record_id=record_id,
+            section="Shot",
+            block_index=block_index,
+            payload=None,
+            translated=f"Lip sync: <Subject {subject}> <- <Audio {audio}>",
         )
 
     dialogue_payload = protect_text(source_dialogue.strip(), namespace=record_id)
@@ -624,7 +640,8 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 elif label == "発声":
                     if value not in SOUNDSCAPE_FIXED_VALUES:
                         raise TranslationError(
-                            f"Invalid vocalization value at line {line_number}; use なし or 指定台詞のみ"
+                            f"Invalid vocalization value at line {line_number}; use "
+                            "なし, 指定台詞のみ, or 参照音声のみ"
                         )
                     translated = SOUNDSCAPE_FIXED_VALUES[value]
                     payload = None
@@ -762,13 +779,39 @@ def _user_payload(
             "problem and apply every constraint. Copy every CLJ protected placeholder "
             "even when natural English could omit a repeated subject or reference; "
             "express that placeholder explicitly in the translated sentence. "
+            "Each CLJ reference token is followed by a parenthesized canonical "
+            "reference-label annotation in this retry. The annotation explains "
+            "the token; keep the CLJ token in the translated segment and do not "
+            "turn it into a pronoun. "
             + requirement
         )
+    request_stream = (
+        _retry_stream_with_reference_labels(stream)
+        if retry_reason is not None
+        else stream.text
+    )
     return (
         f"{requirement}\n"
-        f"TRANSLATION_STREAM_BEGIN\n{stream.text}\nTRANSLATION_STREAM_END\n"
+        f"TRANSLATION_STREAM_BEGIN\n{request_stream}\nTRANSLATION_STREAM_END\n"
         "/no_think"
     )
+
+
+def _retry_stream_with_reference_labels(stream: TranslationStream) -> str:
+    """Annotate opaque reference tokens only in a failed-record retry.
+
+    Qwen sometimes treats an opaque CLJ token as disposable prose even when it
+    is repeatedly told to copy it.  Reference labels are already English and
+    carry no translatable user content, so retries show them next to the private
+    token as a semantic hint.  Direct speech remains opaque.
+    """
+
+    retry_text = stream.text
+    for stream_record in stream.records:
+        for token, replacement in stream_record.record.payload.replacements.items():
+            if REFERENCE_LABEL_RE.fullmatch(replacement):
+                retry_text = retry_text.replace(token, f"{token}({replacement})")
+    return retry_text
 
 
 def _messages(
@@ -891,14 +934,20 @@ def _make_batches(
 ) -> list[list[TranslationRecord]]:
     if not records:
         return []
-    if _fits_context(llm, system_prompt, records, max_tokens):
+    if (
+        len(records) <= MAX_RECORDS_PER_INFERENCE
+        and _fits_context(llm, system_prompt, records, max_tokens)
+    ):
         return [records]
 
     batches: list[list[TranslationRecord]] = []
     current: list[TranslationRecord] = []
     for record in records:
         candidate = [*current, record]
-        if _fits_context(llm, system_prompt, candidate, max_tokens):
+        if (
+            len(candidate) <= MAX_RECORDS_PER_INFERENCE
+            and _fits_context(llm, system_prompt, candidate, max_tokens)
+        ):
             current = candidate
             continue
         if not current:
@@ -984,18 +1033,13 @@ def _response_content(response: Any) -> tuple[str, Any]:
     return content, choice.get("finish_reason")
 
 
-def _strip_leading_thinking_blocks(content: str) -> str:
-    stripped = content
-    block_count = 0
-    while True:
-        leading_think = LEADING_THINK_BLOCK_RE.match(stripped)
-        if leading_think is None:
-            break
-        stripped = stripped[leading_think.end():]
-        block_count += 1
+def _strip_closed_thinking_blocks(content: str) -> str:
+    """Remove complete Qwen reasoning blocks without discarding translations."""
+
+    stripped, block_count = THINK_BLOCK_RE.subn("\n", content)
     if block_count:
         LOGGER.info(
-            "[cl_japanese2json] Ignored %d leading Qwen thinking block(s)",
+            "[cl_japanese2json] Ignored %d closed Qwen thinking block(s)",
             block_count,
         )
     return stripped
@@ -1517,6 +1561,7 @@ def _validate_stream_record_text(
     translated: str,
     all_protected_tokens: tuple[str, ...],
 ) -> str:
+    translated = _restore_reference_aliases(stream_record, translated)
     own_tokens = set(stream_record.record.payload.tokens)
     foreign = [
         token
@@ -1528,6 +1573,63 @@ def _validate_stream_record_text(
             f"Record {stream_record.record.record_id} contains a placeholder from another record"
         )
     return _validate_translation_text(stream_record.record, translated)
+
+
+def _restore_reference_aliases(
+    stream_record: StreamRecord, translated: str
+) -> str:
+    """Map exact retry-time reference labels back to their private tokens."""
+
+    aliases: dict[str, list[str]] = {}
+    for token, replacement in stream_record.record.payload.replacements.items():
+        if REFERENCE_LABEL_RE.fullmatch(replacement):
+            aliases.setdefault(replacement, []).append(token)
+
+    restored = translated
+    for replacement, tokens in aliases.items():
+        annotation = f"({replacement})"
+        for token in tokens:
+            if annotation not in restored:
+                break
+            if restored.count(token) == 0:
+                restored = restored.replace(annotation, token, 1)
+            else:
+                restored = restored.replace(annotation, "", 1)
+
+        missing = [token for token in tokens if restored.count(token) == 0]
+        alias_count = restored.count(replacement)
+        if alias_count == 0:
+            continue
+        if alias_count > len(tokens):
+            raise TranslationError(
+                f"Record {stream_record.record.record_id} duplicated reference "
+                f"label {replacement!r}"
+            )
+        present_count = len(tokens) - len(missing)
+        if alias_count == len(tokens):
+            # The model copied all retry annotations.  Remove annotations for
+            # intact private tokens and substitute the others in source order.
+            for token in tokens:
+                if restored.count(token) == 0:
+                    restored = restored.replace(replacement, token, 1)
+                else:
+                    restored = restored.replace(replacement, "", 1)
+            continue
+        if alias_count == len(missing):
+            for token in missing:
+                restored = restored.replace(replacement, token, 1)
+            continue
+        if not missing and alias_count <= present_count:
+            restored = restored.replace(replacement, "", alias_count)
+            continue
+
+    unexpected_alias = REFERENCE_LABEL_RE.search(restored)
+    if unexpected_alias is not None:
+        raise TranslationError(
+            f"Record {stream_record.record.record_id} contains an unexpected "
+            f"reference label {unexpected_alias.group(0)!r}"
+        )
+    return restored
 
 
 def _parse_stream_response(content: str, stream: TranslationStream) -> list[str]:
@@ -1586,6 +1688,79 @@ def _repair_retry_dialogue_placeholders(
     return validated
 
 
+def _repair_retry_sentence_head_references(
+    stream_record: StreamRecord,
+    translated: str,
+    all_protected_tokens: tuple[str, ...],
+) -> str | None:
+    """Restore omitted references that begin a known source sentence."""
+
+    record = stream_record.record
+    if not re.search(r"[A-Za-z]", translated):
+        return None
+    source_sentences = [
+        sentence
+        for sentence in re.split(r"(?<=[。！？.!?])", record.payload.text)
+        if sentence.strip()
+    ]
+    translated_sentences = [
+        sentence
+        for sentence in re.split(r"(?<=[.!?])", translated)
+        if sentence.strip()
+    ]
+
+    by_sentence: dict[int, list[str]] = {}
+    for token, replacement in record.payload.replacements.items():
+        if translated.count(token) != 0:
+            continue
+        if REFERENCE_LABEL_RE.fullmatch(replacement) is None:
+            return None
+        matching = [
+            index
+            for index, sentence in enumerate(source_sentences)
+            if sentence.lstrip().startswith(token)
+        ]
+        if len(matching) != 1:
+            return None
+        by_sentence.setdefault(matching[0], []).append(token)
+
+    if not by_sentence or max(by_sentence) >= len(translated_sentences):
+        return None
+
+    repaired_sentences = list(translated_sentences)
+    leading_subject_re = re.compile(
+        r"\A\s*(?:she|he|they|it|the (?:character|subject|woman|man|person)|"
+        r"this (?:character|subject|woman|man|person))\b",
+        re.IGNORECASE,
+    )
+    for sentence_index, tokens in by_sentence.items():
+        sentence = repaired_sentences[sentence_index]
+        prefix = " ".join(tokens)
+        if leading_subject_re.match(sentence):
+            separator = " " if sentence_index > 0 else ""
+            sentence = leading_subject_re.sub(
+                f"{separator}{prefix}", sentence, count=1
+            )
+        else:
+            sentence = f" {prefix}: {sentence.lstrip()}"
+        repaired_sentences[sentence_index] = sentence
+
+    repaired = "".join(repaired_sentences).strip()
+    try:
+        validated = _validate_stream_record_text(
+            stream_record, repaired, all_protected_tokens
+        )
+    except TranslationError:
+        return None
+    LOGGER.warning(
+        "[cl_japanese2json] Recovered %d omitted sentence-head reference "
+        "placeholder(s) in %s after retry",
+        sum(len(tokens) for tokens in by_sentence.values()),
+        record.record_id,
+    )
+    return validated
+
+
 def _translate_batch(
     records: list[TranslationRecord],
     llm: Any,
@@ -1620,36 +1795,54 @@ def _translate_batch(
         attempt_error: TranslationError | None = None
         attempt_number = retry_number + 1
         streamed_chunks = 0
+        last_chunk_at: float | None = None
+        progress_callback_active = False
         progress_lock = threading.Lock()
         heartbeat_stop = threading.Event()
         inference_started = time.monotonic()
 
         def report_stream_progress(chunk_count: int) -> None:
-            nonlocal streamed_chunks
+            nonlocal streamed_chunks, last_chunk_at, progress_callback_active
             with progress_lock:
                 streamed_chunks = max(streamed_chunks, int(chunk_count))
                 current = streamed_chunks
+                last_chunk_at = time.monotonic()
             if progress_callback is not None:
-                progress_callback(
-                    batch_index + 1,
-                    batch_count,
-                    attempt_number,
-                    min(current, max_tokens),
-                    max_tokens,
-                )
+                with progress_lock:
+                    progress_callback_active = True
+                try:
+                    progress_callback(
+                        batch_index + 1,
+                        batch_count,
+                        attempt_number,
+                        min(current, max_tokens),
+                        max_tokens,
+                    )
+                finally:
+                    with progress_lock:
+                        progress_callback_active = False
 
         def log_inference_heartbeat() -> None:
             while not heartbeat_stop.wait(INFERENCE_HEARTBEAT_SECONDS):
                 with progress_lock:
                     current = streamed_chunks
+                    chunk_at = last_chunk_at
+                    callback_active = progress_callback_active
+                now = time.monotonic()
+                chunk_age = (
+                    "n/a" if chunk_at is None else f"{now - chunk_at:.1f}s"
+                )
                 LOGGER.info(
                     "[cl_japanese2json] LLM inference active: batch %d/%d "
-                    "attempt %d, elapsed=%.1fs streamed_chunks=%d",
+                    "attempt %d, elapsed=%.1fs streamed_chunks=%d "
+                    "last_chunk_age=%s progress_callback_active=%s",
                     batch_index + 1,
                     batch_count,
                     attempt_number,
-                    time.monotonic() - inference_started,
+                    now - inference_started,
                     current,
+                    chunk_age,
+                    callback_active,
                 )
 
         if progress_callback is not None:
@@ -1695,7 +1888,7 @@ def _translate_batch(
             )
             _capture_debug_response(event, response)
             content, finish_reason = _response_content(response)
-            content = _strip_leading_thinking_blocks(content)
+            content = _strip_closed_thinking_blocks(content)
             content = _validated_response_content(content, finish_reason)
             translated_values = _parse_stream_text_values(content, stream)
             failures: list[TranslationError] = []
@@ -1707,13 +1900,17 @@ def _translate_batch(
                         stream_record, translated, stream.protected_tokens
                     )
                 except TranslationError as exc:
-                    value = (
-                        _repair_retry_dialogue_placeholders(
+                    value = None
+                    if retry_number > 0:
+                        value = _repair_retry_dialogue_placeholders(
                             stream_record, translated, stream.protected_tokens
                         )
-                        if retry_number > 0
-                        else None
-                    )
+                        if value is None:
+                            value = _repair_retry_sentence_head_references(
+                                stream_record,
+                                translated,
+                                stream.protected_tokens,
+                            )
                     if value is None:
                         failures.append(exc)
                         continue
@@ -1864,9 +2061,10 @@ def translate_markdown(
     if records:
         batches = _make_batches(records, llm, system_prompt, max_tokens)
         LOGGER.info(
-            "[cl_japanese2json] Prepared one protected translation stream for %d text segment(s); using %d inference request(s)",
-            len(records),
+            "[cl_japanese2json] Prepared %d protected translation batch(es) "
+            "for %d text segment(s)",
             len(batches),
+            len(records),
         )
         for batch_index, batch in enumerate(batches):
             LOGGER.info(

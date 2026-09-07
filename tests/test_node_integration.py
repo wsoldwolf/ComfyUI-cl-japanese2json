@@ -142,6 +142,42 @@ class NodeIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProgressBar.instances[0].updates[0], (0, 64))
         self.assertEqual(FakeProgressBar.instances[0].updates[-1], (64, 64))
 
+    def test_compile_throttles_dense_comfyui_progress_updates(self) -> None:
+        class DenseProgressBackend(FakeBackend):
+            def complete_chat(self, **kwargs):
+                callback = kwargs.get("progress_callback")
+                for current in range(1, 1001):
+                    callback(current)
+                return super().complete_chat(**kwargs)
+
+        class FakeProgressBar:
+            instances = []
+
+            def __init__(self, total):
+                self.updates = []
+                self.__class__.instances.append(self)
+
+            def update_absolute(self, value, total=None):
+                self.updates.append((value, total))
+
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "model.gguf"
+            model.write_bytes(b"x")
+            node = nodes.CLJapaneseToJSONGGUF()
+            node._backend = DenseProgressBackend()
+            with patch.object(
+                nodes, "resolve_model_name", return_value=model
+            ), patch.object(
+                nodes, "load_system_prompt", return_value="system"
+            ), patch.object(
+                nodes, "_ComfyProgressBar", FakeProgressBar
+            ), patch.object(
+                nodes.time, "monotonic", return_value=100.0
+            ):
+                node.compile_json(**arguments())
+
+        self.assertEqual(FakeProgressBar.instances[0].updates, [(0, 64), (64, 64)])
+
     def test_steps_input_is_written_to_plan_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             model = Path(temp) / "model.gguf"
