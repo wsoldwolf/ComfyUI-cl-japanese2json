@@ -46,7 +46,7 @@ class AudioPadTests(unittest.TestCase):
         self.assertEqual(cls.RETURN_TYPES[0], "AUDIO")
         self.assertFalse(cls.OUTPUT_NODE)
 
-    def test_ui_inputs_expose_targets_margin_position_and_optional_plan(self) -> None:
+    def test_ui_inputs_expose_targets_margin_position_and_optional_sources(self) -> None:
         inputs = audio_nodes.CLAudioPad.INPUT_TYPES()
         self.assertEqual(
             list(inputs["required"]),
@@ -61,6 +61,7 @@ class AudioPadTests(unittest.TestCase):
         self.assertEqual(inputs["required"]["extra_padding_seconds"][1]["default"], 0.0)
         self.assertEqual(inputs["required"]["pad_position"][1]["default"], "end")
         self.assertEqual(inputs["optional"]["plan"][0], "H3_CHAIN_PLAN")
+        self.assertEqual(inputs["optional"]["match_audio"][0], "AUDIO")
 
     def test_ui_duration_pads_end_with_exact_zero_pcm(self) -> None:
         source = audio([1.0, 2.0, 3.0, 4.0])
@@ -128,6 +129,56 @@ class AudioPadTests(unittest.TestCase):
         self.assertEqual(result[1:4], (1.0, 1.0, 0.0))
         self.assertIn("unchanged", result[4])
 
+    def test_match_audio_pads_shorter_track_to_authoritative_duration(self) -> None:
+        source = audio([1.0, 2.0, 3.0])
+        reference = audio([9.0, 8.0, 7.0, 6.0])
+        result = audio_nodes.CLAudioPad.pad_audio(
+            source,
+            target_duration_seconds=0.0,
+            extra_padding_seconds=0.0,
+            pad_position="end",
+            match_audio=reference,
+        )
+        padded, original, duration, added, status = result
+        self.assertEqual(padded["waveform"].samples, [1.0, 2.0, 3.0, 0.0])
+        self.assertEqual((original, duration, added), (0.75, 1.0, 0.25))
+        self.assertIn("match_audio=4 samples at 4 Hz (1.000000s)", status)
+
+    def test_match_audio_duration_is_converted_to_primary_sample_rate(self) -> None:
+        source = audio([1.0, 2.0], sample_rate=4)
+        reference = audio([9.0, 8.0, 7.0], sample_rate=2)
+        padded = audio_nodes.CLAudioPad.pad_audio(
+            source,
+            target_duration_seconds=0.0,
+            extra_padding_seconds=0.0,
+            pad_position="end",
+            match_audio=reference,
+        )[0]
+        self.assertEqual(
+            padded["waveform"].samples,
+            [1.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+        )
+
+    def test_match_audio_never_trims_a_longer_primary_track(self) -> None:
+        source = audio([1.0, 2.0, 3.0, 4.0])
+        reference = audio([9.0, 8.0])
+        result = audio_nodes.CLAudioPad.pad_audio(
+            source,
+            target_duration_seconds=0.0,
+            extra_padding_seconds=0.0,
+            pad_position="end",
+            match_audio=reference,
+        )
+        self.assertIs(result[0], source)
+        self.assertEqual(result[1:4], (1.0, 1.0, 0.0))
+
+    def test_audio_pad_uses_its_own_log_namespace(self) -> None:
+        with self.assertLogs("cl_audiopad", level="INFO") as captured:
+            audio_nodes.CLAudioPad.pad_audio(
+                audio([1.0]), 0.5, 0.0, "end"
+            )
+        self.assertIn("[cl_audiopad] padded", captured.output[0])
+
     def test_start_padding_shifts_original_samples(self) -> None:
         source = audio([1.0, 2.0])
         padded = audio_nodes.CLAudioPad.pad_audio(
@@ -146,3 +197,7 @@ class AudioPadTests(unittest.TestCase):
             audio_nodes.CLAudioPad.pad_audio(audio([1.0]), -1.0, 0.0, "end")
         with self.assertRaisesRegex(ValueError, "pad_position"):
             audio_nodes.CLAudioPad.pad_audio(audio([1.0]), 0.0, 0.0, "middle")
+        with self.assertRaisesRegex(ValueError, "waveform"):
+            audio_nodes.CLAudioPad.pad_audio(
+                audio([1.0]), 0.0, 0.0, "end", match_audio={}
+            )

@@ -118,6 +118,7 @@ optionalは次である。
 | 名前 | 型 | 用途 |
 | --- | --- | --- |
 | `plan` | H3_CHAIN_PLAN | Contex-Loopの完成フレーム数とfpsから必要な音声長を自動計算 |
+| `match_audio` | AUDIO | 基準トラックの継続時間を最小目標に追加し、短い整列済みトラックの末尾を無音補完 |
 
 入力波形は`[batch, channels, samples]`でなければならない。サンプルレート、波形dtype、デバイス、バッチ数及びチャンネル数を維持し、新規領域をPCM値`0.0`で埋める。入力音声を切り詰めたり、リサンプルしたり、音量を変更してはならない。
 
@@ -126,16 +127,21 @@ optionalは次である。
 ```text
 ui_target_samples = round(target_duration_seconds * sample_rate)
 plan_target_samples = round(total_delivered_frames / fps * sample_rate)
-base_target_samples = max(original_samples, ui_target_samples, plan_target_samples)
+match_target_samples = round(match_audio_samples / match_audio_sample_rate * sample_rate)
+base_target_samples = max(original_samples, ui_target_samples, plan_target_samples, match_target_samples)
 output_samples = base_target_samples + round(extra_padding_seconds * sample_rate)
 padding_samples = output_samples - original_samples
 ```
 
-`plan`がない場合の`plan_target_samples`は0である。Planにfpsがない場合は24fpsを既定とする。`target_duration_seconds=0`、Planなし、`extra_padding_seconds=0`なら入力AUDIOを同一オブジェクトのまま返す。
+`plan`がない場合の`plan_target_samples`、`match_audio`がない場合の`match_target_samples`はそれぞれ0である。Planにfpsがない場合は24fpsを既定とする。`match_audio`は波形を混合、連結又は出力せず、その継続時間だけを入力音声のサンプルレートへ換算して最小目標に使用する。基準より入力音声が長い場合も入力を切り詰めてはならない。`target_duration_seconds=0`、Planなし、`match_audio`なし、`extra_padding_seconds=0`なら入力AUDIOを同一オブジェクトのまま返す。
+
+MiniMax H3 Audio Tracksへfull mixとvocal stemを渡す場合、full mixを時間軸の基準とする。Planで補完したfull mixの`padded_audio`をvocal側`CLAudioPad.match_audio`へ接続し、vocal側`extra_padding_seconds`は0とする。これにより、元の開始時刻を保ったまま短いvocal stemだけを基準トラックと同じ尺まで補完できる。`CLAudioPad`相互の`match_audio`接続は禁止する。Planへ戻るGeneration Profileを構成するLip-Sync OptionsにはPlan依存の`padded_audio`を接続せず、元のvocal stemを接続してComfyUIの循環依存を避ける。
 
 `end`は原音の開始位置を維持して末尾へ全量を追加する。`start`は先頭、`both`は前後へほぼ等分し、奇数サンプルの余りを末尾へ置く。リップシンク用source trackでは`end`を既定かつ推奨とし、`start`と`both`は原音の時刻を移動させることをtooltipで明示する。
 
 出力は`padded_audio`, `original_duration`, `padded_duration`, `padding_added`, `status`の順とする。秒数出力はFLOAT、状態はSTRINGである。
+
+Python logger名及びユーザー可視ログ接頭辞は`cl_audiopad`とし、翻訳コンパイラの`cl_japanese2json`から分離する。
 
 ## 5. GGUFモデル探索
 
@@ -765,9 +771,11 @@ set "FORCE_CMAKE=1"
 - workflows内の新構文
 - `CLAudioPad`の登録、UI既定値及び出力メタデータ
 - UI秒数、H3 Planフレーム数及び追加マージンからのサンプル数計算
+- `match_audio`の継続時間を基準とする同一及び異種サンプルレートでのサンプル数計算
 - `end`、`start`、`both`のPCM値0.0配置
 - dtype、デバイス、チャンネル、サンプルレート及び付加AUDIOメタデータの保持
 - 十分長い音声を切らないことと不正AUDIO/Plan/パラメータの拒否
+- `cl_audiopad` logger及びユーザー可視接頭辞
 - 同梱BGM workflowがパディング後の同一AUDIOをLoop Start、Current及びAssembleへ渡すこと
 
 実モデル試験は別途手動で行い、Qwen3 GGUF、複数Scene、複数Shot、Common、話者ID自動生成、Audio声質参照、台詞指定及び参照音声駆動リップシンク、BGM生成、BGM Audio再利用、BGM内ボーカルリップシンク、Retention、長文再試行を確認する。
@@ -793,7 +801,7 @@ READMEは少なくとも次を含む。
 - 6セクションJSON例
 - Suno等を使う後編集前提
 - 全UI入力
-- PCM無音パディングノードのPlan自動計算、UI目標、追加マージン及び接続例
+- PCM無音パディングノードのPlan自動計算、基準音声尺、UI目標、追加マージン及び接続例
 - デバッグ出力と機密性注意
 - テスト手順
 - ライセンス
@@ -813,5 +821,5 @@ READMEは少なくとも次を含む。
 - BGM Audio再利用を指定された`fully_copy`又は`partially_copy`へ変換し、同じAudio内のボーカルリップシンクと統合する。
 - BGM生成又はBGM再利用を`non_diegetic_music`へ出力し、省略時は`N/A`とする。
 - `llama-cpp-python`を自動変更しない。
-- H3 Plan又はUI秒数に対する不足音声を`CLAudioPad`がサンプル単位で自動計算し、原音を切らずPCM値0.0で補完する。
+- H3 Plan、基準音声又はUI秒数に対する不足音声を`CLAudioPad`がサンプル単位で自動計算し、原音を切らずPCM値0.0で補完する。
 - 全自動テストが成功する。

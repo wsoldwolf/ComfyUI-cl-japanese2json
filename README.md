@@ -431,8 +431,26 @@ Contex-Loop Planを接続すると、`total_delivered_frames / fps`から必要�
 | `extra_padding_seconds` | 必要尺を満たした後へ加える安全マージン。PlanもUI目標もない場合は固定パディング秒数になります。 |
 | `pad_position` | `end`（既定）、`start`、`both`。リップシンクでは原音開始を動かさない`end`を使用します。 |
 | `plan` | 任意の`H3_CHAIN_PLAN`。接続時は完成フレーム数に自動追従します。 |
+| `match_audio` | 任意の基準AUDIO。その継続時間を最小出力尺に追加します。波形は混合せず、短い入力だけを無音補完します。 |
 
 出力にはパディング済みAUDIOのほか、元尺、出力尺、追加秒数及び状態文字列があります。音源が既に十分長く、追加マージンも0なら入力をそのまま返します。最終Assembleで`audio_source: source`を使うと、Planを超える安全マージンだけが動画尺で切られ、元音源部分は維持されます。
+
+フルミックスとボーカルステムを`MiniMax H3 Audio Tracks`へ渡す場合は、フルミックスを基準尺として次のように接続します。ステム分離による数百ミリ秒の末尾差があっても、短いボーカルだけがPCM値`0.0`で延長されます。
+
+```text
+Full Mix Load Audio ──> Full Mix CL Audio Pad.audio
+Contex-Loop Plan ─────> Full Mix CL Audio Pad.plan
+Full Mix CL Audio Pad.padded_audio ──┬─> MiniMax H3 Audio Tracks.full_mix
+                                     └─> Vocal CL Audio Pad.match_audio
+
+Vocal Load Audio ──┬─> Vocal CL Audio Pad.audio
+                   └─> MiniMax H3 Lip-Sync Options.voice
+Vocal CL Audio Pad.padded_audio ───────> MiniMax H3 Audio Tracks.vocals
+```
+
+Vocal側は`pad_position=end`、`extra_padding_seconds=0`にします。両`CLAudioPad`を相互に`match_audio`接続しないでください。また、Planから補完したボーカルをLip-Sync Options経由でGeneration Profileへ戻すと循環するため、Lip-Sync Optionsには元のボーカルを直接接続します。入力音声が基準より長い場合は切り詰めないため、基準にするフルミックス自体が最長であることを確認してください。
+
+パディング処理のログは翻訳処理と区別できるよう、`[cl_audiopad]`接頭辞で出力されます。
 
 ## 主なエラー
 

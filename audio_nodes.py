@@ -7,7 +7,7 @@ import math
 from typing import Any
 
 
-LOGGER = logging.getLogger("cl_japanese2json")
+LOGGER = logging.getLogger("cl_audiopad")
 _DEFAULT_PLAN_FPS = 24.0
 _PAD_POSITIONS = ("end", "start", "both")
 
@@ -110,6 +110,12 @@ class CLAudioPad:
                         "tooltip": "Optional MiniMax H3 Contex-Loop plan. Its delivered frame count and fps automatically set the minimum audio length.",
                     },
                 ),
+                "match_audio": (
+                    "AUDIO",
+                    {
+                        "tooltip": "Optional authoritative track whose duration is another minimum target. Use the padded full mix here to extend a shorter aligned vocal stem without trimming, resampling, mixing, or moving either track.",
+                    },
+                ),
             },
         }
 
@@ -144,6 +150,7 @@ class CLAudioPad:
         extra_padding_seconds: float,
         pad_position: str,
         plan: dict[str, Any] | None = None,
+        match_audio: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], float, float, float, str]:
         waveform, sample_rate, current_samples = cls._validate_audio(audio)
         target_seconds = _non_negative_seconds(
@@ -158,10 +165,21 @@ class CLAudioPad:
         ui_target_samples = int(round(target_seconds * sample_rate))
         plan_target = _plan_target_samples(plan, sample_rate)
         plan_target_samples = 0 if plan_target is None else plan_target[0]
+        match_target_samples = 0
+        match_description = None
+        if match_audio is not None:
+            _, match_sample_rate, match_samples = cls._validate_audio(match_audio)
+            match_duration = match_samples / float(match_sample_rate)
+            match_target_samples = int(round(match_duration * sample_rate))
+            match_description = (
+                f"match_audio={match_samples} samples at {match_sample_rate} Hz "
+                f"({match_duration:.6f}s)"
+            )
         base_target_samples = max(
             current_samples,
             ui_target_samples,
             plan_target_samples,
+            match_target_samples,
         )
         extra_samples = int(round(extra_seconds * sample_rate))
         output_samples = base_target_samples + extra_samples
@@ -175,6 +193,8 @@ class CLAudioPad:
             target_parts.append(f"UI target={target_seconds:.6f}s")
         if plan_target is not None:
             target_parts.append(plan_target[1])
+        if match_description is not None:
+            target_parts.append(match_description)
         if extra_seconds > 0.0:
             target_parts.append(f"extra={extra_seconds:.6f}s")
         target_description = ", ".join(target_parts) or "no target"
@@ -184,7 +204,7 @@ class CLAudioPad:
                 f"audio unchanged at {current_samples} samples "
                 f"({original_duration:.6f}s); {target_description}"
             )
-            LOGGER.info("[cl_japanese2json] %s", status)
+            LOGGER.info("[cl_audiopad] %s", status)
             return (audio, original_duration, original_duration, 0.0, status)
 
         if pad_position == "end":
@@ -210,7 +230,7 @@ class CLAudioPad:
             f"{original_duration:.6f}s -> {padded_duration:.6f}s; "
             f"{target_description}"
         )
-        LOGGER.info("[cl_japanese2json] %s", status)
+        LOGGER.info("[cl_audiopad] %s", status)
         return (
             padded_audio,
             original_duration,
