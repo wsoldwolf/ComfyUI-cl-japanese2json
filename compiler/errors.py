@@ -39,3 +39,19 @@ class JSONGenerationError(CLJapaneseToJSONError):
 
 class JSONValidationError(CLJapaneseToJSONError):
     """Generated plan JSON failed the required subset validation."""
+
+
+class WhisperModelDiscoveryError(CLJapaneseToJSONError):
+    """A selected local OpenAI Whisper checkpoint could not be resolved."""
+
+
+class WhisperLoadError(CLJapaneseToJSONError):
+    """OpenAI Whisper or its selected local checkpoint could not be loaded."""
+
+
+class VocalPromptError(CLJapaneseToJSONError):
+    """Vocal analysis, lyrics alignment, or prompt generation failed."""
+
+
+class TextFileLoadError(CLJapaneseToJSONError):
+    """A browser-selected plain-text file could not be decoded safely."""

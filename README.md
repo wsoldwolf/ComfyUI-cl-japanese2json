@@ -1,6 +1,6 @@
 # ComfyUI-cl-japanese2json
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Audio Pad (PCM Silence)`は、音源がH3 Plan又は基準トラックより短い場合の不足サンプルを自動計算して無音補完します。
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡し、`CL Audio Pad (PCM Silence)`は音源がH3 Plan又は基準トラックより短い場合の不足サンプルを自動計算して無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -11,10 +11,11 @@ LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻�
 - Python 3.11以降を使用するComfyUI
 - Qwen3 8Bなどのテキスト用GGUFモデル
 - 使用環境に合う`llama-cpp-python`
+- Vocal区間・SRT生成を使用する場合のみ、ComfyUI環境へ手動導入したOpenAI Whisper（`openai-whisper`）とローカル`.pt`チェックポイント
 
 このノードは`llama-cpp-python`を自動インストール・更新しません。CUDA対応wheelやユーザー独自ビルドが依存解決によってCPU版へ置き換えられる事故を避けるためです。`requirements.txt`はなく、`pyproject.toml`の依存関係も空です。
 
-`llama-cpp-python`が未導入でもノードのimportと登録はできますが、実行時に手動導入を案内するエラーになります。
+`llama-cpp-python`又はOpenAI Whisperが未導入でもノードのimportと登録はできますが、それぞれを必要とするノードの実行時に手動導入を案内するエラーになります。本プロジェクトはWhisperパッケージ及びモデルも自動インストール、更新又はダウンロードしません。
 
 ## Windows: llama-cpp-pythonの必須ビルド
 
@@ -54,9 +55,21 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 1. このディレクトリ全体を`ComfyUI/custom_nodes/ComfyUI-cl-japanese2json/`へ配置します。
 2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。サブディレクトリも再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。ファイル名に`mmproj`を含むGGUFは除外します。
 3. 使用環境向けの`llama-cpp-python`がComfyUIのPythonからimportできることを確認します。
-4. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`を追加します。
+4. Vocal区間・SRT生成を使用する場合は、OpenAI WhisperをComfyUIのPython環境へユーザー自身で導入し、任意の公式`.pt`チェックポイントを`ComfyUI/models/whisper/`以下へ配置します。モデル名指定による暗黙ダウンロードは使用しません。
+5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Vocal to Prompt Segments`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`を追加します。
 
 モデルの自動ダウンロードは行いません。
+
+## 任意パスのテキストファイルを読み込む
+
+`CL Load Text File (Drag & Drop)`のボタンでファイルを選択するか、Windows Explorer等からノード上へファイルをドロップします。ファイルは`ComfyUI/input`へコピー又はアップロードされず、ブラウザで読み取った内容だけが`text`出力になります。`CL Vocal to Prompt Segments.lyrics_text`、`CL Japanese to JSON (GGUF).plain_text`又は任意のSTRINGプレビューノードへ接続できます。ノード自身は本文プレビューを表示しません。
+
+ブラウザのセキュリティ仕様により、絶対パスそのものはComfyUIバックエンドへ渡しません。選択元は任意のローカル場所で構いませんが、ノードが保持するのはファイル名、サイズ・更新時刻のメタデータ及びファイル内容です。元ファイルを後から編集しても自動再読込されないため、変更後は再度選択又はD&Dしてください。
+
+- UTF-8及びUTF-8 BOMに対応し、改行をLFへ正規化します。
+- 最大サイズは16 MiBです。UTF-8でないファイル、NULを含むバイナリ又は破損した埋め込みデータはエラーにします。
+- 本文はBase64としてワークフローJSONへ保存されます。ワークフロー単体で再実行できますが、機密テキストを含むワークフローを共有しないでください。
+- 実行ログは`[cl_textfile]`接頭辞で、ファイル名、バイト数及び文字数だけを出します。本文や絶対パスは出しません。
 
 ## 入力Markdown
 
@@ -435,6 +448,46 @@ system promptは`prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み�
 
 `json_text`をMiniMax H3 Contex-Loop Planノードの`plan_json_input`へ接続します。出力は説明やコードフェンスを含まない1個の`STRING`で、`json.loads()`による再検証済み、末尾は1個のLFです。
 
+## ボーカルステムからScene・SRTを生成
+
+`CL Vocal to Prompt Segments`へ、フルミックスと同じ開始時刻・同じ全長で書き出したボーカルステムと、Suno Lyrics形式のテキストを接続します。`[Intro]`、`[Verse]`、`[Chorus]`等の行は見出しとして無視され、それ以外の歌詞行をWhisperの単語時刻へ上から順に対応付けます。
+
+```text
+Load Audio (vocal stem) ──> CL Vocal to Prompt Segments.vocal_audio
+Suno Lyrics STRING ───────> CL Vocal to Prompt Segments.lyrics_text
+
+CL Vocal to Prompt Segments.prompt_text ──> CL Japanese to JSON (GGUF).plain_text
+CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
+```
+
+主な設定は次のとおりです。
+
+| 名前 | 意味 |
+| --- | --- |
+| `whisper_model` | `ComfyUI/models/whisper/`以下から再帰検出したローカル`.pt`。自動ダウンロードしません。 |
+| `language` | 日本語固定の`ja`又はWhisper言語検出を使う`auto`。 |
+| `device` | `auto`、`cuda`、`cpu`。明示`cuda`が利用不能ならエラーです。 |
+| `keep_whisper_loaded` | 同じモデルとdeviceを次回も再利用します。 |
+| `max_scene_seconds` | 1 Sceneの最大整数秒。既定10秒です。 |
+| `silence_threshold_dbfs` | 解析窓を有声候補とみなすRMS閾値。分離残留音が多い場合は0へ、弱い歌声を取りこぼす場合は-100へ近づけます。 |
+| `analysis_window_ms` | PCM有声判定の解析窓。 |
+| `min_voiced_ms` | これ未満の孤立した有声候補を除去します。 |
+| `min_silence_ms` | これ未満の有声区間間の無音を結合します。 |
+| `voice_padding_ms` | 確定有声区間の前後余白です。 |
+| `lyrics_match_threshold` | Lyrics行とWhisper候補を確定する最小類似度。低くすると解決数と誤対応の両方が増えます。 |
+| `lyrics_search_seconds` | 現在の歌詞位置から次行を探す最大時間です。 |
+
+出力は次の4つです。
+
+- `prompt_text`: 現行コンパイラへそのまま入力できる編集用テンプレート。有声SceneだけにSource Vocalリップシンクを設定し、解決済み歌詞を`// 歌詞`として記録します。
+- `srt_text`: Lyrics原文を本文、Whisperを時刻根拠とするSRT。未解決行は推測せず省略します。
+- `segments_json`: サンプル精度の検出区間、照合スコア、整数秒Scene及び末尾パディング量を含む検証用JSON。
+- `status`: 解決数、Scene数、入力尺及び必要パディング量の1行要約。
+
+生成されたテンプレートのSubject、画風、背景、人物動作及びカメラワークは用途に合わせて編集してください。歌唱の母音伸長、コーラス、重唱、リバーブ及び分離残留によりWhisper時刻はずれることがあるため、SRTは行単位の初期同期データとして確認してください。未解決LyricsはコメントとSRTへ出力されませんが、`segments_json`に`unresolved`として残ります。
+
+テンプレートの`ソースボーカル`は`<Audio 1>`ではなく、Contex-LoopのSource Vocal入力です。ボーカルステムを最終音声へ重ねず、ロック済みフルミックスをSource Timelineとして維持します。入力末尾が整数秒でない場合は`status`の不足量に従い、フルミックスとボーカルステムを`CL Audio Pad`の`pad_position=end`で同じ計画尺まで補完してください。
+
 ## PCM無音パディング
 
 `CL Audio Pad (PCM Silence)`は、汎用の`Load Audio`とH3又はContex-Loopの間へ挿入します。Python側で必要サンプル数を求め、元波形と同じdtype、デバイス、バッチ、チャンネル及びサンプルレートのままPCM値`0.0`を追加します。元音声は切断、リサンプル又は音量変更しません。
@@ -481,6 +534,8 @@ Vocal側は`pad_position=end`、`extra_padding_seconds=0`にします。両`CLAu
 ## 主なエラー
 
 - GGUFがない: `ComfyUI/models/LLM/GGUF`以下へモデルを置き、ComfyUIを再起動します。
+- Whisperモデルがない: OpenAI Whisperのローカル`.pt`を`ComfyUI/models/whisper`以下へ配置し、ComfyUIを再起動します。
+- OpenAI Whisperをimportできない: ComfyUIのPythonへ`openai-whisper`をユーザー自身で導入します。同名の別パッケージは`load_model()`を持たないため使用できません。
 - `llama-cpp-python`をimportできない: ComfyUIのPythonへ適切な版を手動導入します。
 - `Windows Error 0xc000001d`: 実行CPUが対応しない命令を含むwheelの可能性があります。上記の`GGML_NATIVE=OFF`、AVX-512/AMX無効化設定でリビルドします。
 - コンテキスト不足: `n_ctx`又は`max_tokens`を見直します。

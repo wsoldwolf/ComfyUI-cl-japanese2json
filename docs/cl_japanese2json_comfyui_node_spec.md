@@ -2,25 +2,27 @@
 
 ## 1. 目的
 
-本書は`cl_japanese2json`コンパイラとPCM無音パディング機能を独立したComfyUIカスタムノードとして提供する実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`である。
+本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能及びボーカルステムからScene/SRTを生成する補助機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、ボーカル補助ノードの詳細な正本は`docs/cl_vocal2promptseg_spec.md`である。
 
 本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、`prompt_prefix`へ格納するCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
 - パッケージ名: `ComfyUI-cl-japanese2json`
-- ノードクラス: `CLJapaneseToJSONGGUF`, `CLAudioPad`
-- 表示名: `CL Japanese to JSON (GGUF)`, `CL Audio Pad (PCM Silence)`
+- ノードクラス: `CLJapaneseToJSONGGUF`, `CLAudioPad`, `CLVocalToPromptSegments`, `CLLoadTextFile`
+- 表示名: `CL Japanese to JSON (GGUF)`, `CL Audio Pad (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`
 - カテゴリ: `MiniMax H3/Prompt Tools`, `MiniMax H3/Audio Tools`
 - 出力ノードではない。
 - ComfyUI本体及び他の`custom_nodes`を変更しない。
 - ComfyUI-QwenVL-Modをimportしない。
 - `llama-cpp-python`とモデルを自動インストール、更新、ダウンロードしない。
-- Python標準ライブラリ以外をパッケージ依存関係へ宣言しない。
+- Python標準ライブラリ以外をパッケージの自動依存関係へ宣言しない。`llama-cpp-python`と`openai-whisper`はユーザーが用途に応じて手動導入する任意依存、PyTorchはComfyUI実行環境が提供するものを使用する。
 
-`llama-cpp-python`が存在しない環境でも、カスタムノードのimportと登録は成功させる。実行時にだけ手動導入を案内する`ModelLoadError`を発生させる。
+`llama-cpp-python`又は`openai-whisper`が存在しない環境でも、カスタムノードのimportと登録は成功させる。それぞれを必要とするノードの実行時にだけ手動導入を案内する`ModelLoadError`又は`WhisperLoadError`を発生させる。パッケージ又はモデルを自動インストール、更新若しくはダウンロードしてはならない。
 
 `CLAudioPad`は`llama-cpp-python`を使用せず、ComfyUI標準`AUDIO`テンソルのAPIだけで動作させる。Contex-Loopがなくてもノード登録を成功させ、任意の`H3_CHAIN_PLAN`入力を接続した場合だけその辞書を参照する。
+
+`CLLoadTextFile`はバックエンドからユーザー指定パスを開かない。ComfyUIブラウザ拡張が任意のローカル場所から選択又はD&Dされたファイルを読み、シリアライズ対象の非表示入力へ内容を格納する。`ComfyUI/input`へのコピー、アップロード及び本文プレビューを行わない。
 
 ## 3. ノード登録
 
@@ -30,12 +32,18 @@
 NODE_CLASS_MAPPINGS = {
     "CLJapaneseToJSONGGUF": CLJapaneseToJSONGGUF,
     "CLAudioPad": CLAudioPad,
+    "CLVocalToPromptSegments": CLVocalToPromptSegments,
+    "CLLoadTextFile": CLLoadTextFile,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLJapaneseToJSONGGUF": "CL Japanese to JSON (GGUF)",
     "CLAudioPad": "CL Audio Pad (PCM Silence)",
+    "CLVocalToPromptSegments": "CL Vocal to Prompt Segments",
+    "CLLoadTextFile": "CL Load Text File (Drag & Drop)",
 }
+
+WEB_DIRECTORY = "./web"
 ```
 
 クラスメタデータは次である。
@@ -49,6 +57,18 @@ OUTPUT_NODE = False
 ```
 
 `compile_json()`は1要素tuple`(json_text,)`を返す。
+
+`CLVocalToPromptSegments`のクラスメタデータ、4出力、入力順序、Whisper探索、PCM解析、Lyrics整列、SRT及びテンプレート生成規則は`docs/cl_vocal2promptseg_spec.md`に従う。
+
+`CLLoadTextFile`のクラスメタデータは次である。
+
+```python
+RETURN_TYPES = ("STRING",)
+RETURN_NAMES = ("text",)
+FUNCTION = "load_text"
+CATEGORY = "MiniMax H3/Prompt Tools"
+OUTPUT_NODE = False
+```
 
 ## 4. INPUT_TYPES
 
@@ -142,6 +162,32 @@ MiniMax H3 Audio Tracksへfull mixとvocal stemを渡す場合、full mixを時�
 出力は`padded_audio`, `original_duration`, `padded_duration`, `padding_added`, `status`の順とする。秒数出力はFLOAT、状態はSTRINGである。
 
 Python logger名及びユーザー可視ログ接頭辞は`cl_audiopad`とし、翻訳コンパイラの`cl_japanese2json`から分離する。
+
+### 4.3 CL Load Text File (Drag & Drop)
+
+Pythonへ渡すrequired入力は次の順序とする。全てフロントエンドで非表示にするが、ワークフローへシリアライズし、通常のComfyUIキャッシュ入力として扱う。
+
+| 名前 | 型 | 既定 | 用途 |
+| --- | --- | --- | --- |
+| `file_name` | STRING | 空 | ブラウザが取得したbasename。診断用でありパスとして開かない |
+| `file_base64` | STRING multiline | 空 | ブラウザで読み取った原バイト列のBase64 |
+| `file_signature` | STRING | 空 | ファイルサイズ及び更新時刻のブラウザメタデータ |
+
+フロントエンドは`web/cl_text_file_loader.js`で次を行う。
+
+- ボタンによるファイル選択及びノード全体へのD&Dを受け付ける。
+- 任意のローカル場所から選択できるが、ブラウザが秘匿する絶対パスの取得を要件にしない。
+- `File.arrayBuffer()`で読んだ原バイト列がUTF-8であることを`TextDecoder`のfatalモードで先に確認する。
+- ファイルをHTTP送信、`ComfyUI/input`へアップロード又はコピーしない。
+- 本文プレビューを作らず、ボタンにはbasenameとサイズだけを表示する。
+- 最大16 MiBとし、超過時は既存の正常なシリアライズ値を変更しない。
+- ファイル名、Base64及びサイズ・更新時刻を非表示widgetへ格納する。ワークフロー再読込時は埋め込み内容を再利用し、外部ファイルを自動再読込しない。
+
+PythonはBase64をstrictに復号し、16 MiB以下のUTF-8又はUTF-8 BOMであること、NULを含まないことを再検証する。CRLFとCRはLFへ正規化し、空ファイルは空STRINGとして許可する。出力は1要素tuple`(text,)`とする。`file_name`はログ表示用basenameの抽出以外に使用せず、ファイルシステムAPIへ渡してはならない。
+
+キャッシュ指紋はファイル内容、名前及びメタデータからSHA-256で生成する。同名、同サイズ、同更新時刻でも内容が変われば再実行する。logger名及びユーザー可視ログ接頭辞は`cl_textfile`とし、本文又は絶対パスをログへ出さない。
+
+ファイル内容がワークフローJSONへBase64で保存されることをREADMEへ明記し、機密テキストを含むワークフローの共有に注意を促す。
 
 ## 5. GGUFモデル探索
 
@@ -675,6 +721,7 @@ ComfyUI/inputへは書かない。診断保存自体の失敗は本来の生成�
 - `MarkdownParseError`
 - `JSONGenerationError`
 - `JSONValidationError`
+- `TextFileLoadError`
 
 エラーは原因例外を保持し、対象モデル、Scene、Shot、行又はプレースホルダを可能な範囲で示す。破損結果へ黙ってフォールバックしてはならない。
 
@@ -796,6 +843,11 @@ set "FORCE_CMAKE=1"
 - debug bundle
 - workflows内の新構文
 - `CLAudioPad`の登録、UI既定値及び出力メタデータ
+- `CLVocalToPromptSegments`の登録、4出力、UI既定値及び任意依存の遅延import
+- `CLLoadTextFile`の登録、`WEB_DIRECTORY`、1出力及び非表示transport入力
+- テキストファイルのUTF-8/BOM復号、LF正規化、空ファイル、Base64/NUL/容量エラー及び内容依存キャッシュ指紋
+- フロントエンドがFile APIとD&Dを使用し、upload API又は本文プレビューを持たないこと
+- ローカルWhisperモデル探索、PCM有声検出、Suno Lyrics単調整列、SRT及び現行Markdownテンプレート生成（詳細は`docs/cl_vocal2promptseg_spec.md`）
 - UI秒数、H3 Planフレーム数及び追加マージンからのサンプル数計算
 - `match_audio`の継続時間を基準とする同一及び異種サンプルレートでのサンプル数計算
 - `end`、`start`、`both`のPCM値0.0配置
@@ -828,6 +880,8 @@ READMEは少なくとも次を含む。
 - Suno等を使う後編集前提
 - 全UI入力
 - PCM無音パディングノードのPlan自動計算、基準音声尺、UI目標、追加マージン及び接続例
+- ボーカルステム補助ノードのWhisper手動導入、ローカルモデル配置、各入力・出力、精度上の制約及びSource Timeline接続例
+- 任意パスD&Dテキストノードの接続、UTF-8・容量制約、ワークフロー埋め込み、非自動再読込及び機密性注意
 - デバッグ出力と機密性注意
 - テスト手順
 - ライセンス
@@ -848,4 +902,6 @@ READMEは少なくとも次を含む。
 - BGM生成又はBGM再利用を`non_diegetic_music`へ出力し、省略時は`N/A`とする。
 - `llama-cpp-python`を自動変更しない。
 - H3 Plan、基準音声又はUI秒数に対する不足音声を`CLAudioPad`がサンプル単位で自動計算し、原音を切らずPCM値0.0で補完する。
+- `CLVocalToPromptSegments`がWhisperとモデルを自動取得せず、ボーカルステムとSuno Lyricsから有声・無音Scene、コメント、SRT及び検証JSONを生成する。
+- `CLLoadTextFile`が任意のローカル場所からブラウザで選択したUTF-8本文を`ComfyUI/input`へコピーせずSTRINGとして返し、外部パスをバックエンドで開かない。
 - 全自動テストが成功する。
