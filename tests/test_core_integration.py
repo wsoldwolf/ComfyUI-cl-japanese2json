@@ -56,6 +56,10 @@ class CoreIntegrationTests(unittest.TestCase):
         self.assertIn("<Subject 1> (S1)", parsed["shots"][1]["prompt"][3])
         self.assertIn(
             "The action occurs <Subject 1> <Subject 2>.",
+            parsed["prompt_prefix"],
+        )
+        self.assertNotIn(
+            "The action occurs <Subject 1> <Subject 2>.",
             parsed["shots"][0]["prompt"][3],
         )
         self.assertNotIn("<Subject 2>", parsed["shots"][1]["prompt"][3])

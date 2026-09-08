@@ -102,7 +102,7 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 
 `# サブジェクト`、`# 保持分析`、`# 共通プロンプト`は不要なら省略できます。この順序で、最初の`# シーン`より前に各1回まで置きます。シーンは1～128個です。
 
-`# 共通プロンプト`はグローバルなスタイル、背景、画面上の制約を簡潔に書く場所です。参照を含まない行は全シーンへ適用します。`<Subject N>`又は`<Audio N>`を含む行は、その行で参照する全Subjectと全Audioがシーンのプリンブル、ショット又は音響設定で実際に有効な場合だけ適用します。共通文だけではSubject又はAudioをアクティブにしません。Commonで使用できるAudioは正規形の`<Audio 1>`～`<Audio 3>`です。台詞と`(Sx)`は書けません。肯定的な英語発声指示は`speech_guard`で検査します。出力時は、適用された共通文、シーンプリンブル、`[Shot 1]`以降の順で`detailed_description`へ配置します。
+`# 共通プロンプト`はグローバルなスタイル、背景、画面上の制約を簡潔に書く場所です。翻訳した全行を文書順に改行で連結し、トップレベル`prompt_prefix`へ一度だけ格納します。Contex-Loopによって全シーンへ無条件に適用されるため、特定シーンだけに必要な条件はScene又はShotへ書いてください。`<Subject N>`や`<Audio N>`を含める場合も全シーンで有効な参照だけに限定してください。Commonで使用できるAudioは正規形の`<Audio 1>`～`<Audio 3>`です。台詞と`(Sx)`は書けません。肯定的な英語発声指示は`speech_guard`で検査します。
 
 ### コメント
 
@@ -348,7 +348,7 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
 
 ## JSON出力
 
-トップレベル`prompt_prefix`は空文字列です。各生成シーンの`prompt`配列は、公式Full-Reference形式に合わせた次の6文字列を厳密にこの順で持ちます。
+トップレベル`prompt_prefix`には`# 共通プロンプト`の英訳を改行区切りの一文字列として格納します。Commonを省略した場合だけ空文字列です。各生成シーンの`prompt`配列は、公式Full-Reference形式に合わせた次の6文字列を厳密にこの順で持ちます。
 
 1. `subject_definitions`
 2. `summary`
@@ -361,7 +361,7 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
 
 ```json
 {
-  "prompt_prefix": "",
+  "prompt_prefix": "A bright modern office district is rendered in a vivid 2D anime style.\nKeep the lighting consistent across all scenes.",
   "defaults": {
     "duration_seconds": 5,
     "steps": 8
@@ -373,7 +373,7 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
         "subject_definitions:\n<Subject 1> is a character whose appearance is based on <Picture 1>.\n<Audio 1> is the voice-timbre reference for <Subject 1> (S1).",
         "summary:\n[reference generation + audio reference] The target video uses <Subject 1> in a 2-shot scene. <Audio 1> is referenced only for the explicitly specified dialogue.",
         "retention_analysis:\n<Subject 1> (used in [Shot 1]): fully_preserved - The defined identity and visual characteristics are preserved.\n<Audio 1>: reference - only the voice timbre and delivery are referenced for <Subject 1>; the source signal and its original speech are not copied.",
-        "detailed_description:\nA bright modern office district is rendered in a vivid 2D anime style.\n[Shot 1] <Subject 1> (S1) says <d>[Japanese]ようこそ！</d>. For <Subject 1> (S1)'s explicitly specified dialogue in this shot, use <Audio 1> only as a voice-timbre and delivery reference; do not copy or introduce any other speech from the source audio.\n[Shot 2] At 00:04.500, the camera slowly approaches <Subject 1>.",
+        "detailed_description:\n[Shot 1] <Subject 1> (S1) says <d>[Japanese]ようこそ！</d>.\nFor <Subject 1> (S1)'s explicitly specified dialogue in this shot, use <Audio 1> only as a voice-timbre and delivery reference; do not copy or introduce any other speech from the source audio.\n[Shot 2] At 00:04.500, the camera slowly approaches <Subject 1>.",
         "overall_soundscape:\nEnvironment: Distant city ambience. The only character vocalization is the exact shot-synchronized dialogue explicitly specified in this scene. No other ambience, physical sound, or character vocalization is present.",
         "non_diegetic_music:\nN/A"
       ],
@@ -384,6 +384,8 @@ BGM内のボーカルへ人物の口を同期させる場合は、同じAudio番
   ]
 }
 ```
+
+各Shotの箇条書きは`detailed_description`内でも元順序の改行を維持します。JSONには隣接文字列を連結する`"foo" "bar"`構文や複数行文字列構文がないため、一つの文字列内の改行はJSONテキスト上で`"foo\nbar"`と表現されます。JSONを解析した後の値には実際の改行が入っています。
 
 非継続シーンは`context_length: 0`と`audio_context_length: 0`を持ちます。継続シーンは代わりに`continuation_mode: "guide"`を持ちます。
 

@@ -4,7 +4,7 @@
 
 本書は`cl_japanese2json`コンパイラとPCM無音パディング機能を独立したComfyUIカスタムノードとして提供する実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`である。
 
-本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、条件付きCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
+本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、`prompt_prefix`へ格納するCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
@@ -350,17 +350,13 @@ MiniMax H3-Base-Ref2VAの入力上限に合わせ、正規の参照タグ範囲�
 
 ### 9.2 Common
 
-Commonは`Emd.common_prompt`へ文書順で保存する。JSONGENはScene preamble及びShot本文からアクティブSubjectを、声質参照、リップシンク及びBGM再利用からアクティブAudioを確定してから、Commonの各行を次のように選択する。
+Commonは`Emd.common_prompt`へ文書順で保存する。JSONGENは各行を英文句読点で閉じ、LFで連結した一文字列をトップレベル`prompt_prefix`へ一度だけ格納する。Sceneの`detailed_description`へ複製しない。
 
-- Subject又はAudio参照のない行は全Sceneへ適用する。
-- Subject参照がある行は、その全SubjectがSceneでアクティブな場合だけ適用する。
-- Audio参照がある行は、その全AudioがSceneで別途アクティブな場合だけ適用する。
-- SubjectとAudioの両方がある行は両条件を満たす場合だけ適用する。
-- Commonの参照だけでSubject又はAudioをアクティブにしない。
+- CommonはContex-Loopによって全Sceneへ無条件に適用される。
+- Subject又はAudio参照を含む行もSceneごとにフィルタしないため、入力者は全Sceneで有効な参照だけを書く。
+- Commonの参照だけでSceneローカルなSubject又はAudio定義をアクティブにしない。
 - Audio参照は正規形の`<Audio 1>`～`<Audio 3>`だけを許可する。
 - 未定義Subject、不正Audio参照、ダイレクトスピーチ又はユーザー入力の`(Sx)`を含むCommonはエラー。肯定的な英語発声指示は`speech_guard`でエラー又はWARNING継続とする。
-
-選択したCommon行は`detailed_description`内でScene preambleより前に出す。
 
 ### 9.3 Shot
 
@@ -469,7 +465,7 @@ non_diegetic_music:
 
 ### 10.1 subject_definitions
 
-Scene preamble及びShot本文で参照したSubjectだけを定義する。Commonだけの参照はアクティブ化に使わない。未定義Subjectはエラー。無Subject Sceneは次の固定文とする。
+Scene preamble及びShot本文で参照したSubjectだけを定義する。Commonだけの参照はSceneローカルな定義のアクティブ化に使わないが、`prompt_prefix`は全Sceneへ適用される。未定義Subjectはエラー。無Subject Sceneは次の固定文とする。
 
 ```text
 subject_definitions:
@@ -521,13 +517,13 @@ Source audio保持では`Source Timeline: fully_preserved`固定行を出力し�
 
 ### 10.4 detailed_description
 
-そのSceneへ適用されるCommon、Scene preamble、明示Shotの順に出す。
+Scene preamble、明示Shotの順に出す。Commonはトップレベル`prompt_prefix`へ格納するため、ここへは出力しない。Shot内では最初の本文をShotラベルと同じ行に置き、後続の各入力行をLFで区切る。
 
 ```text
 detailed_description:
-Applicable global style and constraints.
 Scene-wide style and premise.
 [Shot 1] Opening action.
+The camera moves closer.
 [Shot 2] At 00:03.250, next action.
 ```
 
@@ -539,7 +535,7 @@ Scene-wide style and premise.
 
 同じAudioがBGM再利用にも指定されていれば、元BGM内のボーカル、歌詞及びタイミングを保持した歌唱演技として展開する。独立した置換ボーカル又は追加ボーカルを生成しない。
 
-時間範囲付きBGM再利用では、適用Common及びScene preambleの後、`[Shot 1]`より前に、元区間をScene全体へ1:1で割り当てて再構成、再生成又はリタイミングしない固定文を追加する。
+時間範囲付きBGM再利用では、Scene preambleの後、`[Shot 1]`より前に、元区間をScene全体へ1:1で割り当てて再構成、再生成又はリタイミングしない固定文を追加する。
 
 Source audio保持では、現在のSource Timeline絶対時間区間をScene全体で連続使用し、生成、置換、再開始、再ミックス、リタイミング、ループ、クロスフェード、複製又は音声追加を行わない固定文を`[Shot 1]`より前へ追加する。`SOURCE_VOCAL`行はSource Vocalの人声区間、音素、閉口、持続音及びフレーズ境界だけで口形を駆動し、無声区間では閉口する固定文へ置換する。
 
@@ -607,7 +603,7 @@ Environment、Sound effects又は生成BGM本文にAudio参照又は台詞があ
 - UTF-8で表現可能なJSON object文字列。
 - コードフェンス、前後説明なし。
 - 末尾はLF1個。
-- `prompt_prefix`は空文字列。
+- `prompt_prefix`はstring。Common省略時は空文字列、存在時は空行を含まないLF区切りのCommon本文。
 - `defaults.duration_seconds`はinteger。
 - `defaults.steps`は1～10000のinteger。
 - `shots`は1～128要素。
@@ -621,6 +617,8 @@ Environment、Sound effects又は生成BGM本文にAudio参照又は台詞があ
 - durationは1～60のinteger。
 - 継続Sceneは`continuation_mode=guide`だけを持つ。
 - 非継続Sceneはvisual/audio context lengthを0にする。
+
+シリアライズは`ensure_ascii=False, indent=2`とし、`prompt`配列の6文字列を別々の物理行へ配置する。文字列内のLFはJSON規格に従い`\n`へエスケープする。隣接する`"foo" "bar"`は有効なJSONでなく文字列連結にもならないため使用しない。
 
 検証成功前のJSONを履歴へ保存又は出力してはならない。
 
@@ -727,7 +725,7 @@ set "FORCE_CMAKE=1"
 - 入れ子、未閉鎖、対応しないブロックコメント及びHTMLコメントの拒否
 - 新ディレクティブ正規化
 - Common正規化、順序及び禁止要素
-- Common Audio参照の条件付き適用と非アクティブ化
+- Commonの`prompt_prefix`固定格納、改行、順序及びScene promptへの非重複
 - 旧Scene構文拒否
 - Retention固定マーカー
 - Shot時刻の推論前検証
@@ -759,10 +757,10 @@ set "FORCE_CMAKE=1"
 ### 17.5 JSONGEN
 
 - 6セクションの種類と順序
-- 空`prompt_prefix`
+- 空又はCommon本文を持つ`prompt_prefix`
 - Subject抽出とSubjectless固定文
 - RetentionのSceneフィルタと既定値
-- CommonのSubject/Audio Sceneフィルタ、配置及び非アクティブ化
+- Commonの`prompt_prefix`格納、順序、改行及びScene promptへの非重複
 - 属性転送の両端検証
 - Shot labelとtimestamp
 - Subject番号に一致する話者IDの内部生成
@@ -818,7 +816,7 @@ READMEは少なくとも次を含む。
 - 導入手順とGGUF探索先
 - 新Markdownのコピー可能な例
 - Cスタイルコメント構文と制約
-- CommonのSubject及びAudioに基づく条件付き適用
+- Commonの`prompt_prefix`格納と全Scene適用
 - Retentionマーカー
 - Shot時刻規則
 - 話者IDと発声許可
@@ -838,7 +836,7 @@ READMEは少なくとも次を含む。
 
 - 仕様書、README、実装、system prompt、テスト、同梱workflowが同じ新構文を使用する。
 - コメントを推論前に安全に除外し、改行、行番号及び台詞本文を保持する。
-- CommonがSceneのアクティブSubject及びAudio集合に従って適用され、それだけでSubject又はAudioを有効化しない。
+- Commonが改行区切りの一文字列として`prompt_prefix`へ一度だけ格納され、Scene promptへ複製されない。
 - ユーザー入力に話者IDがなく、JSONGENがSubject番号に一致するIDを生成する。
 - 暗黙Shotが残っていない。ただし拒否テストは除く。
 - 各Scene promptがFull-Referenceの6セクションを公式順で持つ。

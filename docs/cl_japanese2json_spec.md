@@ -26,7 +26,7 @@ LLMは最終JSON、ディレクティブ、ショット構造、参照関係、�
 - 既存BGM Audioの`fully_copy`又は`partially_copy`、元音源時間範囲の1:1割当てと、そのボーカルへのリップシンク
 - Subject番号からPythonが生成する安定した`(Sx)`話者ID
 - シーンとシーン内ショット
-- Sceneへ条件付き適用するグローバル共通プロンプト
+- `prompt_prefix`として全Sceneへ適用するグローバル共通プロンプト
 - シーンローカルな音響許可リスト
 - シーンローカルな非ダイジェティックBGM生成又はAudio再利用指定
 - Subject単位のグローバル保持分析規則
@@ -176,15 +176,12 @@ Subject定義の`<Picture N>`と`<Video N>`は出典を表す。別の独立参�
 * <Subject 1>と<Subject 2>の外観を混同しない。
 ```
 
-Commonはグローバルに宣言するが、各Sceneの`detailed_description`へ次の規則で行単位に適用する。
+Commonは全行を文書順に英文へ変換し、改行で連結した一文字列としてトップレベル`prompt_prefix`へ格納する。各Sceneの`detailed_description`へ複製しない。
 
-- Subject又はAudio参照を含まない行は全Sceneへ適用する。
-- `<Subject N>`を含む行は、その行が参照する全SubjectがScene preamble又はShot本文でアクティブな場合だけ適用する。
-- `<Audio N>`を含む行は、その行が参照する全AudioがSceneの声質参照、リップシンク又はBGM再利用として別途アクティブな場合だけ適用する。
-- SubjectとAudioの両方を含む行は、両方の条件を満たす場合だけ適用する。
-- Commonの参照だけではSubject又はAudioをアクティブにしない。
+- Commonは全Sceneへ無条件に適用される。Scene固有の条件はScene preamble又はShotへ書く。
+- `<Subject N>`又は`<Audio N>`を含むCommon行は、その参照が全Sceneに対して有効な場合だけ使用する。Scene単位のフィルタは行わない。
+- Commonの参照はSceneローカルな`subject_definitions`又はAudio定義の抽出には使わない。
 - CommonのAudio参照は正規形の`<Audio 1>`～`<Audio 3>`だけを許可する。
-- 適用後の順序はCommon、Scene preamble、Shot本文とする。
 - ダイレクトスピーチ又は`(Sx)`話者IDを書けない。肯定的な英語発声指示はJSONGENの`speech_guard`で検査する。
 - Commonは1個以上の箇条書きを持つ。
 
@@ -520,7 +517,7 @@ MDPARSEは翻訳済み本文を変更せず格納し、トップレベル順序�
 
 ```json
 {
-  "prompt_prefix": "",
+  "prompt_prefix": "Global style and constraints.\nKeep lighting consistent across all scenes.",
   "defaults": {
     "duration_seconds": 5,
     "steps": 8
@@ -529,10 +526,12 @@ MDPARSEは翻訳済み本文を変更せず格納し、トップレベル順序�
 }
 ```
 
-- `prompt_prefix`は必ず空文字列。Commonはこのキーへ格納せず、各Sceneの`detailed_description`へ条件付きで展開する。
+- `prompt_prefix`はCommonを文書順に改行で連結したstring。Common省略時だけ空文字列。
 - `defaults.duration_seconds`は5。
 - `defaults.steps`はノード入力値。1～10000の整数。
 - `shots`はScene順の1～128要素。
+
+JSONは`indent=2`で整形し、`prompt`の6文字列を配列内の別行へ出力する。文字列内部のLFは厳密JSON上では`\n`としてエスケープする。JSONには隣接する`"foo" "bar"`を一文字列へ連結する構文がないため、この形式は出力しない。
 
 ### 10.2 Sceneオブジェクト
 
@@ -548,10 +547,10 @@ Scene preambleと全Shot本文から、ダイレクトスピーチ領域を除�
 - 抽出されたSubjectだけをアクティブとする。
 - 未定義Subjectはエラー。
 - Subject定義に書かれただけのSubjectはアクティブにしない。
-- Commonに書かれただけのSubjectもアクティブにしない。
+- Commonに書かれただけのSubjectはSceneローカルな`subject_definitions`ではアクティブにしない。ただし`prompt_prefix`自体は全Sceneへ適用される。
 - SubjectがないSceneはエフェクト専用として固定文を出す。
 
-アクティブSubject及びアクティブAudioを確定した後、Commonの各行を5.4の規則でSceneへ選択する。Commonに未定義Subject又は範囲外・非正規Audioがあればエラーとする。
+Commonに未定義Subject又は範囲外・非正規Audioがあればエラーとする。CommonはSceneローカルなアクティブSubject及びAudio集合の算出には使用しない。
 
 ### 10.4 発声許可
 
@@ -689,15 +688,15 @@ No reference labels are active in this scene.
 
 #### detailed_description
 
-- 適用対象となったCommon行を先頭へ出す。
-- Scene preambleをCommonの後、`[Shot 1]`より前に出す。
+- Commonはここへ出力せず、トップレベル`prompt_prefix`だけへ出す。
+- Scene preambleを`[Shot 1]`より前に出す。
 - 最初のShotは`[Shot 1] ...`。
 - 後続Shotは`[Shot N] At MM:SS.mmm, ...`。
-- 箇条書きは元順序で英文の文として結合する。
+- Shotの箇条書きは元順序で英文の文とし、各入力行の間にLFを置く。最初の文はShotラベルと同じ行に置く。
 - Subject、Picture、Video、Audio、ダイレクトスピーチを必要位置に保持し、実発声位置へ話者IDを生成する。
 - BGM再利用Audioと同じAudioを使う台詞指定リップシンクは、元BGM内のボーカル、記載歌詞及びタイミングを保持する。参照音声駆動リップシンクは、元BGM区間の人声信号だけから口形と時刻を駆動する。どちらも置換又は追加ボーカルを生成しない。
-- 時間範囲付きBGM再利用では、適用Common及びScene preambleの後、`[Shot 1]`より前に、元区間をScene全体へ1:1で割り当てて再構成しない固定文を出力する。
-- Source Timeline音声保持では、適用Common及びScene preambleの後、`[Shot 1]`より前に、現在の絶対時間区間をScene先頭から末尾まで連続使用し、生成、置換、再開始、再ミックス、リタイミング、ループ、クロスフェード、複製又は追加を行わない固定文を出力する。
+- 時間範囲付きBGM再利用では、Scene preambleの後、`[Shot 1]`より前に、元区間をScene全体へ1:1で割り当てて再構成しない固定文を出力する。
+- Source Timeline音声保持では、Scene preambleの後、`[Shot 1]`より前に、現在の絶対時間区間をScene先頭から末尾まで連続使用し、生成、置換、再開始、再ミックス、リタイミング、ループ、クロスフェード、複製又は追加を行わない固定文を出力する。
 - `SOURCE_VOCAL`行は、同尺のSource Vocalに検出された人声区間、音素、閉口、持続音及びフレーズ境界だけで口形を駆動する固定文へ置換する。無声区間では口を閉じ、Scene境界でフレーズを再開始せず、歌詞を推測しない。
 
 #### overall_soundscape
@@ -721,7 +720,7 @@ H3のBGM生成は結果のランダム性が高く、BGM再利用の固定文及
 シリアライズ後に`json.loads()`し、少なくとも次を検証する。
 
 - rootがobject。
-- `prompt_prefix`が空。
+- `prompt_prefix`がstringで、Common省略時は空、存在時は空行を含まない改行区切りの本文である。
 - defaultsの型とsteps範囲。
 - Scene数、ID一意性、duration範囲。
 - promptが文字列6要素で、種類と順序が正しい。
@@ -783,7 +782,7 @@ LLM応答は可能な場合にストリーミングで受信する。内部の�
 - 長時間のLLM推論中にComfyUI進捗と本文を含まないheartbeatを提示できる。
 - Cスタイルコメントを推論前に除外し、台詞内部の同じ記号は保持する。
 - コメント構文エラーを行番号付きで拒否する。
-- CommonをSubject及びAudio集合に応じて適用し、それだけでSubject又はAudioを有効化しない。
+- Commonを改行区切りの一文字列として`prompt_prefix`へ一度だけ格納し、Scene promptへ複製しない。
 - 暗黙Shotを拒否する。
 - Shot境界とミリ秒時刻を正しく出す。
 - ユーザー入力の`(Sx)`を拒否し、話者Subject番号から`(SN)`を生成する。

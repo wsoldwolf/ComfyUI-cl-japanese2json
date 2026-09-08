@@ -597,7 +597,7 @@ class JSONGenerationTests(unittest.TestCase):
             with self.subTest(emd=emd), self.assertRaises(errors.JSONGenerationError):
                 jsongen.generate_json(emd)
 
-    def test_common_prompt_is_filtered_without_activating_subjects(self) -> None:
+    def test_common_prompt_becomes_one_global_prompt_prefix(self) -> None:
         emd = Emd(
             subjects=["one.", "two."],
             common_prompt=[
@@ -612,20 +612,21 @@ class JSONGenerationTests(unittest.TestCase):
             ],
         )
         parsed = json.loads(jsongen.generate_json(emd))
-        first = parsed["shots"][0]["prompt"][3]
-        second = parsed["shots"][1]["prompt"][3]
-        third = parsed["shots"][2]["prompt"][3]
-        self.assertIn("A clean global visual style.", first)
-        self.assertIn("Keep <Subject 1> sharply rendered.", first)
-        self.assertNotIn("Do not merge <Subject 1> and <Subject 2>.", first)
-        self.assertIn("Do not merge <Subject 1> and <Subject 2>.", second)
+        self.assertEqual(
+            parsed["prompt_prefix"],
+            "A clean global visual style.\n"
+            "Do not merge <Subject 1> and <Subject 2>.\n"
+            "Keep <Subject 1> sharply rendered.",
+        )
+        for shot in parsed["shots"]:
+            self.assertNotIn("A clean global visual style.", shot["prompt"][3])
+            self.assertNotIn("Do not merge", shot["prompt"][3])
+            self.assertNotIn("sharply rendered", shot["prompt"][3])
         self.assertEqual(parsed["shots"][2]["prompt"][0], jsongen.NO_ACTIVE_SUBJECT_BLOCK)
-        self.assertIn("A clean global visual style.", third)
-        self.assertNotIn("<Subject 1>", third)
 
-    def test_common_prompt_precedes_scene_preamble_and_first_shot(self) -> None:
+    def test_common_prompt_is_not_repeated_in_detailed_description(self) -> None:
         emd = Emd(
-            common_prompt=["Global style."],
+            common_prompt=["Global style.", "Night only"],
             scenes=[
                 Scene(
                     preamble=["Scene-specific setting."],
@@ -633,11 +634,14 @@ class JSONGenerationTests(unittest.TestCase):
                 )
             ],
         )
-        detailed = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][3]
-        self.assertLess(detailed.index("Global style."), detailed.index("Scene-specific setting."))
+        parsed = json.loads(jsongen.generate_json(emd))
+        self.assertEqual(parsed["prompt_prefix"], "Global style.\nNight only.")
+        detailed = parsed["shots"][0]["prompt"][3]
+        self.assertNotIn("Global style.", detailed)
+        self.assertNotIn("Night only.", detailed)
         self.assertLess(detailed.index("Scene-specific setting."), detailed.index("[Shot 1]"))
 
-    def test_common_audio_is_filtered_without_activating_audio(self) -> None:
+    def test_common_audio_references_remain_global(self) -> None:
         emd = Emd(
             common_prompt=[
                 "Keep <Audio 1> continuous.",
@@ -664,15 +668,12 @@ class JSONGenerationTests(unittest.TestCase):
             ],
         )
         parsed = json.loads(jsongen.generate_json(emd))
-        first = parsed["shots"][0]["prompt"][3]
-        second = parsed["shots"][1]["prompt"][3]
-        third = parsed["shots"][2]["prompt"][3]
-        self.assertNotIn("<Audio 1>", first)
-        self.assertNotIn("<Audio 2>", first)
-        self.assertIn("Keep <Audio 1> continuous.", second)
-        self.assertNotIn("<Audio 2>", second)
-        self.assertNotIn("<Audio 1>", third)
-        self.assertIn("Keep <Audio 2> continuous.", third)
+        self.assertEqual(
+            parsed["prompt_prefix"],
+            "Keep <Audio 1> continuous.\nKeep <Audio 2> continuous.",
+        )
+        for shot in parsed["shots"]:
+            self.assertNotIn("Keep <Audio", shot["prompt"][3])
 
     def test_invalid_common_prompt_content_is_rejected(self) -> None:
         for line in (
@@ -699,10 +700,8 @@ class JSONGenerationTests(unittest.TestCase):
             scenes=[Scene(shots=[make_shot("<Subject 1> remains still.")])],
         )
         with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
-            prompt = json.loads(
-                jsongen.generate_json(emd, speech_guard="warn")
-            )["shots"][0]["prompt"]
-        self.assertIn("eyes speak of a long journey", prompt[3])
+            parsed = json.loads(jsongen.generate_json(emd, speech_guard="warn"))
+        self.assertIn("eyes speak of a long journey", parsed["prompt_prefix"])
         self.assertTrue(
             any("Common prompt line 1" in message for message in captured.output)
         )
@@ -726,7 +725,10 @@ class JSONGenerationTests(unittest.TestCase):
                     duration=8,
                     preamble=["A cinematic visual style."],
                     shots=[
-                        make_shot("The opening action occurs."),
+                        make_shot(
+                            "The opening action occurs.",
+                            "The camera moves closer.",
+                        ),
                         make_shot("The second action occurs.", start_ms=1350),
                     ],
                 )
@@ -734,6 +736,10 @@ class JSONGenerationTests(unittest.TestCase):
         )
         detailed = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"][3]
         self.assertIn("A cinematic visual style.\n[Shot 1]", detailed)
+        self.assertIn(
+            "[Shot 1] The opening action occurs.\nThe camera moves closer.",
+            detailed,
+        )
         self.assertIn("[Shot 2] At 00:01.350,", detailed)
         self.assertEqual(detailed.count("[Shot "), 2)
 
@@ -1036,7 +1042,12 @@ class JSONGenerationTests(unittest.TestCase):
             Emd(scenes=[Scene(shots=[make_shot("Action.")])])
         )
         parsed = json.loads(text)
-        parsed["prompt_prefix"] = "not empty"
+        parsed["prompt_prefix"] = 1
+        with self.assertRaises(errors.JSONValidationError):
+            jsongen.validate_final_json(json.dumps(parsed, ensure_ascii=False) + "\n")
+
+        parsed = json.loads(text)
+        parsed["prompt_prefix"] = "Global style.\n\nNight only."
         with self.assertRaises(errors.JSONValidationError):
             jsongen.validate_final_json(json.dumps(parsed, ensure_ascii=False) + "\n")
 

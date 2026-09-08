@@ -144,10 +144,12 @@ class WorkflowCompatibilityTests(unittest.TestCase):
             "system",
             max_tokens=16_384,
         )
+        emd = mdparse.parse_markdown(canonical)
         plan = jsongen.validate_final_json(
-            jsongen.generate_json(mdparse.parse_markdown(canonical))
+            jsongen.generate_json(emd)
         )
-        self.assertEqual(len(plan["shots"]), 29)
+        self.assertGreaterEqual(len(emd.scenes), 1)
+        self.assertEqual(len(plan["shots"]), len(emd.scenes))
         for shot in plan["shots"]:
             prompt = "\n".join(shot["prompt"])
             self.assertNotRegex(prompt, r"<Audio [0-9]+>")

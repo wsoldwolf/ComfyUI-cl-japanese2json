@@ -156,29 +156,6 @@ def _referenced_subjects(scene: Scene) -> list[int]:
     return sorted(referenced)
 
 
-def _common_lines_for_scene(
-    emd: Emd,
-    active_subjects: list[int],
-    active_audio: set[int],
-) -> list[str]:
-    active_subject_set = set(active_subjects)
-    selected: list[str] = []
-    for line in emd.common_prompt:
-        searchable = _searchable(line, context="common prompt")
-        referenced_subjects = {
-            int(match.group(1)) for match in SUBJECT_RE.finditer(searchable)
-        }
-        referenced_audio = {
-            int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(searchable)
-        }
-        if (
-            referenced_subjects.issubset(active_subject_set)
-            and referenced_audio.issubset(active_audio)
-        ):
-            selected.append(line)
-    return selected
-
-
 def _shot_subject_locations(scene: Scene, subject_number: int) -> list[int]:
     locations: list[int] = []
     for shot_number, shot in enumerate(scene.shots, start=1):
@@ -1264,14 +1241,12 @@ def _render_shot_line(
 
 
 def _detailed_description_block(
-    common_lines: list[str],
     scene: Scene,
     voice_audio: dict[int, tuple[int, int]],
     background_music_reuse: BackgroundMusicReuse | None,
     preserves_source_audio: bool,
 ) -> str:
-    parts = [_sentence(line) for line in common_lines]
-    parts.extend(_sentence(line) for line in scene.preamble)
+    parts = [_sentence(line) for line in scene.preamble]
     background_music_audio = (
         None
         if background_music_reuse is None
@@ -1305,7 +1280,7 @@ def _detailed_description_block(
         audio_by_subject.setdefault(subject, []).append((audio, speaker))
 
     for shot_number, shot in enumerate(scene.shots, start=1):
-        body = " ".join(
+        rendered_lines = [
             _sentence(
                 _render_shot_line(
                     line,
@@ -1314,19 +1289,21 @@ def _detailed_description_block(
                 )
             )
             for line_number, line in enumerate(shot.lines, start=1)
-        )
+        ]
+        body = "\n".join(rendered_lines)
         present_audio = {
             int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(body)
         }
         for subject in sorted(_shot_generated_dialogue_subjects(shot)):
             for audio, speaker in sorted(audio_by_subject.get(subject, [])):
                 if audio not in present_audio:
-                    body += (
-                        f" For <Subject {subject}> (S{speaker})'s explicitly specified "
+                    rendered_lines.append(
+                        f"For <Subject {subject}> (S{speaker})'s explicitly specified "
                         f"dialogue in this shot, use <Audio {audio}> only as a voice-timbre "
                         "and delivery reference; do not copy or introduce any other speech "
                         "from the source audio."
                     )
+        body = "\n".join(rendered_lines)
         if shot_number == 1:
             parts.append(f"[Shot 1] {body}")
         else:
@@ -1545,13 +1522,7 @@ def _shot_object(
                 "cannot add generated dialogue, another reused vocal signal, "
                 "environment, or sound effects"
             )
-    common_lines = _common_lines_for_scene(
-        emd,
-        active_subjects,
-        set(voice_audio) | reused_audio_numbers,
-    )
     detailed = _detailed_description_block(
-        common_lines,
         scene,
         voice_audio,
         background_music_reuse,
@@ -1660,8 +1631,9 @@ def generate_json(
     _validate_retention_rules(emd)
     _validate_common_prompt(emd, speech_guard=speech_guard)
     scene_speakers = _scene_speaker_bindings(emd)
+    prompt_prefix = "\n".join(_sentence(line) for line in emd.common_prompt)
     plan = {
-        "prompt_prefix": "",
+        "prompt_prefix": prompt_prefix,
         "defaults": {"duration_seconds": 5, "steps": steps},
         "shots": [
             _shot_object(
@@ -1699,8 +1671,16 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
         raise JSONValidationError("Final output is not valid JSON") from exc
     if not isinstance(parsed, dict):
         raise JSONValidationError("Final JSON root must be an object")
-    if parsed.get("prompt_prefix") != "":
-        raise JSONValidationError("prompt_prefix must be an empty string")
+    prompt_prefix = parsed.get("prompt_prefix")
+    if not isinstance(prompt_prefix, str):
+        raise JSONValidationError("prompt_prefix must be a string")
+    if prompt_prefix and (
+        prompt_prefix != prompt_prefix.strip()
+        or any(not line.strip() for line in prompt_prefix.splitlines())
+    ):
+        raise JSONValidationError(
+            "prompt_prefix must contain non-empty trimmed lines"
+        )
 
     defaults = parsed.get("defaults")
     if not isinstance(defaults, dict):
