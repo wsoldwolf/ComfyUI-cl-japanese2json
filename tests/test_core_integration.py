@@ -147,6 +147,28 @@ class CoreIntegrationTests(unittest.TestCase):
         self.assertIn("sole authority for vocal content and timing", prompt[3])
         self.assertNotIn("<d>", prompt[3])
 
+    def test_source_timeline_vocal_lip_sync_without_numbered_audio_end_to_end(self) -> None:
+        source = """# サブジェクト
+* <Picture 1>を外観参照として使用する歌手。
+
+# シーン 8秒
+## ショット
+* <Subject 1>が音楽に合わせて身体を動かす。
+* リップシンク: <Subject 1> <- ソースボーカル
+## 音響
+* 発声: ソースボーカルのみ
+* ソース音声: 完全維持"""
+        canonical = llmj2e.translate_markdown(
+            source, FakeLLM(), "system", max_tokens=128
+        )
+        parsed = jsongen.validate_final_json(
+            jsongen.generate_json(mdparse.parse_markdown(canonical))
+        )
+        prompt = parsed["shots"][0]["prompt"]
+        self.assertNotIn("<Audio ", "\n".join(prompt))
+        self.assertIn("Source Vocal", prompt[3])
+        self.assertIn("locked Source Timeline full mix unchanged", prompt[5])
+
     def test_54_second_bgm_is_sliced_across_six_scenes(self) -> None:
         ranges = (
             (10, "00:00.000-00:10.000"),

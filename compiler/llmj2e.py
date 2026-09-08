@@ -101,11 +101,13 @@ SOUNDSCAPE_PREFIXES = {
     "効果音": "* Sound effects: ",
     "BGM": "* Background music: ",
     "BGM再利用": "* Background music reuse: ",
+    "ソース音声": "* Source audio: ",
 }
 SOUNDSCAPE_FIXED_VALUES = {
     "なし": "NONE",
     "指定台詞のみ": "EXPLICIT_DIALOGUE_ONLY",
     "参照音声のみ": "REFERENCE_AUDIO_ONLY",
+    "ソースボーカルのみ": "SOURCE_VOCAL_ONLY",
 }
 RETENTION_MARKERS = {
     "完全に保持": "fully_preserved",
@@ -125,6 +127,10 @@ JAPANESE_LIP_SYNC_RE = re.compile(
     r"リップシンク\s*[:：]\s*"
     r"<Subject ([0-9]+)>\s*<-\s*<Audio ([0-9]+)>"
     r"(?:\s+(.+))?"
+)
+JAPANESE_SOURCE_VOCAL_LIP_SYNC_RE = re.compile(
+    r"リップシンク\s*[:：]\s*"
+    r"<Subject ([0-9]+)>\s*<-\s*ソースボーカル"
 )
 JAPANESE_LIP_SYNC_DIRECTIVE_PREFIX_RE = re.compile(r"リップシンク\s*[:：]")
 JAPANESE_BGM_REUSE_RE = re.compile(
@@ -271,12 +277,29 @@ def _lip_sync_record(
     record_id: str,
     block_index: int,
 ) -> TranslationRecord:
+    source_match = JAPANESE_SOURCE_VOCAL_LIP_SYNC_RE.fullmatch(body)
+    if source_match is not None:
+        subject_text = source_match.group(1)
+        subject = int(subject_text)
+        if subject_text != str(subject) or not 1 <= subject <= 4:
+            raise TranslationError(
+                f"Lip-sync Subject at line {line_number} must be in the Subject 1-4 range"
+            )
+        return TranslationRecord(
+            record_id=record_id,
+            section="Shot",
+            block_index=block_index,
+            payload=None,
+            translated=f"Lip sync: <Subject {subject}> <- SOURCE_VOCAL",
+        )
+
     match = JAPANESE_LIP_SYNC_RE.fullmatch(body)
     if match is None:
         raise TranslationError(
             f"Invalid lip-sync bullet at line {line_number}; use "
             "'* リップシンク: <Subject N> <- <Audio N>' or "
-            "'* リップシンク: <Subject N> <- <Audio N> 「台詞」'"
+            "'* リップシンク: <Subject N> <- <Audio N> 「台詞」', or "
+            "'* リップシンク: <Subject N> <- ソースボーカル'"
         )
     subject_text, audio_text, source_dialogue = match.groups()
     subject = int(subject_text)
@@ -569,7 +592,7 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                 continue
             if current.section == "Soundscape":
                 match = re.fullmatch(
-                    r"(環境音|効果音|発声|BGM再利用|BGM)\s*[:：]\s*(.*)",
+                    r"(環境音|効果音|発声|BGM再利用|BGM|ソース音声)\s*[:：]\s*(.*)",
                     body,
                 )
                 if match is None:
@@ -600,7 +623,14 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                     raise TranslationError(
                         f"BGM and BGM reuse are mutually exclusive at line {line_number}"
                     )
-                if label == "BGM再利用":
+                if label == "ソース音声":
+                    if value != "完全維持":
+                        raise TranslationError(
+                            f"Invalid source audio value at line {line_number}; use 完全維持"
+                        )
+                    translated = "FULLY_PRESERVE"
+                    payload = None
+                elif label == "BGM再利用":
                     reuse_match = JAPANESE_BGM_REUSE_RE.fullmatch(value)
                     if reuse_match is None:
                         raise TranslationError(
@@ -641,7 +671,7 @@ def lex_japanese_markdown(plain_text: str) -> LexicalDocument:
                     if value not in SOUNDSCAPE_FIXED_VALUES:
                         raise TranslationError(
                             f"Invalid vocalization value at line {line_number}; use "
-                            "なし, 指定台詞のみ, or 参照音声のみ"
+                            "なし, 指定台詞のみ, 参照音声のみ, or ソースボーカルのみ"
                         )
                     translated = SOUNDSCAPE_FIXED_VALUES[value]
                     payload = None

@@ -98,7 +98,7 @@ optionalは次である。
 - `strict`: 保護台詞を同じ行に持たない肯定的な英語発声キューをエラーにする。
 - `warn`: ComfyUIへWARNINGを出し、該当英文を変更せずJSON生成を続行する。Audio参照、話者ID又は発声許可は自動追加せず、無音フォールバックも変更しないため、MiniMax H3が想定外の人物音声を生成する可能性がある。
 
-`warn`でも、台詞又は台詞なしリップシンクとSoundscape発声許可の不一致、不正なダイレクトスピーチ、参照、リップシンク又はSoundscape構造はエラーである。
+`warn`でも、台詞、番号付き台詞なしリップシンク又はSource Timeline駆動リップシンクとSoundscape発声許可の不一致、不正なダイレクトスピーチ、参照、リップシンク又はSoundscape構造はエラーである。
 
 各値は実行時にも型と範囲を検証する。Booleanを整数として受理してはならない。
 
@@ -373,13 +373,15 @@ Shot内の構造化リップシンクバレットは次とする。
 ```text
 * リップシンク: <Subject N> <- <Audio N> 「正確な台詞」
 * リップシンク: <Subject N> <- <Audio N>
+* リップシンク: <Subject N> <- ソースボーカル
 ```
 
-Subject 1～4及びAudio 1～3を必須とする。台詞指定形式は空でない台詞1個を必須とし、参照音声駆動形式は台詞を持たない。LLMJ2Eはどちらのバレットも翻訳ストリームへ含めず、Pythonで検証して次の正規形へ固定変換する。
+Subject 1～4を必須とする。番号付き形式ではAudio 1～3も必須とする。台詞指定形式は空でない台詞1個を必須とし、番号付き参照音声駆動形式及びSource Timeline駆動形式は台詞を持たない。LLMJ2Eはいずれのバレットも翻訳ストリームへ含めず、Pythonで検証して次の正規形へ固定変換する。
 
 ```text
 * Lip sync: <Subject N> <- <Audio N>: <d>[Japanese]正確な台詞</d>
 * Lip sync: <Subject N> <- <Audio N>
+* Lip sync: <Subject N> <- SOURCE_VOCAL
 ```
 
 MDPARSEは正規形をShot行の元位置に保持する。JSONGENは通常の発話Audio再利用を`audio reuse`、`partially_copy`及び対象Subjectの`(SN)`へ展開する。同じAudioを複数Subjectへ割り当てること、又は同一Sceneで声質参照と信号再利用へ競合させることはエラーとする。
@@ -387,6 +389,8 @@ MDPARSEは正規形をShot行の元位置に保持する。JSONGENは通常の�
 同じAudioがSceneの`BGM再利用`にも指定されている場合、そのリップシンクは独立した発話音声ではなく、再利用BGM内の元ボーカルを人物が歌唱演技する指定として展開する。記載された台詞は歌詞の正本であり、元BGMのボーカル信号、語句及びタイミングを保持して、置換又は追加ボーカルを生成しない。
 
 参照音声駆動形式では、Audioの現在区間を発声内容とタイミングの唯一の正本とする。文字起こし又は歌詞推測は行わず、音素時刻、口の閉鎖、持続音及びフレーズ境界へ同期する固定英文を生成する。人声のない区間又は間奏では口を閉じ、Scene境界で曲若しくは歌唱フレーズを再開始せず、継続境界をまたぐフレーズは現在の口形と時刻を継続する。単語又は歌詞の生成、置換、反復、翻訳及び追加を禁止する。
+
+Source Timeline駆動形式は、Contex-Loopの`source_timeline`へ接続されたロック済みフルミックスと、`lip_sync_voice`へ接続された同尺・同起点のボーカルステムを対象とする。番号付きAudioスロットを有効化せず、Source Vocalは口形駆動だけに使い、最終音声へ追加しない。
 
 構造化リップシンク行自体が発声又は歌唱指示を兼ねる。別のShot行へダイレクトスピーチのない肯定的な発声又は歌唱指示を追加した場合は、通常の発声安全規則により`strict`ではエラー、`warn`では警告付きで通過させる。
 
@@ -408,7 +412,19 @@ MDPARSEは正規形をShot行の元位置に保持する。JSONGENは通常の�
 
 ### 9.6 Soundscape
 
-Soundscapeは各Sceneの`Soundscape`値へ保存する。フィールドはEnvironment、Sound effects、Vocalization、Background music及び構造化されたBackground music reuseである。発声は`なし`、`指定台詞のみ`又は`参照音声のみ`であり、それぞれ`NONE`、`EXPLICIT_DIALOGUE_ONLY`又は`REFERENCE_AUDIO_ONLY`へ固定変換する。発声省略又は`なし`は無発声、BGM生成とBGM再利用の両方を省略すれば`non_diegetic_music: N/A`である。全項目の省略は完全無音である。
+Soundscapeは各Sceneの`Soundscape`値へ保存する。フィールドはEnvironment、Sound effects、Vocalization、Background music、構造化されたBackground music reuse及びSource audioである。発声は`なし`、`指定台詞のみ`、`参照音声のみ`又は`ソースボーカルのみ`であり、それぞれ`NONE`、`EXPLICIT_DIALOGUE_ONLY`、`REFERENCE_AUDIO_ONLY`又は`SOURCE_VOCAL_ONLY`へ固定変換する。`ソース音声: 完全維持`は`Source audio: FULLY_PRESERVE`へ固定変換する。発声省略又は`なし`は無発声、BGM生成、BGM再利用及びSource audioを全て省略すれば`non_diegetic_music: N/A`である。全項目の省略は完全無音である。
+
+Source Timeline経路の例を次に示す。
+
+```text
+## ショット
+* リップシンク: <Subject 1> <- ソースボーカル
+## 音響
+* 発声: ソースボーカルのみ
+* ソース音声: 完全維持
+```
+
+間奏Sceneではリップシンク行を省略し、`発声: なし`と`ソース音声: 完全維持`を使用する。Source audio保持は生成BGM、BGM再利用、番号付きAudio、生成台詞、Environment及びSound effectsと同一Sceneで併用しない。
 
 生成BGMは任意の日本語説明をLLMで英訳する。楽器、テンポ、リズム及び音量変化を対象とし、Audio参照、ダイレクトスピーチ又は具体的な歌詞は受理しない。劇中人物にも聞こえる音楽は生成BGMではなくShot本文へ書く。
 
@@ -487,9 +503,11 @@ BGM再利用Audioも独立行で定義する。BGM内ボーカルのリップシ
 
 BGM再利用だけが有効な無Subject Sceneでは、無Subject固定文の後へAudio定義を追加する。
 
+Source Vocal駆動時は番号付きAudio定義を作らず、現在のSource Timelineボーカルステム、対象Subject及びShotの結び付きを固定文で追加する。
+
 ### 10.2 summary
 
-タスク種別は`[reference generation]`を基底とする。声質参照Audioがあれば`audio reference`、通常リップシンク又はBGM再利用Audioがあれば`audio reuse`を追加する。両方があれば`[reference generation + audio reuse + audio reference]`とする。BGM再利用ではAudio番号、コピー関係及び同じAudio内のボーカルがリップシンクを駆動するかを記述する。`継続`はContex-Loopのガイド設定であり、公式Full-Referenceの`video continuation`参照種別とは扱わない。
+タスク種別は`[reference generation]`を基底とする。声質参照Audioがあれば`audio reference`、通常リップシンク又はBGM再利用Audioがあれば`audio reuse`を追加する。Source audio保持では`source audio preservation`、Source Vocal駆動では`source-vocal lip synchronization`を追加する。BGM再利用ではAudio番号、コピー関係及び同じAudio内のボーカルがリップシンクを駆動するかを記述する。`継続`はContex-Loopのガイド設定であり、公式Full-Referenceの`video continuation`参照種別とは扱わない。
 
 ### 10.3 retention_analysis
 
@@ -498,6 +516,8 @@ BGM再利用だけが有効な無Subject Sceneでは、無Subject固定文の後
 Audio声質参照は`reference`を使い、元信号及び元発話をコピーしないことを明示する。通常リップシンクAudioは`partially_copy`を使い、対象Shot、対象Subject及び他の音響層が別生成であることを明示する。
 
 BGM再利用Audioは入力どおり`fully_copy`又は`partially_copy`を使う。前者は元Audio全体を最終音声トラックとして1:1保持し、後者はBGM信号を保持しながら他音響層を別生成できることを記述する。時間範囲付き`partially_copy`では正確な始端と終端及び非再構成制約を記述する。同じAudio内のボーカルへ同期する場合は対象SubjectとShotを同じAudio行へ統合する。このセクションへ`(Sx)`を書かない。
+
+Source audio保持では`Source Timeline: fully_preserved`固定行を出力し、フルミックスの波形、構成、ボーカル、テンポ、絶対時刻及び内部ミックスを維持する。Source Vocal駆動時は、口形駆動専用で最終ミックスへ追加しないこと、対象Subject及びShotを同じ固定行へ記述する。このセクションへ話者IDは書かない。
 
 ### 10.4 detailed_description
 
@@ -521,11 +541,15 @@ Scene-wide style and premise.
 
 時間範囲付きBGM再利用では、適用Common及びScene preambleの後、`[Shot 1]`より前に、元区間をScene全体へ1:1で割り当てて再構成、再生成又はリタイミングしない固定文を追加する。
 
+Source audio保持では、現在のSource Timeline絶対時間区間をScene全体で連続使用し、生成、置換、再開始、再ミックス、リタイミング、ループ、クロスフェード、複製又は音声追加を行わない固定文を`[Shot 1]`より前へ追加する。`SOURCE_VOCAL`行はSource Vocalの人声区間、音素、閉口、持続音及びフレーズ境界だけで口形を駆動し、無声区間では閉口する固定文へ置換する。
+
 ### 10.5 overall_soundscape
 
 Environment、Sound effects及び許可済み明示台詞だけを連結する。明示台詞を許可した場合でも台詞本文はここへ複製せず、shot-synchronizedな指定台詞だけが唯一の人物発声であると記述する。全音響が無効なら`Complete silence.`。生成BGMだけが有効なら、環境音、物理音及び人物発声がないことを明示し、BGMと矛盾する`Complete silence.`を使用しない。
 
 BGM再利用だけが有効なら、元トラックに含まれる可能性があるボーカル又は他音響層を否定せず、別生成の環境音、物理音及び人物発声を追加しないと記述する。同じBGM内のボーカルへリップシンクする場合、その元ボーカルが唯一の同期発声であり、新しい声を生成しないと記述する。
+
+Source audio保持では、ロック済みSource Timelineフルミックスが唯一の最終音声であると記述する。Source Vocalは口形駆動専用で、別音声としてミックスしない。音楽、声、環境音及び効果音を生成、置換又は追加しない。
 
 ### 10.6 non_diegetic_music
 
@@ -537,6 +561,8 @@ N/A
 ```
 
 生成BGMが指定されれば翻訳済み本文を出力する。BGM再利用ではAudio番号、`fully_copy`又は`partially_copy`の意味、audience-only scoreであることを出力する。時間範囲があれば、正確な始端と終端、Scene先頭から末尾への1:1割当て及び非再構成制約を追加する。同じAudio内のボーカルへリップシンクする場合は対象Subject、話者ID及びShotを追加し、元ボーカルを置換又は重複生成しない。
+
+Source audio保持では`N/A`ではなく、ロック済みSource Timelineフルミックスを現在の絶対時間位置から変更せず連続使用する固定文を出力する。番号付きAudio参照は出力しない。
 
 H3のBGM生成はランダム性が高く、BGM再利用の固定文及び時間範囲も元波形の同一性を保証しない。再現性、品質又は波形同一性を優先する場合は、Suno等で用意した元音源を保持し、動画生成後にH3生成音声を元音源へ差し替える運用も維持する。
 
@@ -550,13 +576,15 @@ H3のBGM生成はランダム性が高く、BGM再利用の固定文及び時間
 
 参照音声駆動リップシンクは、Shotに台詞なし`Lip sync: <Subject N> <- <Audio N>`があり、SceneのVocalizationが`REFERENCE_AUDIO_ONLY`で、同じSceneに保護台詞がない場合だけ有効である。このモードはAudio区間に既に含まれる人声の視覚同期だけを許可し、新しい発声内容を許可しない。
 
+Source Timeline駆動リップシンクは、Shotに`Lip sync: <Subject N> <- SOURCE_VOCAL`があり、SceneのVocalizationが`SOURCE_VOCAL_ONLY`、Source audioが`FULLY_PRESERVE`の場合だけ有効である。同一Sceneの番号付きAudio、保護台詞及び別Subjectへの同じSource Vocal割当てはエラーとする。
+
 さらに、肯定的な発声動詞を持つ行は同じ行にダイレクトスピーチを必要とする。別行又は別Shotの台詞で条件を満たしたことにしない。話者IDはSubject番号から内部生成し、ユーザー指定を受理しない。
 
 この発声動詞検査だけは`speech_guard`で挙動を選択できる。`strict`は従来どおりエラーにし、`warn`はCommon、Scene preamble又はShotの位置と検出語を`LOGGER.warning()`で記録してJSON生成を続行する。警告文にはMiniMax H3が想定外の人物発声を生成し得ることを含める。`warn`は検出行を書き換えず、Audio又は発声許可を追加せず、Soundscapeから生成される無音指定も変更しない。
 
 検出語は会話、ナレーション、朗読、歌唱及び人物由来の非言語発声（笑い、息を呑む、溜め息、鼻歌、うめき等）を対象とする。Environment又はSound effectsとして指定する非人物音は対象外である。
 
-保護台詞があるのにVocalizationが無効、Vocalizationが`EXPLICIT_DIALOGUE_ONLY`なのに保護台詞がない、台詞なしリップシンクと`REFERENCE_AUDIO_ONLY`が対にならない、又は構造化リップシンク、参照若しくはSoundscapeが不正な場合は、`warn`でもエラーとする。
+保護台詞があるのにVocalizationが無効、Vocalizationが`EXPLICIT_DIALOGUE_ONLY`なのに保護台詞がない、番号付き台詞なしリップシンクと`REFERENCE_AUDIO_ONLY`が対にならない、Source Timeline駆動リップシンクと`SOURCE_VOCAL_ONLY`及び`FULLY_PRESERVE`が対にならない、又は構造化リップシンク、参照若しくはSoundscapeが不正な場合は、`warn`でもエラーとする。
 
 台詞指定の構造化リップシンクは`EXPLICIT_DIALOGUE_ONLY`を、参照音声駆動の構造化リップシンクは`REFERENCE_AUDIO_ONLY`を必要とする。Audioから推測又は自動文字起こしを行わない。純粋なリップシンクだけのSubjectでは、Subject定義内のAudio声質参照を有効化せず、リップシンクバレットのAudioを信号再利用として有効化する。
 

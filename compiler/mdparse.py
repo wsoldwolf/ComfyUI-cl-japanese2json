@@ -14,8 +14,10 @@ from .structures import (
     RETENTION_ATTRIBUTE_TRANSFER,
     RETENTION_RELATIONSHIPS,
     SOUND_NONE,
+    SOURCE_AUDIO_FULLY_PRESERVE,
     VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
     VOCALIZATION_REFERENCE_AUDIO_ONLY,
+    VOCALIZATION_SOURCE_VOCAL_ONLY,
     RetentionRule,
     Scene,
     Shot,
@@ -31,7 +33,7 @@ VALID_SCENE_RE = re.compile(
 DEFENSIVE_SCENE_RE = re.compile(r"^# Scene(?: ([^\s]+)sec)?(?: (CONTINUE))?$")
 VALID_SHOT_RE = re.compile(r"^## Shot(?: ((?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)sec)?$")
 SOUNDSCAPE_LINE_RE = re.compile(
-    r"^\* (Environment|Sound effects|Vocalization|Background music): (.+)$"
+    r"^\* (Environment|Sound effects|Vocalization|Background music|Source audio): (.+)$"
 )
 BACKGROUND_MUSIC_REUSE_LINE_RE = re.compile(
     r"^\* Background music reuse: <Audio ([1-3])> "
@@ -42,6 +44,9 @@ BACKGROUND_MUSIC_REUSE_LINE_RE = re.compile(
 LIP_SYNC_LINE_RE = re.compile(
     r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>"
     r"(?:: (<d>(?:(?!<d>|</d>).)+</d>))?$"
+)
+SOURCE_VOCAL_LIP_SYNC_LINE_RE = re.compile(
+    r"^Lip sync: <Subject ([1-4])> <- SOURCE_VOCAL$"
 )
 RETENTION_LINE_RE = re.compile(
     r"^\* <Subject ([1-9][0-9]*)> "
@@ -156,12 +161,19 @@ def _set_soundscape_value(
             raise MarkdownParseError(
                 f"Duplicate or conflicting canonical background music value at line {line_number}"
             )
+    elif label == "Source audio":
+        attribute = "source_audio"
+        if value != SOURCE_AUDIO_FULLY_PRESERVE:
+            raise MarkdownParseError(
+                f"Invalid canonical source audio value at line {line_number}"
+            )
     else:
         attribute = "vocalization"
         if value not in {
             SOUND_NONE,
             VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
             VOCALIZATION_REFERENCE_AUDIO_ONLY,
+            VOCALIZATION_SOURCE_VOCAL_ONLY,
         }:
             raise MarkdownParseError(
                 f"Invalid canonical vocalization value at line {line_number}"
@@ -313,6 +325,7 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                         current_scene.soundscape.vocalization,
                         current_scene.soundscape.background_music,
                         current_scene.soundscape.background_music_reuse,
+                        current_scene.soundscape.source_audio,
                     )
                 ):
                     raise MarkdownParseError(
@@ -419,6 +432,10 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
             raise MarkdownParseError(
                 f"Speaker IDs are generated internally and cannot be written at line {line_number}"
             )
+        if body.startswith("Lip sync:") and state != "SHOT":
+            raise MarkdownParseError(
+                f"Canonical lip-sync bullet at line {line_number} must belong to a Shot"
+            )
         if state == "SUBJECTS":
             emd.subjects.append(body)
             if len(emd.subjects) > 4:
@@ -456,11 +473,12 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
         elif state == "SHOT" and current_shot is not None:
             if body.startswith("Lip sync:"):
                 lip_sync = LIP_SYNC_LINE_RE.fullmatch(body)
-                if lip_sync is None:
+                source_lip_sync = SOURCE_VOCAL_LIP_SYNC_LINE_RE.fullmatch(body)
+                if lip_sync is None and source_lip_sync is None:
                     raise MarkdownParseError(
                         f"Invalid canonical lip-sync bullet at line {line_number}"
                     )
-                protected_dialogue = lip_sync.group(3)
+                protected_dialogue = None if lip_sync is None else lip_sync.group(3)
                 if protected_dialogue is not None:
                     transcript = protected_dialogue[3:-4]
                     spoken_text = re.sub(
@@ -487,6 +505,7 @@ def parse_markdown(markdown: str, *, external_first_context: bool = False) -> Em
                 current_scene.soundscape.vocalization,
                 current_scene.soundscape.background_music,
                 current_scene.soundscape.background_music_reuse,
+                current_scene.soundscape.source_audio,
             )
         ):
             raise MarkdownParseError(

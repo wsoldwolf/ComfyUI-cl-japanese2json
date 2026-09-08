@@ -544,6 +544,22 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertNotIn("Lip sync", llm.calls[0]["messages"][-1]["content"])
 
+    def test_source_timeline_lip_sync_is_canonicalized_without_audio_number(self) -> None:
+        source = (
+            "# サブジェクト\n* 人物。\n"
+            "# シーン 5秒\n## ショット\n"
+            "* リップシンク: <Subject 1> <- ソースボーカル\n"
+            "## 音響\n* 発声: ソースボーカルのみ\n"
+            "* ソース音声: 完全維持"
+        )
+        llm = FakeLLM()
+        output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=128)
+        self.assertIn("* Lip sync: <Subject 1> <- SOURCE_VOCAL", output)
+        self.assertIn("* Vocalization: SOURCE_VOCAL_ONLY", output)
+        self.assertIn("* Source audio: FULLY_PRESERVE", output)
+        self.assertNotIn("<Audio ", output)
+        self.assertNotIn("SOURCE_VOCAL", llm.calls[0]["messages"][-1]["content"])
+
     def test_lip_sync_word_without_directive_colon_is_ordinary_prose(self) -> None:
         source = (
             "# サブジェクト\n* 人物。\n"
@@ -597,6 +613,16 @@ class LLMJ2ETests(unittest.TestCase):
             max_tokens=64,
         )
         self.assertIn("* Vocalization: REFERENCE_AUDIO_ONLY", audio_only)
+
+        source_only = llmj2e.translate_markdown(
+            "# シーン\n## ショット\n* 動作。\n## 音響\n"
+            "* 発声: ソースボーカルのみ\n* ソース音声: 完全維持",
+            FakeLLM(),
+            "sys",
+            max_tokens=64,
+        )
+        self.assertIn("* Vocalization: SOURCE_VOCAL_ONLY", source_only)
+        self.assertIn("* Source audio: FULLY_PRESERVE", source_only)
 
     def test_background_music_reuse_is_canonicalized_without_llm_translation(self) -> None:
         for japanese_value, canonical_value in (
@@ -654,6 +680,7 @@ class LLMJ2ETests(unittest.TestCase):
         invalid_documents = (
             "# 保持分析\n* <Subject 1> 完全に保持: 外観。\n## 音響\n* 環境音: 風音。",
             "# シーン\n## ショット\n* 動作。\n## 音響\n* 発声: 自動",
+            "# シーン\n## ショット\n* 動作。\n## 音響\n* ソース音声: 再生成",
             "# シーン\n## ショット\n* 動作。\n## 音響\n* 不明: 音。",
             "# シーン\n## ショット\n* 動作。\n## 響き\n* 環境音: 音。",
             "# シーン\n## ショット\n* 動作。\n## 音響\n* BGM: <Audio 1>を使用する。",

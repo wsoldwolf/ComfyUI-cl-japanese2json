@@ -17,6 +17,8 @@ Soundscape = structures.Soundscape
 BackgroundMusicReuse = structures.BackgroundMusicReuse
 EXPLICIT_DIALOGUE_ONLY = structures.VOCALIZATION_EXPLICIT_DIALOGUE_ONLY
 REFERENCE_AUDIO_ONLY = structures.VOCALIZATION_REFERENCE_AUDIO_ONLY
+SOURCE_VOCAL_ONLY = structures.VOCALIZATION_SOURCE_VOCAL_ONLY
+SOURCE_AUDIO_FULLY_PRESERVE = structures.SOURCE_AUDIO_FULLY_PRESERVE
 
 
 def make_shot(*lines: str, start_ms: int = 0) -> Shot:
@@ -24,6 +26,75 @@ def make_shot(*lines: str, start_ms: int = 0) -> Shot:
 
 
 class JSONGenerationTests(unittest.TestCase):
+    def test_source_timeline_audio_and_vocal_generate_numberless_fixed_sections(self) -> None:
+        emd = Emd(
+            subjects=["a singer based on <Picture 1>."],
+            scenes=[
+                Scene(
+                    shots=[make_shot("Lip sync: <Subject 1> <- SOURCE_VOCAL")],
+                    soundscape=Soundscape(
+                        vocalization=SOURCE_VOCAL_ONLY,
+                        source_audio=SOURCE_AUDIO_FULLY_PRESERVE,
+                    ),
+                )
+            ],
+        )
+        parsed = jsongen.validate_final_json(jsongen.generate_json(emd))
+        prompt = parsed["shots"][0]["prompt"]
+        self.assertNotIn("<Audio ", "\n".join(prompt))
+        self.assertIn("Source Timeline vocal stem", prompt[0])
+        self.assertIn("source-vocal lip synchronization", prompt[1])
+        self.assertIn("Source Timeline: fully_preserved", prompt[2])
+        self.assertIn("current absolute Source Timeline interval", prompt[3])
+        self.assertIn("sole authoritative audio", prompt[4])
+        self.assertIn("locked Source Timeline full mix unchanged", prompt[5])
+
+    def test_source_timeline_audio_can_be_preserved_during_silent_intro(self) -> None:
+        emd = Emd(
+            subjects=["a singer."],
+            scenes=[
+                Scene(
+                    shots=[make_shot("<Subject 1> keeps the mouth closed.")],
+                    soundscape=Soundscape(
+                        vocalization=structures.SOUND_NONE,
+                        source_audio=SOURCE_AUDIO_FULLY_PRESERVE,
+                    ),
+                )
+            ],
+        )
+        prompt = json.loads(jsongen.generate_json(emd))["shots"][0]["prompt"]
+        self.assertIn("No character vocalization is generated", prompt[4])
+        self.assertNotIn("lip-sync", prompt[0])
+
+    def test_source_timeline_audio_rejects_inconsistent_or_mixed_audio_roles(self) -> None:
+        invalid_scenes = (
+            Scene(
+                shots=[make_shot("Lip sync: <Subject 1> <- SOURCE_VOCAL")],
+                soundscape=Soundscape(vocalization=SOURCE_VOCAL_ONLY),
+            ),
+            Scene(
+                shots=[make_shot("Lip sync: <Subject 1> <- SOURCE_VOCAL")],
+                soundscape=Soundscape(
+                    vocalization=SOURCE_VOCAL_ONLY,
+                    source_audio=SOURCE_AUDIO_FULLY_PRESERVE,
+                    background_music="Piano.",
+                ),
+            ),
+            Scene(
+                shots=[make_shot(
+                    "Lip sync: <Subject 1> <- SOURCE_VOCAL",
+                    "Lip sync: <Subject 2> <- SOURCE_VOCAL",
+                )],
+                soundscape=Soundscape(
+                    vocalization=SOURCE_VOCAL_ONLY,
+                    source_audio=SOURCE_AUDIO_FULLY_PRESERVE,
+                ),
+            ),
+        )
+        for scene in invalid_scenes:
+            with self.subTest(scene=scene), self.assertRaises(errors.JSONGenerationError):
+                jsongen.generate_json(Emd(subjects=["one.", "two."], scenes=[scene]))
+
     def test_prompt_has_exact_official_six_section_order(self) -> None:
         emd = Emd(
             subjects=["a character based on <Picture 1>."],

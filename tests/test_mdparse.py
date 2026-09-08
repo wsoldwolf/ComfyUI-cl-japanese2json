@@ -198,15 +198,36 @@ class MarkdownParserTests(unittest.TestCase):
             "REFERENCE_AUDIO_ONLY",
         )
 
+    def test_source_timeline_lip_sync_and_audio_mode_are_preserved(self) -> None:
+        emd = parse_markdown(
+            "# Subjects\n* one.\n# Scene\n## Shot\n"
+            "* Lip sync: <Subject 1> <- SOURCE_VOCAL\n"
+            "## Soundscape\n* Vocalization: SOURCE_VOCAL_ONLY\n"
+            "* Source audio: FULLY_PRESERVE"
+        )
+        self.assertEqual(
+            emd.scenes[0].shots[0].lines,
+            ["Lip sync: <Subject 1> <- SOURCE_VOCAL"],
+        )
+        self.assertEqual(emd.scenes[0].soundscape.vocalization, "SOURCE_VOCAL_ONLY")
+        self.assertEqual(emd.scenes[0].soundscape.source_audio, "FULLY_PRESERVE")
+
     def test_invalid_canonical_lip_sync_is_rejected(self) -> None:
         invalid_lines = (
             "Lip sync: <Subject 1> <- <Audio 1>: missing dialogue",
             "Lip sync: <Subject 1> <- <Audio 1>: <d>[Japanese]</d>",
             "Lip sync: <Subject 1> <- <Audio 1>: <d>one</d> <d>two</d>",
+            "Lip sync: <Subject 1> <- SOURCE_VOCAL: transcript",
         )
         for line in invalid_lines:
             with self.subTest(line=line), self.assertRaises(errors.MarkdownParseError):
                 parse_markdown(f"# Scene\n## Shot\n* {line}")
+
+        with self.assertRaises(errors.MarkdownParseError):
+            parse_markdown(
+                "# Scene\n* Lip sync: <Subject 1> <- SOURCE_VOCAL\n"
+                "## Shot\n* Action."
+            )
 
     def test_empty_soundscape_is_rejected(self) -> None:
         with self.assertRaises(errors.MarkdownParseError):

@@ -19,8 +19,10 @@ from .structures import (
     RETENTION_FULLY_PRESERVED,
     RETENTION_RELATIONSHIPS,
     SOUND_NONE,
+    SOURCE_AUDIO_FULLY_PRESERVE,
     VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
     VOCALIZATION_REFERENCE_AUDIO_ONLY,
+    VOCALIZATION_SOURCE_VOCAL_ONLY,
     RetentionRule,
     Scene,
     Shot,
@@ -41,6 +43,9 @@ DIRECT_SPEECH_RE = re.compile(r"(?<!\\)<d>.*?(?<!\\)</d>", re.DOTALL)
 LIP_SYNC_LINE_RE = re.compile(
     r"^Lip sync: <Subject ([1-4])> <- <Audio ([1-3])>"
     r"(?:: (<d>(?:(?!<d>|</d>).)+</d>))?$"
+)
+SOURCE_VOCAL_LIP_SYNC_LINE_RE = re.compile(
+    r"^Lip sync: <Subject ([1-4])> <- SOURCE_VOCAL$"
 )
 SPEAKER_ID_RE = re.compile(r"(?<!\\)\(S([1-9][0-9]*)\)")
 SPEECH_CUE_RE = re.compile(
@@ -121,6 +126,13 @@ class ReusedAudioBinding:
     @property
     def is_audio_driven(self) -> bool:
         return bool(self.audio_driven_shot_numbers)
+
+
+@dataclass
+class SourceVocalBinding:
+    subject: int
+    speaker: int
+    shot_numbers: list[int] = field(default_factory=list)
 
 
 def _scene_lines(scene: Scene) -> Iterable[str]:
@@ -226,6 +238,13 @@ def _scene_has_audio_driven_lip_sync(scene: Scene) -> bool:
     return False
 
 
+def _scene_has_source_vocal_lip_sync(scene: Scene) -> bool:
+    return any(
+        SOURCE_VOCAL_LIP_SYNC_LINE_RE.fullmatch(line) is not None
+        for line in _scene_lines(scene)
+    )
+
+
 def _validate_scene_structure(scene: Scene, scene_number: int) -> None:
     if not isinstance(scene.duration, int) or isinstance(scene.duration, bool):
         raise JSONGenerationError(f"Scene {scene_number} duration must be an integer")
@@ -281,14 +300,17 @@ def _validate_soundscape(
         ("sound effects", soundscape.sound_effects),
         ("vocalization", soundscape.vocalization),
         ("background music", soundscape.background_music),
+        ("source audio", soundscape.source_audio),
     ):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise JSONGenerationError(f"{context} {label} must be a non-empty string")
-        if label != "vocalization" and isinstance(value, str):
+        if label not in {"vocalization", "source audio"} and isinstance(value, str):
             if DIRECT_SPEECH_RE.search(value) or AUDIO_REFERENCE_RE.search(value):
                 raise JSONGenerationError(
                     f"{context} {label} cannot contain direct speech or an Audio reference"
                 )
+    if soundscape.source_audio not in {None, SOURCE_AUDIO_FULLY_PRESERVE}:
+        raise JSONGenerationError(f"{context} has an invalid source audio mode")
     music_reuse = soundscape.background_music_reuse
     if music_reuse is not None:
         if not isinstance(music_reuse, BackgroundMusicReuse):
@@ -341,6 +363,20 @@ def _validate_soundscape(
                     f"{context} background music source range must exactly match the "
                     f"{duration_seconds}-second Scene duration"
                 )
+    if soundscape.source_audio == SOURCE_AUDIO_FULLY_PRESERVE:
+        if music_reuse is not None or soundscape.background_music not in {None, SOUND_NONE}:
+            raise JSONGenerationError(
+                f"{context} cannot combine Source Timeline audio preservation with "
+                "generated or numbered-reference background music"
+            )
+        if any(
+            value not in {None, SOUND_NONE}
+            for value in (soundscape.environment, soundscape.sound_effects)
+        ):
+            raise JSONGenerationError(
+                f"{context} preserves Source Timeline audio, so it cannot add "
+                "environment or sound effects"
+            )
 
 
 def _scene_allows_dialogue(
@@ -352,8 +388,15 @@ def _scene_allows_dialogue(
     mode = scene.soundscape.vocalization
     has_direct_speech = _scene_has_direct_speech(scene)
     has_audio_driven_lip_sync = _scene_has_audio_driven_lip_sync(scene)
+    has_source_vocal_lip_sync = _scene_has_source_vocal_lip_sync(scene)
 
     if mode == VOCALIZATION_EXPLICIT_DIALOGUE_ONLY:
+        if has_source_vocal_lip_sync:
+            raise JSONGenerationError(
+                f"Scene {scene_number} uses Source Timeline vocal lip synchronization, "
+                "but vocalization is set to explicit dialogue; use "
+                "'* 発声: ソースボーカルのみ' under '## 音響'"
+            )
         if has_audio_driven_lip_sync:
             raise JSONGenerationError(
                 f"Scene {scene_number} uses transcript-free lip synchronization, "
@@ -371,10 +414,32 @@ def _scene_allows_dialogue(
                 "contains protected direct speech; remove the transcript or use "
                 "'* 発声: 指定台詞のみ' under '## 音響'"
             )
+        if has_source_vocal_lip_sync:
+            raise JSONGenerationError(
+                f"Scene {scene_number} uses Source Timeline vocal lip synchronization, "
+                "but vocalization is set to numbered reference audio; use "
+                "'* 発声: ソースボーカルのみ' under '## 音響'"
+            )
         if not has_audio_driven_lip_sync:
             raise JSONGenerationError(
                 f"Scene {scene_number} enables reference-audio-only vocalization but "
                 "contains no transcript-free lip-sync bullet"
+            )
+    elif mode == VOCALIZATION_SOURCE_VOCAL_ONLY:
+        if has_direct_speech or has_audio_driven_lip_sync:
+            raise JSONGenerationError(
+                f"Scene {scene_number} enables Source Timeline vocalization but "
+                "contains numbered-reference dialogue or lip synchronization"
+            )
+        if not has_source_vocal_lip_sync:
+            raise JSONGenerationError(
+                f"Scene {scene_number} enables Source Timeline vocalization but "
+                "contains no Source Vocal lip-sync bullet"
+            )
+        if scene.soundscape.source_audio != SOURCE_AUDIO_FULLY_PRESERVE:
+            raise JSONGenerationError(
+                f"Scene {scene_number} enables Source Timeline vocalization but "
+                "does not include '* ソース音声: 完全維持' under '## 音響'"
             )
     elif mode not in {None, SOUND_NONE}:
         raise JSONGenerationError(
@@ -390,6 +455,12 @@ def _scene_allows_dialogue(
             f"Scene {scene_number} contains transcript-free lip synchronization, but "
             "reference-audio-only vocalization is not enabled; add "
             "'* 発声: 参照音声のみ' under '## 音響'"
+        )
+    elif has_source_vocal_lip_sync:
+        raise JSONGenerationError(
+            f"Scene {scene_number} contains Source Timeline vocal lip synchronization, "
+            "but Source Vocal vocalization is not enabled; add "
+            "'* 発声: ソースボーカルのみ' under '## 音響'"
         )
 
     for line_number, line in enumerate(scene.preamble, start=1):
@@ -412,6 +483,7 @@ def _scene_allows_dialogue(
     return mode in {
         VOCALIZATION_EXPLICIT_DIALOGUE_ONLY,
         VOCALIZATION_REFERENCE_AUDIO_ONLY,
+        VOCALIZATION_SOURCE_VOCAL_ONLY,
     }
 
 
@@ -471,7 +543,27 @@ def _overall_soundscape(
     has_generated_dialogue: bool,
     has_bgm_lip_sync: bool,
     has_audio_driven_lip_sync: bool,
+    source_vocal: SourceVocalBinding | None,
+    preserves_source_audio: bool,
 ) -> str:
+    if preserves_source_audio:
+        if source_vocal is not None:
+            return (
+                OVERALL_SOUNDSCAPE_PREFIX
+                + "The locked Source Timeline soundtrack is the sole authoritative "
+                "audio. Its aligned Source Vocal track is used only to drive the "
+                f"visible lip synchronization of <Subject {source_vocal.subject}> "
+                f"(S{source_vocal.speaker}); it is not mixed as an additional track. "
+                "Do not generate, replace, restart, remix, retime, duplicate, or add "
+                "any music, voice, ambience, or sound effect."
+            )
+        return (
+            OVERALL_SOUNDSCAPE_PREFIX
+            + "The locked Source Timeline soundtrack is the sole authoritative audio. "
+            "Do not generate, replace, restart, remix, retime, duplicate, or add any "
+            "music, voice, ambience, or sound effect. No character vocalization is "
+            "generated."
+        )
     environment = (
         []
         if scene.soundscape.environment in {None, SOUND_NONE}
@@ -532,6 +624,13 @@ def _non_diegetic_music(
     scene: Scene,
     reused_audio: dict[int, ReusedAudioBinding],
 ) -> str:
+    if scene.soundscape.source_audio == SOURCE_AUDIO_FULLY_PRESERVE:
+        return (
+            NON_DIEGETIC_MUSIC_PREFIX
+            + "Use the locked Source Timeline full mix unchanged and continuously at "
+            "its current absolute timeline position. Do not regenerate, replace, "
+            "restart, remix, retime, loop, crossfade, duplicate, or layer music."
+        )
     music_reuse = scene.soundscape.background_music_reuse
     if music_reuse is not None:
         audio = music_reuse.audio_number
@@ -677,6 +776,8 @@ def _reused_audio_bindings(
         for line_number, line in enumerate(shot.lines, start=1):
             if not line.startswith("Lip sync:"):
                 continue
+            if SOURCE_VOCAL_LIP_SYNC_LINE_RE.fullmatch(line) is not None:
+                continue
             match = LIP_SYNC_LINE_RE.fullmatch(line)
             if match is None:
                 raise JSONGenerationError(
@@ -714,6 +815,28 @@ def _reused_audio_bindings(
     return bindings
 
 
+def _source_vocal_binding(
+    scene: Scene, *, scene_number: int
+) -> SourceVocalBinding | None:
+    binding: SourceVocalBinding | None = None
+    for shot_number, shot in enumerate(scene.shots, start=1):
+        for line_number, line in enumerate(shot.lines, start=1):
+            match = SOURCE_VOCAL_LIP_SYNC_LINE_RE.fullmatch(line)
+            if match is None:
+                continue
+            subject = int(match.group(1))
+            if binding is not None and binding.subject != subject:
+                raise JSONGenerationError(
+                    f"Scene {scene_number} assigns the single Source Vocal track to "
+                    "multiple Subjects"
+                )
+            if binding is None:
+                binding = SourceVocalBinding(subject=subject, speaker=subject)
+            if shot_number not in binding.shot_numbers:
+                binding.shot_numbers.append(shot_number)
+    return binding
+
+
 def _subject_block(
     emd: Emd,
     scene_number: int,
@@ -721,6 +844,7 @@ def _subject_block(
     voice_audio: dict[int, tuple[int, int]],
     reused_audio: dict[int, ReusedAudioBinding],
     background_music_reuse: BackgroundMusicReuse | None,
+    source_vocal: SourceVocalBinding | None,
 ) -> str:
     if not active_subjects and background_music_reuse is None:
         return NO_ACTIVE_SUBJECT_BLOCK
@@ -788,6 +912,13 @@ def _subject_block(
                     f"{_shot_list_text(binding.shot_numbers)}."
                 )
     definitions.extend(audio_definitions[audio] for audio in sorted(audio_definitions))
+    if source_vocal is not None:
+        definitions.append(
+            "The current Source Timeline vocal stem is the sole lip-sync source for "
+            f"<Subject {source_vocal.subject}> (S{source_vocal.speaker}) in "
+            f"{_shot_list_text(source_vocal.shot_numbers)}. No numbered reference-"
+            "audio slot is used for this binding."
+        )
     return SUBJECT_DEFINITIONS_PREFIX + "\n".join(definitions)
 
 
@@ -797,12 +928,18 @@ def _summary_block(
     voice_audio: dict[int, tuple[int, int]],
     reused_audio: dict[int, ReusedAudioBinding],
     background_music_reuse: BackgroundMusicReuse | None,
+    source_vocal: SourceVocalBinding | None,
+    preserves_source_audio: bool,
 ) -> str:
     task_types = ["reference generation"]
     if reused_audio or background_music_reuse is not None:
         task_types.append("audio reuse")
     if voice_audio:
         task_types.append("audio reference")
+    if preserves_source_audio:
+        task_types.append("source audio preservation")
+    if source_vocal is not None:
+        task_types.append("source-vocal lip synchronization")
     prefix = "[" + " + ".join(task_types) + "]"
     if active_subjects:
         labels = [f"<Subject {number}>" for number in active_subjects]
@@ -861,6 +998,16 @@ def _summary_block(
             )
         if audio in reused_audio:
             body += " Its original vocal layer drives the specified lip synchronization."
+    if preserves_source_audio:
+        body += (
+            " The current locked Source Timeline soundtrack is retained without "
+            "generation, replacement, restarting, remixing, retiming, or duplication."
+        )
+    if source_vocal is not None:
+        body += (
+            f" Its aligned Source Vocal track drives <Subject {source_vocal.subject}> "
+            f"(S{source_vocal.speaker}) in {_shot_list_text(source_vocal.shot_numbers)}."
+        )
     return SUMMARY_PREFIX + prefix + " " + body
 
 
@@ -875,12 +1022,15 @@ def _retention_block(
     voice_audio: dict[int, tuple[int, int]],
     reused_audio: dict[int, ReusedAudioBinding],
     background_music_reuse: BackgroundMusicReuse | None,
+    source_vocal: SourceVocalBinding | None,
+    preserves_source_audio: bool,
 ) -> str:
     if (
         not active_subjects
         and not voice_audio
         and not reused_audio
         and background_music_reuse is None
+        and not preserves_source_audio
     ):
         return NO_ACTIVE_RETENTION
 
@@ -987,6 +1137,20 @@ def _retention_block(
             f"{description}."
         )
     lines.extend(audio_lines[audio] for audio in sorted(audio_lines))
+    if preserves_source_audio:
+        source_line = (
+            "Source Timeline: fully_preserved - the locked full-mix waveform, "
+            "arrangement, instrumentation, vocals, tempo, rhythm, absolute timing, "
+            "and internal mix are retained unchanged."
+        )
+        if source_vocal is not None:
+            source_line += (
+                " The aligned Source Vocal track drives only the visible lip "
+                f"synchronization of <Subject {source_vocal.subject}> "
+                f"in {_shot_list_text(source_vocal.shot_numbers)} and is not added to "
+                "the final mix."
+            )
+        lines.append(source_line)
     return RETENTION_ANALYSIS_PREFIX + "\n".join(lines)
 
 
@@ -1038,6 +1202,19 @@ def _render_shot_line(
     context: str,
     background_music_audio: int | None,
 ) -> str:
+    source_lip_sync = SOURCE_VOCAL_LIP_SYNC_LINE_RE.fullmatch(line)
+    if source_lip_sync is not None:
+        subject = int(source_lip_sync.group(1))
+        return (
+            f"<Subject {subject}> (S{subject}) visually performs and lip-syncs only "
+            "to the aligned Source Vocal track at the current absolute Source "
+            "Timeline interval. Treat detected human-vocal activity, phoneme timing, "
+            "visible mouth closures, sustained notes, and phrase boundaries in that "
+            "track as authoritative. During instrumental or silent intervals, keep "
+            "the lips closed. Continue phrases seamlessly across continuation-scene "
+            "boundaries; do not infer lyrics or generate, replace, repeat, translate, "
+            "or add any vocal sound."
+        )
     lip_sync = LIP_SYNC_LINE_RE.fullmatch(line)
     if lip_sync is None:
         return _with_internal_speaker_ids(line, context=context)
@@ -1091,6 +1268,7 @@ def _detailed_description_block(
     scene: Scene,
     voice_audio: dict[int, tuple[int, int]],
     background_music_reuse: BackgroundMusicReuse | None,
+    preserves_source_audio: bool,
 ) -> str:
     parts = [_sentence(line) for line in common_lines]
     parts.extend(_sentence(line) for line in scene.preamble)
@@ -1112,6 +1290,15 @@ def _detailed_description_block(
             "instrumentation, tempo, rhythm, timing, and internal mix without "
             "recomposition, regeneration, restyling, retiming, looping, restarting, "
             "or crossfading."
+        )
+    if preserves_source_audio:
+        parts.append(
+            "Use the locked Source Timeline soundtrack continuously at its current "
+            "absolute timeline interval from this target scene's first frame through "
+            "its final frame. Preserve the full-mix waveform, vocals, arrangement, "
+            "instrumentation, tempo, rhythm, timing, and internal mix without "
+            "generation, replacement, restarting, remixing, retiming, looping, "
+            "crossfading, duplication, or added audio."
         )
     audio_by_subject: dict[int, list[tuple[int, int]]] = {}
     for audio, (subject, speaker) in voice_audio.items():
@@ -1259,6 +1446,7 @@ def _validate_no_user_speaker_ids(emd: Emd) -> None:
                     ("sound effects", scene.soundscape.sound_effects),
                     ("vocalization", scene.soundscape.vocalization),
                     ("background music", scene.soundscape.background_music),
+                    ("source audio", scene.soundscape.source_audio),
                 )
                 if isinstance(value, str)
             )
@@ -1291,6 +1479,10 @@ def _shot_object(
     )
     generated_dialogue_subjects = _generated_dialogue_subjects(scene)
     reused_audio = _reused_audio_bindings(scene, scene_number=scene_number)
+    source_vocal = _source_vocal_binding(scene, scene_number=scene_number)
+    preserves_source_audio = (
+        scene.soundscape.source_audio == SOURCE_AUDIO_FULLY_PRESERVE
+    )
     active_subjects = _referenced_subjects(scene)
     for subject in active_subjects:
         if subject > len(emd.subjects):
@@ -1323,6 +1515,18 @@ def _shot_object(
             f"Scene {scene_number} assigns {labels} both as a voice-timbre "
             "reference and as a directly reused audio signal"
         )
+    if source_vocal is not None and not preserves_source_audio:
+        raise JSONGenerationError(
+            f"Scene {scene_number} uses Source Vocal lip synchronization without "
+            "preserving Source Timeline audio"
+        )
+    if preserves_source_audio and (
+        voice_audio or reused_audio_numbers or generated_dialogue_subjects
+    ):
+        raise JSONGenerationError(
+            f"Scene {scene_number} preserves Source Timeline audio, so it cannot "
+            "also use numbered Audio references or generated dialogue"
+        )
     if (
         background_music_reuse is not None
         and background_music_reuse.relationship == AUDIO_FULLY_COPY
@@ -1351,6 +1555,7 @@ def _shot_object(
         scene,
         voice_audio,
         background_music_reuse,
+        preserves_source_audio,
     )
     detailed_audio = {
         int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(detailed)
@@ -1366,6 +1571,7 @@ def _shot_object(
     has_background_music = (
         scene.soundscape.background_music not in {None, SOUND_NONE}
         or background_music_reuse is not None
+        or preserves_source_audio
     )
     has_bgm_lip_sync = (
         background_music_audio is not None
@@ -1383,6 +1589,7 @@ def _shot_object(
             voice_audio,
             reused_audio,
             background_music_reuse,
+            source_vocal,
         ),
         _summary_block(
             scene,
@@ -1390,6 +1597,8 @@ def _shot_object(
             voice_audio,
             reused_audio,
             background_music_reuse,
+            source_vocal,
+            preserves_source_audio,
         ),
         _retention_block(
             emd,
@@ -1398,6 +1607,8 @@ def _shot_object(
             voice_audio,
             reused_audio,
             background_music_reuse,
+            source_vocal,
+            preserves_source_audio,
         ),
         detailed,
         _overall_soundscape(
@@ -1408,6 +1619,8 @@ def _shot_object(
             has_generated_dialogue=bool(generated_dialogue_subjects),
             has_bgm_lip_sync=has_bgm_lip_sync,
             has_audio_driven_lip_sync=has_audio_driven_lip_sync,
+            source_vocal=source_vocal,
+            preserves_source_audio=preserves_source_audio,
         ),
         _non_diegetic_music(scene, reused_audio),
     ]

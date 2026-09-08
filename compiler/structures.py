@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 SOUND_NONE = "NONE"
 VOCALIZATION_EXPLICIT_DIALOGUE_ONLY = "EXPLICIT_DIALOGUE_ONLY"
 VOCALIZATION_REFERENCE_AUDIO_ONLY = "REFERENCE_AUDIO_ONLY"
+VOCALIZATION_SOURCE_VOCAL_ONLY = "SOURCE_VOCAL_ONLY"
+SOURCE_AUDIO_FULLY_PRESERVE = "FULLY_PRESERVE"
 AUDIO_FULLY_COPY = "fully_copy"
 AUDIO_PARTIALLY_COPY = "partially_copy"
 AUDIO_COPY_RELATIONSHIPS = frozenset({AUDIO_FULLY_COPY, AUDIO_PARTIALLY_COPY})
@@ -39,6 +41,7 @@ class Soundscape:
     vocalization: str | None = None
     background_music: str | None = None
     background_music_reuse: BackgroundMusicReuse | None = None
+    source_audio: str | None = None
 
 
 @dataclass
