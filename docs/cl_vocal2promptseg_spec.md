@@ -35,7 +35,7 @@
 - 入力は、フルミックスと同じ開始時刻を持つボーカルステムを想定する。
 - ボーカルステム内の人声らしいエネルギーの有無だけを検出する。検出結果が歌詞又は音素の境界と一致することは保証しない。
 - Lyricsの非見出し行を歌詞本文の正本とし、Whisperは対応する音声時刻を求めるためだけに使用する。
-- Lyrics全文をWhisperの`initial_prompt`へ渡さない。既知歌詞によって無音部へ架空の書き起こしを誘発せず、独立した認識結果と後段整列を分離する。
+- Lyrics全文をWhisperの`initial_prompt`へ渡さない。冒頭の認識脱落を抑えるため、セクション見出しを除いた先頭Lyricsだけを12行かつ160文字以内で渡す。Whisperのプロンプト容量を占有し続けたり、後半の無音部へ架空の歌詞を誘発したりしないよう、`condition_on_previous_text=False`を維持する。
 - 出力Markdownは`<Subject 1>`だけを使用する。
 - 有声Sceneは`ソースボーカル`で口形を駆動し、無音Sceneは人物発声を禁止する。
 - 全Sceneで`ソース音声: 完全維持`を指定する。最終音声の正本はContex-Loopの`source_timeline`へ接続したロック済みフルミックスである。
@@ -85,7 +85,7 @@ requiredは次の順序とする。
 | `vocal_audio` | AUDIO | 接続必須 | ComfyUI標準AUDIO | 同期済みPCMボーカルステム |
 | `lyrics_text` | STRING | 接続必須 | `forceInput=True` | Suno Lyrics形式の既知歌詞。multiline STRING出力から接続する |
 | `whisper_model` | COMBO | 最初の検出モデル | ローカル`.pt`モデルID | OpenAI Whisperチェックポイント |
-| `language` | COMBO | `ja` | `ja`, `auto` | Whisper認識言語。`auto`はWhisperの言語検出を使用 |
+| `language` | COMBO | `ja` | `ja`, `en`, `auto` | Whisper認識言語。`en`は米国英語を含む英語、`auto`はWhisperの言語検出を使用 |
 | `device` | COMBO | `auto` | `auto`, `cuda`, `cpu` | Whisper推論デバイス |
 | `keep_whisper_loaded` | BOOLEAN | True | True/False | 同一モデルとデバイスのWhisperインスタンスを再利用する |
 | `max_scene_seconds` | INT | 10 | 1～60、step 1 | 生成する1 Sceneの最大整数秒 |
@@ -95,6 +95,7 @@ requiredは次の順序とする。
 | `min_silence_ms` | INT | 300 | 0～10000、step 10 | 有声区間間にある、これ未満の無音を有声へ結合する |
 | `voice_padding_ms` | INT | 80 | 0～2000、step 10 | 確定有声区間の前後へ加える検出余白 |
 | `lyrics_match_threshold` | FLOAT | 0.55 | 0.0～1.0、step 0.01 | Lyrics行とWhisper候補範囲を確定する最小類似度 |
+| `lyrics_neighbor_threshold` | FLOAT | 0.45 | 0.0～`lyrics_match_threshold`、step 0.01 | 両隣が通常閾値で確定した未解決Lyricsだけに使う救済類似度 |
 | `lyrics_search_seconds` | FLOAT | 60.0 | 1.0～600.0、step 1.0 | 現在の整列カーソルから1歌詞行を探索する最大時間 |
 
 optional入力は持たない。
@@ -222,15 +223,19 @@ temperature = 0.0
 beam_size = 5
 word_timestamps = True
 condition_on_previous_text = False
-initial_prompt = None
+initial_prompt = section headingsを除く先頭Lyricsのうち最大12行かつ160文字
 verbose = None
-language = "ja" when language=ja, otherwise None
+language = "ja" when language=ja, "en" when language=en, otherwise None
 fp16 = True on CUDA, False on CPU
 ```
 
 `device=auto`はCUDAが利用可能なら`cuda`、それ以外は`cpu`へ解決する。明示`cuda`でCUDAが利用できない場合はCPUへ黙って変更せずエラーにする。
 
+Whisperの英語言語コードは`en`である。`us`又は`en-US`はWhisperが受理する言語コードではないためUIへ追加せず、米国英語も`en`を指定する。
+
 入力全体を1回の`transcribe()`へ渡し、独自に各有声runを別推論へ分割しない。これによりWhisper内部の連続時間軸と絶対時刻を維持する。VAD結果は推論の切り出しには使わず、後段で無音部の幻覚候補を除外するために使う。
+
+`initial_prompt`は行の途中を避け、先頭から12歌詞行又は改行を含む160文字のどちらか先に達する範囲へ制限する。最初の1行だけで160文字を超える場合に限り、その1行を160文字で切る。これは冒頭の固有語と歌詞順をWhisperの最初の復号窓へ示すヒントであり、認識結果、SRT本文又は時刻の正本ではない。後続窓へ繰り返し注入する`carry_initial_prompt`相当の挙動は使用しない。
 
 Whisper結果の各`segments[].words[]`から、空でない`word`、有限な`start`及び`end`を抽出する。`0 <= start < end <= audio_duration_seconds`を満たさないwordはWARNING付きで除外する。word配列が存在しない場合は、segment単位へ黙ってフォールバックせずエラーにする。
 
@@ -251,6 +256,15 @@ Lyrics行を先頭から1回ずつ処理し、確定したWhisper word範囲よ�
 
 この規則により、Whisperが1歌詞行を複数wordへ分割した場合及び複数歌詞行を一続きに認識した場合を吸収する。繰り返されるChorusはカーソルより後の出現だけに一致し、過去の同一文へ戻らない。
 
+通常整列の後、未解決Lyricsの連続runについて次の限定的な救済を1回行う。
+
+1. runの直前と直後に、`lyrics_match_threshold`以上で解決済みのLyricsが存在しなければ救済しない。
+2. 探索範囲を、直前Lyricsが使用した最後のWhisper wordの次から、直後Lyricsが使用した最初のWhisper wordの直前までに限定する。
+3. run内を上から順に再照合し、`lyrics_neighbor_threshold`以上の候補だけを解決済みにする。
+4. 救済で確定したword範囲は同じrun内の後続行から再利用せず、時刻は前後アンカーの内側に収める。
+
+`lyrics_neighbor_threshold`は`lyrics_match_threshold`以下でなければエラーとする。この救済は前後の確定アンカーで検索空間を限定できる場合だけ誤認識の表記差を許容するものであり、先頭又は末尾の未解決Lyrics、Whisper wordのない空間、時刻内挿及びLyrics本文からの架空word生成には使用しない。
+
 LyricsとWhisperのどちらにも存在しない文字列を補完してはならない。Lyrics行の順序変更、Whisper時刻だけに基づく未解決行の均等配置及び前後行からの時刻内挿は禁止する。
 
 ### 8.5 確定歌詞時刻
@@ -268,7 +282,7 @@ end_ms = max(start_ms + 1, raw_end_ms)
 
 Whisper本文は診断用に保持できるが、プロンプトコメント及びSRT本文には必ずLyrics原文を使用する。
 
-歌唱に対するWhisperの単語時刻は近似値であり、音楽的な母音伸長、コーラス、重唱、リバーブ及びステム分離残留によって境界がずれる可能性がある。本ノードのSRTは行単位の初期同期データであり、カラオケ用途の音素又は文字単位タイミングを保証しない。`lyrics_match_threshold`を下げて解決数を増やすと誤対応も増えるため、SRTは動画生成又は編集前に確認する。
+歌唱に対するWhisperの単語時刻は近似値であり、音楽的な母音伸長、コーラス、重唱、リバーブ及びステム分離残留によって境界がずれる可能性がある。本ノードのSRTは行単位の初期同期データであり、カラオケ用途の音素又は文字単位タイミングを保証しない。全体へ適用される`lyrics_match_threshold`を先に下げず、前後アンカーに挟まれた取りこぼしだけを`lyrics_neighbor_threshold`で救済する。いずれの閾値も下げるほど誤対応が増えるため、SRTは動画生成又は編集前に確認する。
 
 ## 9. Scene分割
 
@@ -417,7 +431,7 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "sample_rate": 48000,
   "total_samples": 12470400,
   "audio_duration_seconds": 259.8,
@@ -437,6 +451,9 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
     "min_silence_ms": 300,
     "voice_padding_ms": 80,
     "lyrics_match_threshold": 0.55,
+    "lyrics_neighbor_threshold": 0.45,
+    "whisper_initial_prompt_lines": 8,
+    "whisper_initial_prompt_characters": 116,
     "lyrics_search_seconds": 60.0
   },
   "detected_intervals": [
@@ -456,7 +473,11 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
       "text": "赤い林檎を　ひとつ頬張り",
       "status": "resolved",
       "match_score": 0.82,
+      "match_method": "primary",
       "whisper_text": "赤いりんごを一つ頬張り",
+      "candidate_whisper_text": "",
+      "candidate_start_ms": null,
+      "candidate_end_ms": null,
       "start_ms": 13020,
       "end_ms": 16180,
       "scene_index": 2
@@ -467,7 +488,11 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
       "text": "おまえの勘定を　笑ってやろう",
       "status": "unresolved",
       "match_score": 0.41,
+      "match_method": null,
       "whisper_text": "",
+      "candidate_whisper_text": "おまえの感情を笑ってやろ",
+      "candidate_start_ms": 18120,
+      "candidate_end_ms": 21940,
       "start_ms": null,
       "end_ms": null,
       "scene_index": null
@@ -486,7 +511,7 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
 }
 ```
 
-`detected_intervals`はサンプル精度の検出結果、`lyrics`は入力行ごとの整列結果、`scenes`は整数秒へ量子化・分割したMarkdown生成結果である。`whisper.model`には絶対パスではなく選択された表示IDを保存する。未解決行の`whisper_text`は空文字列、時刻とSceneはnullとする。例示値は説明用であり、各配列が入力全体を表すとは限らない。
+`detected_intervals`はサンプル精度の検出結果、`lyrics`は入力行ごとの整列結果、`scenes`は整数秒へ量子化・分割したMarkdown生成結果である。`whisper.model`には絶対パスではなく選択された表示IDを保存する。`match_method`は`primary`、`neighbor`又はnullとする。未解決行の`whisper_text`、時刻とSceneは従来どおり空文字列又はnullとし、最良候補が存在した場合だけ`candidate_whisper_text`と候補時刻を診断用に保存する。候補本文をコメント又はSRTへ出力してはならない。例示値は説明用であり、各配列が入力全体を表すとは限らない。
 
 ## 13. statusとログ
 
@@ -503,7 +528,7 @@ statusは1行の英数字中心の文字列とし、少なくとも次を含む�
 例:
 
 ```text
-analyzed 12470400 samples at 48000 Hz (259.800000s); whisper=large-v3.pt on cuda language=ja; lyrics=42 resolved, 3 unresolved; detected 14 voiced interval(s); generated 28 scene(s): 22 voiced, 6 silent; timeline=260s; end padding required=0.200000s
+analyzed 12470400 samples at 48000 Hz (259.800000s); whisper=large-v3.pt on cuda language=ja; lyrics=42 resolved (2 neighbor-recovered), 3 unresolved; detected 14 voiced interval(s); generated 28 scene(s): 22 voiced, 6 silent; timeline=260s; end padding required=0.200000s
 ```
 
 logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする。
@@ -527,6 +552,7 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 - ローカルWhisperモデルがない、消失した、読み込めない、又は選択deviceで実行できない
 - Whisper推論の失敗、中断又はword timestampの欠落
 - UI値の型又は範囲違反
+- `lyrics_neighbor_threshold`が`lyrics_match_threshold`を超える
 - 内部区間の隙間、重複、逆転又はゼロ長
 - 量子化後Sceneの0秒、60秒超過又は上限違反
 - 生成Scene数が128を超える
@@ -543,7 +569,7 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 - 無音区間が0件: 全Sceneを有声として生成する。
 - 最も大きい解析窓RMSが閾値未満又は閾値との差が1 dB以下で、設定調整が必要と推定できる。
 - 不正な時刻を持つWhisper wordを除外した。
-- 1件以上のLyrics行を`lyrics_match_threshold`以上で解決できなかった。
+- 通常整列と前後アンカー限定救済の後も、1件以上のLyrics行を解決できなかった。
 - Whisperが文字を認識したが、その中点が確定有声区間外にあり照合候補から除外した。
 - 解決済みLyrics行が0件で、空のSRTを返した。
 

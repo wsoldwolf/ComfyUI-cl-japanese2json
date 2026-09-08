@@ -42,9 +42,14 @@ class FakeBackend:
         self.ensure_calls.append((model_path, device))
         return self
 
-    def transcribe(self, audio, *, language, device):
+    def transcribe(self, audio, *, language, device, initial_prompt):
         self.transcribe_calls.append(
-            {"audio": audio, "language": language, "device": device}
+            {
+                "audio": audio,
+                "language": language,
+                "device": device,
+                "initial_prompt": initial_prompt,
+            }
         )
         return self.result
 
@@ -86,11 +91,16 @@ class VocalPromptNodeTests(unittest.TestCase):
                 "min_silence_ms",
                 "voice_padding_ms",
                 "lyrics_match_threshold",
+                "lyrics_neighbor_threshold",
                 "lyrics_search_seconds",
             ],
         )
         self.assertTrue(required["lyrics_text"][1]["forceInput"])
         self.assertEqual(required["max_scene_seconds"][1]["default"], 10)
+        self.assertEqual(required["language"][0], ["ja", "en", "auto"])
+        self.assertEqual(
+            required["lyrics_neighbor_threshold"][1]["default"], 0.45
+        )
 
     def test_suno_headings_are_ignored_and_lyrics_are_preserved_exactly(self) -> None:
         lines = vocal.parse_suno_lyrics(
@@ -108,6 +118,14 @@ class VocalPromptNodeTests(unittest.TestCase):
             vocal.normalize_match_text(" ＡＢＣ・カタカナ！ "),
             "abcかたかな",
         )
+
+    def test_whisper_initial_prompt_is_bounded_to_leading_lyrics(self) -> None:
+        lines = [lyric(index, f"歌詞{index:02d}" * 8) for index in range(1, 15)]
+        prompt = vocal.build_whisper_initial_prompt(lines)
+        self.assertLessEqual(len(prompt), 160)
+        self.assertLessEqual(len(prompt.splitlines()), 12)
+        self.assertTrue(prompt.startswith(lines[0].text))
+        self.assertNotIn(lines[-1].text, prompt)
 
     def test_vad_fills_short_gaps_and_removes_short_voice_runs(self) -> None:
         intervals = vocal.detected_intervals_from_dbfs(
@@ -209,6 +227,44 @@ class VocalPromptNodeTests(unittest.TestCase):
         )
         self.assertEqual((aligned[0].start_ms, aligned[0].end_ms), (1000, 1800))
         self.assertEqual((aligned[2].start_ms, aligned[2].end_ms), (2000, 2500))
+        self.assertEqual(aligned[0].match_method, "primary")
+
+    def test_neighbor_bounded_alignment_recovers_a_near_match(self) -> None:
+        lyrics = [lyric(1, "開始"), lyric(2, "abcdefghij"), lyric(3, "終了")]
+        words = [
+            word(1, "開始", 1.0, 1.4),
+            word(2, "abcdeXXXXX", 1.5, 2.0),
+            word(3, "終了", 2.1, 2.5),
+        ]
+        aligned = vocal.align_lyrics(
+            lyrics,
+            words,
+            match_threshold=0.55,
+            neighbor_match_threshold=0.45,
+            search_seconds=10.0,
+            audio_duration_seconds=4.0,
+        )
+        self.assertEqual([item.status for item in aligned], ["resolved"] * 3)
+        self.assertEqual(aligned[1].match_method, "neighbor")
+        self.assertEqual(aligned[1].whisper_text, "abcdeXXXXX")
+
+    def test_unbounded_trailing_near_match_remains_unresolved_with_diagnostics(self) -> None:
+        lyrics = [lyric(1, "開始"), lyric(2, "abcdefghij")]
+        words = [
+            word(1, "開始", 1.0, 1.4),
+            word(2, "abcdeXXXXX", 1.5, 2.0),
+        ]
+        aligned = vocal.align_lyrics(
+            lyrics,
+            words,
+            match_threshold=0.55,
+            neighbor_match_threshold=0.45,
+            search_seconds=10.0,
+            audio_duration_seconds=4.0,
+        )
+        self.assertEqual(aligned[1].status, "unresolved")
+        self.assertEqual(aligned[1].candidate_whisper_text, "abcdeXXXXX")
+        self.assertEqual(aligned[1].candidate_start_ms, 1500)
 
     def test_scene_plan_quantizes_outward_and_splits_balanced_chunks(self) -> None:
         intervals = [
@@ -297,8 +353,9 @@ class VocalPromptNodeTests(unittest.TestCase):
                 scenes=scenes,
             )
         )
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["lyrics"][1]["status"], "unresolved")
+        self.assertIn("candidate_whisper_text", payload["lyrics"][1])
         self.assertEqual(payload["trailing_padding_seconds"], 0.5)
 
     def test_node_runs_end_to_end_with_fake_whisper_backend(self) -> None:
@@ -346,6 +403,7 @@ class VocalPromptNodeTests(unittest.TestCase):
                     min_silence_ms=300,
                     voice_padding_ms=80,
                     lyrics_match_threshold=0.8,
+                    lyrics_neighbor_threshold=0.45,
                     lyrics_search_seconds=60.0,
                 )
 
@@ -353,10 +411,61 @@ class VocalPromptNodeTests(unittest.TestCase):
         self.assertIn("// 世界", prompt)
         self.assertIn("00:00:00,200 --> 00:00:00,800", srt)
         self.assertEqual(json.loads(segments_text)["whisper"]["device"], "cpu")
-        self.assertIn("lyrics=2 resolved, 0 unresolved", status)
+        self.assertIn(
+            "lyrics=2 resolved (0 neighbor-recovered), 0 unresolved", status
+        )
         self.assertEqual(backend.ensure_calls, [(model, "cpu")])
         self.assertEqual(backend.transcribe_calls[0]["language"], "ja")
+        self.assertEqual(
+            backend.transcribe_calls[0]["initial_prompt"], "こんにちは\n世界"
+        )
         self.assertGreaterEqual(backend.clear_count, 1)
+
+    def test_neighbor_threshold_must_not_exceed_primary_threshold(self) -> None:
+        node = vocal.CLVocalToPromptSegments()
+        with self.assertRaisesRegex(
+            errors.VocalPromptError, "less than or equal"
+        ):
+            node.build_prompt_segments(
+                vocal_audio={"waveform": FakeAudioShape(), "sample_rate": 1000},
+                lyrics_text="歌詞",
+                whisper_model="base.pt",
+                language="ja",
+                device="auto",
+                keep_whisper_loaded=False,
+                max_scene_seconds=10,
+                silence_threshold_dbfs=-45.0,
+                analysis_window_ms=20,
+                min_voiced_ms=120,
+                min_silence_ms=300,
+                voice_padding_ms=80,
+                lyrics_match_threshold=0.4,
+                lyrics_neighbor_threshold=0.45,
+                lyrics_search_seconds=60.0,
+            )
+
+    def test_unsupported_us_language_alias_is_rejected(self) -> None:
+        node = vocal.CLVocalToPromptSegments()
+        with self.assertRaisesRegex(
+            errors.VocalPromptError, "language must be ja, en, or auto"
+        ):
+            node.build_prompt_segments(
+                vocal_audio={"waveform": FakeAudioShape(), "sample_rate": 1000},
+                lyrics_text="lyrics",
+                whisper_model="base.pt",
+                language="us",
+                device="auto",
+                keep_whisper_loaded=False,
+                max_scene_seconds=10,
+                silence_threshold_dbfs=-45.0,
+                analysis_window_ms=20,
+                min_voiced_ms=120,
+                min_silence_ms=300,
+                voice_padding_ms=80,
+                lyrics_match_threshold=0.55,
+                lyrics_neighbor_threshold=0.45,
+                lyrics_search_seconds=60.0,
+            )
 
     def test_provided_suno_lyrics_asset_is_parseable(self) -> None:
         asset = ROOT / "assets" / "bgm" / "bgm_lirics.txt"

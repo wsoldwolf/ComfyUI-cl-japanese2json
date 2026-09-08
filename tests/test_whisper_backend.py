@@ -87,7 +87,12 @@ class WhisperBackendTests(unittest.TestCase):
                 return_value=fake_whisper,
             ):
                 backend.ensure_loaded(checkpoint, "cpu")
-            result = backend.transcribe("pcm", language="ja", device="cpu")
+            result = backend.transcribe(
+                "pcm",
+                language="ja",
+                device="cpu",
+                initial_prompt="冒頭歌詞",
+            )
 
             self.assertEqual(result, {"segments": []})
             self.assertEqual(
@@ -100,7 +105,7 @@ class WhisperBackendTests(unittest.TestCase):
                         "beam_size": 5,
                         "word_timestamps": True,
                         "condition_on_previous_text": False,
-                        "initial_prompt": None,
+                        "initial_prompt": "冒頭歌詞",
                         "verbose": None,
                         "language": "ja",
                         "fp16": False,
@@ -127,7 +132,9 @@ class WhisperBackendTests(unittest.TestCase):
     def test_bad_result_and_transcription_failure_are_rejected(self) -> None:
         backend = backend_module.WhisperBackend()
         with self.assertRaisesRegex(errors.WhisperLoadError, "not loaded"):
-            backend.transcribe("pcm", language=None, device="cpu")
+            backend.transcribe(
+                "pcm", language=None, device="cpu", initial_prompt=None
+            )
 
         class BrokenModel:
             def transcribe(self, *_args, **_kwargs):
@@ -135,11 +142,15 @@ class WhisperBackendTests(unittest.TestCase):
 
         backend.model = BrokenModel()
         with self.assertRaisesRegex(errors.VocalPromptError, "transcription failed"):
-            backend.transcribe("pcm", language=None, device="cpu")
+            backend.transcribe(
+                "pcm", language=None, device="cpu", initial_prompt=None
+            )
 
         backend.model = FakeModel(result=[])
         with self.assertRaisesRegex(errors.VocalPromptError, "non-object"):
-            backend.transcribe("pcm", language=None, device="cpu")
+            backend.transcribe(
+                "pcm", language=None, device="cpu", initial_prompt=None
+            )
 
 
 if __name__ == "__main__":

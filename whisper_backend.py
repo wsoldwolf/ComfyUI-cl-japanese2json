@@ -70,7 +70,14 @@ class WhisperBackend:
             self.current_signature = signature
             return model
 
-    def transcribe(self, audio: Any, *, language: str | None, device: str) -> dict[str, Any]:
+    def transcribe(
+        self,
+        audio: Any,
+        *,
+        language: str | None,
+        device: str,
+        initial_prompt: str | None,
+    ) -> dict[str, Any]:
         with self._lock:
             if self.model is None:
                 raise WhisperLoadError("Whisper model is not loaded")
@@ -82,7 +89,7 @@ class WhisperBackend:
                     beam_size=5,
                     word_timestamps=True,
                     condition_on_previous_text=False,
-                    initial_prompt=None,
+                    initial_prompt=initial_prompt,
                     verbose=None,
                     language=language,
                     fp16=device == "cuda",

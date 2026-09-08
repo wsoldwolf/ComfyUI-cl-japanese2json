@@ -30,6 +30,25 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     for node in workflow["nodes"]
                     if node.get("type") == "CLJapaneseToJSONGGUF"
                 ]
+                vocal_nodes = [
+                    node
+                    for node in workflow["nodes"]
+                    if node.get("type") == "CLVocalToPromptSegments"
+                ]
+                if not compiler_nodes:
+                    self.assertEqual(len(vocal_nodes), 1)
+                    vocal = vocal_nodes[0]
+                    input_names = [item["name"] for item in vocal["inputs"]]
+                    self.assertIn("lyrics_neighbor_threshold", input_names)
+                    self.assertEqual(
+                        vocal["widgets_values_named"]["lyrics_match_threshold"],
+                        0.55,
+                    )
+                    self.assertEqual(
+                        vocal["widgets_values_named"]["lyrics_neighbor_threshold"],
+                        0.45,
+                    )
+                    continue
                 self.assertEqual(len(compiler_nodes), 1)
                 compiler = compiler_nodes[0]
                 input_names = [item["name"] for item in compiler["inputs"]]

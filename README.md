@@ -465,7 +465,7 @@ CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
 | 名前 | 意味 |
 | --- | --- |
 | `whisper_model` | `ComfyUI/models/whisper/`以下から再帰検出したローカル`.pt`。自動ダウンロードしません。 |
-| `language` | 日本語固定の`ja`又はWhisper言語検出を使う`auto`。 |
+| `language` | `ja`（日本語）、`en`（米国英語を含む英語）、又はWhisper言語検出を使う`auto`。Whisperでは`us`ではなく`en`を使用します。 |
 | `device` | `auto`、`cuda`、`cpu`。明示`cuda`が利用不能ならエラーです。 |
 | `keep_whisper_loaded` | 同じモデルとdeviceを次回も再利用します。 |
 | `max_scene_seconds` | 1 Sceneの最大整数秒。既定10秒です。 |
@@ -475,6 +475,7 @@ CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
 | `min_silence_ms` | これ未満の有声区間間の無音を結合します。 |
 | `voice_padding_ms` | 確定有声区間の前後余白です。 |
 | `lyrics_match_threshold` | Lyrics行とWhisper候補を確定する最小類似度。低くすると解決数と誤対応の両方が増えます。 |
+| `lyrics_neighbor_threshold` | 両隣が通常閾値で確定した未解決行だけに使う救済閾値。既定0.45で、通常閾値以下に設定します。 |
 | `lyrics_search_seconds` | 現在の歌詞位置から次行を探す最大時間です。 |
 
 出力は次の4つです。
@@ -484,7 +485,9 @@ CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
 - `segments_json`: サンプル精度の検出区間、照合スコア、整数秒Scene及び末尾パディング量を含む検証用JSON。
 - `status`: 解決数、Scene数、入力尺及び必要パディング量の1行要約。
 
-生成されたテンプレートのSubject、画風、背景、人物動作及びカメラワークは用途に合わせて編集してください。歌唱の母音伸長、コーラス、重唱、リバーブ及び分離残留によりWhisper時刻はずれることがあるため、SRTは行単位の初期同期データとして確認してください。未解決LyricsはコメントとSRTへ出力されませんが、`segments_json`に`unresolved`として残ります。
+冒頭歌詞の認識脱落を減らすため、セクション見出しを除く先頭Lyricsを最大12行・160文字だけWhisperの最初の復号ヒントに使用します。全文を渡したり後続窓へ反復したりはしません。通常閾値で未解決になった行は、前後の歌詞が確定して検索範囲を安全に限定できる場合だけ`lyrics_neighbor_threshold`で再照合します。
+
+生成されたテンプレートのSubject、画風、背景、人物動作及びカメラワークは用途に合わせて編集してください。歌唱の母音伸長、コーラス、重唱、リバーブ及び分離残留によりWhisper時刻はずれることがあるため、SRTは行単位の初期同期データとして確認してください。未解決LyricsはコメントとSRTへ出力されませんが、`segments_json`に`unresolved`として残り、最良のWhisper候補と候補時刻も診断用に確認できます。
 
 テンプレートの`ソースボーカル`は`<Audio 1>`ではなく、Contex-LoopのSource Vocal入力です。ボーカルステムを最終音声へ重ねず、ロック済みフルミックスをSource Timelineとして維持します。入力末尾が整数秒でない場合は`status`の不足量に従い、フルミックスとボーカルステムを`CL Audio Pad`の`pad_position=end`で同じ計画尺まで補完してください。
 
