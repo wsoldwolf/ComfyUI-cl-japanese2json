@@ -104,6 +104,7 @@ optionalは次である。
 | --- | --- | --- | --- |
 | `save_debug_output` | BOOLEAN | False | ComfyUI output下へ診断バンドルを保存 |
 | `speech_guard` | COMBO | `strict` | `strict`, `warn`。未保護発声キューの扱い |
+| `continuation_context_length` | COMBO | `22` | 継続Sceneのvisual/audio head-overlap。H3対応値から選択 |
 
 `steps`はJSONの`defaults.steps`だけへ反映し、LLM翻訳の生成設定へ渡さない。
 
@@ -295,7 +296,7 @@ Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追
 
 ### 6.6 コンテキスト計算
 
-保持モデルがtokenizerを公開する場合は実トークン数を推定し、利用できない場合はUTF-8バイト長から保守的に見積もる。実効`n_ctx`に収まり、かつ1バッチ最大64区間となる範囲で翻訳区間をまとめる。長文を無制限な単一生成にせず、一方で一行単位推論にも戻さない。1区間が単独でも入らない場合は明示エラーとし、途中分割しない。
+保持モデルがtokenizerを公開する場合は実トークン数を推定し、利用できない場合はUTF-8バイト長から保守的に見積もる。実効`n_ctx`に収まり、かつ1バッチ最大32区間となる範囲で翻訳区間をまとめる。長文を無制限な単一生成にせず、一方で一行単位推論にも戻さない。1区間が単独でも入らない場合は明示エラーとし、途中分割しない。
 
 ## 7. システムプロンプト
 
@@ -324,7 +325,7 @@ prompts/llmj2e_qwen3_8b_system_prompt.txt
 5. ロードシグネチャに応じてモデルをロード又は再利用する。
 6. `translate_markdown()`でCスタイルコメントを除外し、日本語Markdownを正規形へ変換する。
 7. `parse_markdown()`で`Emd`へ変換する。
-8. `generate_json(steps=steps, speech_guard=speech_guard)`でPlan文字列を作る。
+8. `generate_json(steps=steps, speech_guard=speech_guard, continuation_context_length=continuation_context_length)`で、重複除去後の総尺を補償したPlan文字列を作る。
 9. `validate_final_json()`で最終文字列を再検証する。
 10. 成功JSONを`last_json_text`へ保存してtupleで返す。
 11. 設定又は失敗状態に従ってモデルを解放する。
@@ -352,6 +353,7 @@ with instance_lock:
             emd,
             steps=steps,
             speech_guard=speech_guard,
+            continuation_context_length=continuation_context_length,
         )
         validate_final_json(json_text)
         last_json_text = json_text
@@ -672,9 +674,13 @@ Environment、Sound effects又は生成BGM本文にAudio参照又は台詞があ
 - detailed_descriptionのShot番号は1始まりの連番。
 - non_diegetic_music内のAudio参照はsubject_definitions及びretention_analysisにも存在する。
 - BGMが有効なSceneでoverall_soundscapeが`Complete silence.`にならない。
-- durationは1～60のinteger。
-- 継続Sceneは`continuation_mode=guide`だけを持つ。
+- durationは1～60のintegerで、完成動画上の指定Scene尺を表す。
+- `length`は5～3592の`17k+5`形式のraw生成フレーム数。
+- 継続Sceneは`continuation_mode=guide`と、`continuation_context_length`に一致するvisual/audio context lengthを持つ。
 - 非継続Sceneはvisual/audio context lengthを0にする。
+- `anchor_mode=head`でcontextを除去した後の総配信フレーム数は、24fps換算のScene指定合計以上、かつその差は17フレーム未満とする。
+
+JSONGENは各Sceneを個別に丸めず、累積指定時刻との差が最小になるよう`length`を配分する。最終Sceneだけは下限側でなく上限側の有効値へ丸める。これにより継続Scene数に比例して22フレームずつ失われる問題を防ぐ。既定22以外のGeneration Profileを使う場合は、コンパイラの`continuation_context_length`も同じ値に設定する。
 
 シリアライズは`ensure_ascii=False, indent=2`とし、`prompt`配列の6文字列を別々の物理行へ配置する。文字列内のLFはJSON規格に従い`\n`へエスケープする。隣接する`"foo" "bar"`は有効なJSONでなく文字列連結にもならないため使用しない。
 
@@ -793,8 +799,9 @@ set "FORCE_CMAKE=1"
 - BGM再利用の固定正規化、推論対象外化、関係、Audio番号及び元音源時間範囲検証
 - BGM本文の保護付き翻訳
 - ユーザー入力の`(Sx)`拒否
-- 64区間以下の短文書を1推論
-- 65区間以上又はコンテキスト不足時のレコード境界バッチ
+- 32区間以下の短文書を1推論
+- 33区間以上又はコンテキスト不足時のレコード境界バッチ
+- ComfyUI中断フラグをllama.cppの生成停止条件として各トークン境界で確認し、中断例外を上位へ伝播
 - プレースホルダ欠落、重複、移動
 - thinking、コードフェンス、切断、日本語残留
 - 検証済み区間保持と未解決区間再試行

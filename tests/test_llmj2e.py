@@ -1123,7 +1123,7 @@ class LLMJ2ETests(unittest.TestCase):
             [f"R{index:06d}" for index in range(1, 26)],
         )
 
-    def test_large_document_is_bounded_to_sixty_four_records_per_inference(self) -> None:
+    def test_large_document_is_bounded_to_thirty_two_records_per_inference(self) -> None:
         source = "# シーン\n## ショット\n" + "\n".join(
             f"* 動作{index}。" for index in range(65)
         )
@@ -1133,10 +1133,10 @@ class LLMJ2ETests(unittest.TestCase):
         )
 
         self.assertEqual(output.count("* "), 65)
-        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(len(llm.calls), 3)
         self.assertEqual(
             [len(request_records(call["messages"])) for call in llm.calls],
-            [64, 1],
+            [32, 32, 1],
         )
 
     def test_single_record_context_overflow_is_explicit(self) -> None:

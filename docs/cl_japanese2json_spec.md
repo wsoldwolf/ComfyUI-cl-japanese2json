@@ -382,7 +382,7 @@ BGM再利用は固定構造としてPythonが変換し、`SND`翻訳区間へ含
 
 参照タグと台詞はさらに区間固有の保護プレースホルダとなる。構造化JSON転送は用いず、1本の生テキストストリームを`TRANSLATION_STREAM_BEGIN`と`TRANSLATION_STREAM_END`の間へ置く。話者IDは翻訳後に生成するためストリームへ含めない。
 
-実効コンテキスト長に文書全体が収まり、翻訳レコード数が64以下の場合、推論要求は1回である。65レコード以上又は実効コンテキストへ収まらない場合は、レコード境界で1バッチ最大64レコードに分割する。1レコードを途中分割しない。上限は、長い単一生成の停滞及び全体再試行の負担を抑えつつ、一行単位推論の初期化オーバーヘッドを避けるための固定値である。
+実効コンテキスト長に文書全体が収まり、翻訳レコード数が32以下の場合、推論要求は1回である。33レコード以上又は実効コンテキストへ収まらない場合は、レコード境界で1バッチ最大32レコードに分割する。1レコードを途中分割しない。上限は、長い単一生成の停滞及び全体再試行の負担を抑えつつ、一行単位推論の初期化オーバーヘッドを避けるための固定値である。
 
 ### 7.3 システムプロンプト
 
@@ -536,9 +536,20 @@ JSONは`indent=2`で整形し、`prompt`の6文字列を配列内の別行へ出
 ### 10.2 Sceneオブジェクト
 
 - `id`は1始まりで`scene_1`、`scene_2`、...。
-- `duration_seconds`はScene duration。
+- `duration_seconds`はユーザーが指定したSceneの実配信時間。
+- `length`はH3へ渡すraw生成フレーム数で、5～3592の`17k+5`とする。
 - 非継続Sceneは`context_length: 0`と`audio_context_length: 0`を持つ。
-- 継続Sceneは上記2キーを持たず、`continuation_mode: "guide"`を持つ。
+- 継続Sceneは`continuation_mode: "guide"`と、ノードの`continuation_context_length`に一致する`context_length`及び`audio_context_length`を持つ。
+
+Contex-Loopの`anchor_mode=head`では2番目以降の継続Sceneについて`length - context_length`だけが完成動画へ配信される。このため`duration_seconds`をそのままraw生成尺へ使うと、継続Sceneごとに既定22フレームが失われる。JSONGENは24fpsを基準に、各Sceneの累積指定時刻へ最も近い`17k+5`の`length`を割り当てる。最終Sceneだけは累積配信フレームを切り上げ、次を保証する。
+
+```text
+requested_frames = sum(duration_seconds) * 24
+delivered_frames = sum(length - effective_head_overlap)
+requested_frames <= delivered_frames < requested_frames + 17
+```
+
+`effective_head_overlap`は2番目以降の継続Sceneで`continuation_context_length`、先頭Scene及び非継続Sceneで0である。各Sceneを独立に丸めず累積誤差を拡散するため、Scene数に比例した尺不足を発生させない。次Sceneが継続する場合、直前Sceneの配信フレーム数は少なくともそのcontext長以上でなければならない。
 
 ### 10.3 使用Subject
 

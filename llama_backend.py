@@ -32,6 +32,25 @@ except Exception as exc:  # pragma: no cover - environment dependent
 _DEFAULT = object()
 
 
+class _CombinedStoppingCriteria:
+    """Preserve llama.cpp criteria while polling an external interrupt."""
+
+    def __init__(
+        self,
+        original: Any,
+        interrupt_callback: Callable[[], Any],
+    ) -> None:
+        if original is not None and not callable(original):
+            raise ModelLoadError("stopping_criteria must be callable")
+        self.original = original
+        self.interrupt_callback = interrupt_callback
+
+    def __call__(self, input_ids: Any, logits: Any) -> bool:
+        if self.original is not None and self.original(input_ids, logits):
+            return True
+        return bool(self.interrupt_callback())
+
+
 def model_signature(
     model_path: Path,
     *,
@@ -232,6 +251,7 @@ class LlamaBackend:
         *,
         messages: list[dict[str, str]],
         progress_callback: Callable[[int], None],
+        interrupt_callback: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         content_parts: list[str] = []
         finish_reason: Any = None
@@ -239,6 +259,8 @@ class LlamaBackend:
         content_chunk_count = 0
 
         for chunk in stream:
+            if interrupt_callback is not None:
+                interrupt_callback()
             if not isinstance(chunk, dict):
                 raise ModelLoadError(
                     "llama-cpp-python returned an invalid streaming chat chunk"
@@ -320,6 +342,7 @@ class LlamaBackend:
         *,
         prompt: str,
         progress_callback: Callable[[int], None],
+        interrupt_callback: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         content_parts: list[str] = []
         finish_reason: Any = None
@@ -327,6 +350,8 @@ class LlamaBackend:
         content_chunk_count = 0
 
         for chunk in stream:
+            if interrupt_callback is not None:
+                interrupt_callback()
             if not isinstance(chunk, dict):
                 raise ModelLoadError(
                     "llama-cpp-python returned an invalid streaming text chunk"
@@ -372,6 +397,7 @@ class LlamaBackend:
         call_kwargs: dict[str, Any],
         *,
         progress_callback: Callable[[int], None] | None,
+        interrupt_callback: Callable[[], Any] | None,
     ) -> Any:
         if self.llm is None:
             raise ModelLoadError("No GGUF model is loaded")
@@ -385,6 +411,10 @@ class LlamaBackend:
         prompt = self._qwen3_non_thinking_prompt(messages)
         call_kwargs["prompt"] = prompt
         call_kwargs["stop"] = self._qwen3_stop_sequences(call_kwargs.get("stop"))
+        if interrupt_callback is not None:
+            call_kwargs["stopping_criteria"] = _CombinedStoppingCriteria(
+                call_kwargs.get("stopping_criteria"), interrupt_callback
+            )
         if progress_callback is not None:
             call_kwargs["stream"] = True
 
@@ -397,6 +427,7 @@ class LlamaBackend:
                 response,
                 prompt=prompt,
                 progress_callback=progress_callback,
+                interrupt_callback=interrupt_callback,
             )
         if not isinstance(response, dict):
             raise ModelLoadError("llama-cpp-python returned an invalid text completion")
@@ -434,12 +465,18 @@ class LlamaBackend:
         progress_callback = call_kwargs.pop("progress_callback", None)
         if progress_callback is not None and not callable(progress_callback):
             raise ModelLoadError("progress_callback must be callable")
+        interrupt_callback = call_kwargs.pop("interrupt_callback", None)
+        if interrupt_callback is not None and not callable(interrupt_callback):
+            raise ModelLoadError("interrupt_callback must be callable")
+        if interrupt_callback is not None:
+            interrupt_callback()
         is_qwen3 = self.is_qwen3()
         if is_qwen3 and callable(getattr(self.llm, "create_completion", None)):
             try:
                 return self._complete_qwen3_without_thinking(
                     call_kwargs,
                     progress_callback=progress_callback,
+                    interrupt_callback=interrupt_callback,
                 )
             except TypeError as exc:
                 raise ModelLoadError(
@@ -459,6 +496,10 @@ class LlamaBackend:
                 call_kwargs["reasoning"] = False
         if progress_callback is not None:
             call_kwargs["stream"] = True
+        if interrupt_callback is not None:
+            call_kwargs["stopping_criteria"] = _CombinedStoppingCriteria(
+                call_kwargs.get("stopping_criteria"), interrupt_callback
+            )
         try:
             response = call(**call_kwargs)
             if progress_callback is None or isinstance(response, dict):
@@ -467,6 +508,7 @@ class LlamaBackend:
                 response,
                 messages=call_kwargs.get("messages", []),
                 progress_callback=progress_callback,
+                interrupt_callback=interrupt_callback,
             )
         except TypeError as exc:
             raise ModelLoadError(

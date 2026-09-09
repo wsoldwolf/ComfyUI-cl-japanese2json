@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import logging
+import math
 import re
 from typing import Any, Iterable
 
@@ -35,6 +36,30 @@ LOGGER = logging.getLogger("cl_japanese2json")
 SPEECH_GUARD_STRICT = "strict"
 SPEECH_GUARD_WARN = "warn"
 SPEECH_GUARD_MODES = frozenset({SPEECH_GUARD_STRICT, SPEECH_GUARD_WARN})
+
+H3_FPS = 24
+H3_FRAME_MODULUS = 17
+H3_FRAME_REMAINDER = 5
+H3_MAX_FRAMES = 3592
+H3_CONTEXT_LENGTHS = (
+    1,
+    5,
+    22,
+    39,
+    56,
+    73,
+    90,
+    107,
+    124,
+    141,
+    158,
+    175,
+    192,
+    209,
+    226,
+    243,
+)
+DEFAULT_CONTINUATION_CONTEXT_LENGTH = 22
 
 SUBJECT_RE = re.compile(r"(?<!\\)<Subject ([1-9][0-9]*)(?<!\\)>")
 AUDIO_REFERENCE_RE = re.compile(r"(?<!\\)<Audio ([1-9][0-9]*)(?<!\\)>")
@@ -1609,11 +1634,112 @@ def _shot_object(
     return result
 
 
+def _valid_h3_length_at_or_above(value: float, *, minimum: int = 5) -> int:
+    """Return the first H3-valid 17k+5 raw length at or above value."""
+
+    lower_bound = max(H3_FRAME_REMAINDER, int(minimum))
+    target = max(float(value), float(lower_bound))
+    multiplier = max(
+        0,
+        int(math.ceil((target - H3_FRAME_REMAINDER) / H3_FRAME_MODULUS)),
+    )
+    length = H3_FRAME_REMAINDER + H3_FRAME_MODULUS * multiplier
+    if length > H3_MAX_FRAMES:
+        raise JSONGenerationError(
+            f"Required H3 raw length {length} exceeds the {H3_MAX_FRAMES}-frame limit"
+        )
+    return length
+
+
+def _nearest_valid_h3_length(value: float, *, minimum: int = 5) -> int:
+    """Return the nearest H3-valid raw length, preferring the longer tie."""
+
+    upper = _valid_h3_length_at_or_above(value, minimum=minimum)
+    lower = upper - H3_FRAME_MODULUS
+    if lower < minimum or lower < H3_FRAME_REMAINDER:
+        return upper
+    if abs(float(value) - lower) < abs(upper - float(value)):
+        return lower
+    return upper
+
+
+def _apply_h3_timeline_lengths(
+    shots: list[dict[str, Any]],
+    scenes: list[Scene],
+    *,
+    continuation_context_length: int,
+) -> tuple[int, int]:
+    """Assign raw lengths so head-overlap trimming preserves Scene time.
+
+    H3 accepts only raw lengths on the 17k+5 lattice.  A head-anchored
+    continuation then removes ``context_length`` frames from that raw result.
+    Choosing every raw length from its Scene duration independently therefore
+    loses one overlap per continued Scene.  This routine error-diffuses the
+    lattice rounding against cumulative requested time and forces the final
+    delivered frame count to cover the complete requested timeline.
+    """
+
+    if len(shots) != len(scenes) or not shots:
+        raise JSONGenerationError("H3 timeline length assignment requires every Scene")
+
+    requested_cumulative = 0
+    delivered_cumulative = 0
+    last_index = len(shots) - 1
+
+    for index, (shot, scene) in enumerate(zip(shots, scenes)):
+        requested_cumulative += scene.duration * H3_FPS
+        overlap = (
+            continuation_context_length
+            if index > 0 and scene.is_continue
+            else 0
+        )
+        next_context = (
+            continuation_context_length
+            if index < last_index and scenes[index + 1].is_continue
+            else 1
+        )
+        minimum_raw = overlap + max(1, next_context)
+        ideal_raw = requested_cumulative - delivered_cumulative + overlap
+        if index == last_index:
+            raw_frames = _valid_h3_length_at_or_above(
+                ideal_raw,
+                minimum=minimum_raw,
+            )
+        else:
+            raw_frames = _nearest_valid_h3_length(
+                ideal_raw,
+                minimum=minimum_raw,
+            )
+        delivered_frames = raw_frames - overlap
+        if delivered_frames < 1:
+            raise JSONGenerationError(
+                f"Scene {index + 1} produces no deliverable frames after overlap"
+            )
+
+        shot["length"] = raw_frames
+        if scene.is_continue:
+            shot["context_length"] = continuation_context_length
+            shot["audio_context_length"] = continuation_context_length
+        delivered_cumulative += delivered_frames
+
+    requested_total = sum(scene.duration for scene in scenes) * H3_FPS
+    if delivered_cumulative < requested_total:
+        raise JSONGenerationError(
+            "Internal H3 timeline compensation did not cover the requested duration"
+        )
+    if delivered_cumulative - requested_total >= H3_FRAME_MODULUS:
+        raise JSONGenerationError(
+            "Internal H3 timeline compensation exceeded one frame-lattice step"
+        )
+    return requested_total, delivered_cumulative
+
+
 def generate_json(
     emd: Emd,
     *,
     steps: int = 8,
     speech_guard: str = SPEECH_GUARD_STRICT,
+    continuation_context_length: int = DEFAULT_CONTINUATION_CONTEXT_LENGTH,
 ) -> str:
     """Generate deterministic JSON and verify that it can be parsed back."""
 
@@ -1623,6 +1749,14 @@ def generate_json(
         raise JSONGenerationError("steps must be an integer between 1 and 10000")
     if not isinstance(speech_guard, str) or speech_guard not in SPEECH_GUARD_MODES:
         raise JSONGenerationError("speech_guard must be strict or warn")
+    if (
+        not isinstance(continuation_context_length, int)
+        or isinstance(continuation_context_length, bool)
+        or continuation_context_length not in H3_CONTEXT_LENGTHS
+    ):
+        raise JSONGenerationError(
+            "continuation_context_length must be an H3-supported context length"
+        )
     if not 1 <= len(emd.scenes) <= 128:
         raise JSONGenerationError(
             f"Scene count must be between 1 and 128; got {len(emd.scenes)}"
@@ -1632,19 +1766,34 @@ def generate_json(
     _validate_common_prompt(emd, speech_guard=speech_guard)
     scene_speakers = _scene_speaker_bindings(emd)
     prompt_prefix = "\n".join(_sentence(line) for line in emd.common_prompt)
+    shots = [
+        _shot_object(
+            emd,
+            scene,
+            index,
+            scene_speakers[index],
+            speech_guard=speech_guard,
+        )
+        for index, scene in enumerate(emd.scenes)
+    ]
+    requested_frames, delivered_frames = _apply_h3_timeline_lengths(
+        shots,
+        emd.scenes,
+        continuation_context_length=continuation_context_length,
+    )
+    LOGGER.info(
+        "[cl_japanese2json] H3 timeline: requested=%d frames (%.6fs), "
+        "delivered=%d frames (%.6fs), context=%d",
+        requested_frames,
+        requested_frames / H3_FPS,
+        delivered_frames,
+        delivered_frames / H3_FPS,
+        continuation_context_length,
+    )
     plan = {
         "prompt_prefix": prompt_prefix,
         "defaults": {"duration_seconds": 5, "steps": steps},
-        "shots": [
-            _shot_object(
-                emd,
-                scene,
-                index,
-                scene_speakers[index],
-                speech_guard=speech_guard,
-            )
-            for index, scene in enumerate(emd.scenes)
-        ],
+        "shots": shots,
     }
     try:
         json_text = json.dumps(plan, ensure_ascii=False, indent=2) + "\n"
@@ -1702,6 +1851,9 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
         OVERALL_SOUNDSCAPE_PREFIX,
         NON_DIEGETIC_MUSIC_PREFIX,
     )
+    requested_total_frames = 0
+    delivered_total_frames = 0
+    delivered_by_shot: list[int] = []
     for index, shot in enumerate(shots, start=1):
         if not isinstance(shot, dict):
             raise JSONValidationError(f"Shot {index} must be an object")
@@ -1754,17 +1906,66 @@ def validate_final_json(json_text: str) -> dict[str, Any]:
             raise JSONValidationError(
                 f"Shot {index} duration_seconds must be an integer between 1 and 60"
             )
+        requested_total_frames += duration * H3_FPS
+
+        length = shot.get("length")
+        if (
+            not _is_int(length)
+            or not H3_FRAME_REMAINDER <= length <= H3_MAX_FRAMES
+            or length % H3_FRAME_MODULUS != H3_FRAME_REMAINDER
+        ):
+            raise JSONValidationError(
+                f"Shot {index} length must be an H3-valid 17k+5 frame count"
+            )
 
         continuation = shot.get("continuation_mode")
         if continuation is not None:
             if continuation != "guide":
                 raise JSONValidationError(f"Shot {index} has an invalid continuation_mode")
-            if "context_length" in shot or "audio_context_length" in shot:
+            context_length = shot.get("context_length")
+            audio_context_length = shot.get("audio_context_length")
+            if (
+                not _is_int(context_length)
+                or context_length not in H3_CONTEXT_LENGTHS
+                or audio_context_length != context_length
+            ):
                 raise JSONValidationError(
-                    f"Continuing shot {index} must inherit context length settings"
+                    f"Continuing shot {index} must declare matching supported visual and audio context lengths"
                 )
+            overlap = context_length if index > 1 else 0
         elif shot.get("context_length") != 0 or shot.get("audio_context_length") != 0:
             raise JSONValidationError(
                 f"Non-continuing shot {index} must reset visual and audio context"
             )
+        else:
+            overlap = 0
+
+        delivered = length - overlap
+        if delivered < 1:
+            raise JSONValidationError(
+                f"Shot {index} length does not exceed its continuation overlap"
+            )
+        delivered_by_shot.append(delivered)
+        delivered_total_frames += delivered
+
+    for index in range(len(shots) - 1):
+        next_shot = shots[index + 1]
+        next_context = (
+            next_shot.get("context_length", 0)
+            if next_shot.get("continuation_mode") is not None
+            else 0
+        )
+        if delivered_by_shot[index] < next_context:
+            raise JSONValidationError(
+                f"Shot {index + 1} delivers too few frames for Shot {index + 2}'s context"
+            )
+
+    if delivered_total_frames < requested_total_frames:
+        raise JSONValidationError(
+            "Delivered H3 timeline is shorter than the requested Scene timeline"
+        )
+    if delivered_total_frames - requested_total_frames >= H3_FRAME_MODULUS:
+        raise JSONValidationError(
+            "Delivered H3 timeline exceeds the requested Scene timeline by one lattice step or more"
+        )
     return parsed

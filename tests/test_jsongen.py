@@ -1006,7 +1006,56 @@ class JSONGenerationTests(unittest.TestCase):
         self.assertEqual(first["context_length"], 0)
         self.assertEqual(first["audio_context_length"], 0)
         self.assertEqual(second["continuation_mode"], "guide")
-        self.assertNotIn("context_length", second)
+        self.assertEqual(second["context_length"], 22)
+        self.assertEqual(second["audio_context_length"], 22)
+        self.assertEqual(first["length"] % 17, 5)
+        self.assertEqual(second["length"] % 17, 5)
+
+    def test_head_overlap_lengths_cover_requested_scene_timeline(self) -> None:
+        scenes = [
+            Scene(shots=[make_shot("Opening.")], duration=15),
+            *(
+                Scene(
+                    shots=[make_shot(f"Continuation {index}.")],
+                    duration=15,
+                    is_continue=True,
+                )
+                for index in range(1, 25)
+            ),
+        ]
+        parsed = jsongen.validate_final_json(
+            jsongen.generate_json(Emd(scenes=scenes))
+        )
+        requested = sum(scene.duration for scene in scenes) * 24
+        delivered = sum(
+            shot["length"]
+            - (shot["context_length"] if index > 0 else 0)
+            for index, shot in enumerate(parsed["shots"])
+        )
+        self.assertGreaterEqual(delivered, requested)
+        self.assertLess(delivered - requested, 17)
+        self.assertTrue(all(shot["length"] % 17 == 5 for shot in parsed["shots"]))
+
+    def test_custom_continuation_context_is_written_and_compensated(self) -> None:
+        emd = Emd(
+            scenes=[
+                Scene(shots=[make_shot("Opening.")], duration=10),
+                Scene(
+                    shots=[make_shot("Continuation.")],
+                    duration=10,
+                    is_continue=True,
+                ),
+            ]
+        )
+        parsed = jsongen.validate_final_json(
+            jsongen.generate_json(emd, continuation_context_length=39)
+        )
+        second = parsed["shots"][1]
+        self.assertEqual(second["context_length"], 39)
+        self.assertEqual(second["audio_context_length"], 39)
+        delivered = parsed["shots"][0]["length"] + second["length"] - 39
+        self.assertGreaterEqual(delivered, 20 * 24)
+        self.assertLess(delivered - 20 * 24, 17)
 
     def test_invalid_scene_retention_steps_and_counts_are_rejected(self) -> None:
         invalid_emds = (

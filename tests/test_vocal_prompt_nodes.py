@@ -674,6 +674,92 @@ class VocalPromptNodeTests(unittest.TestCase):
             ],
         )
 
+    def test_context_normalization_merges_promoted_one_second_gap(self) -> None:
+        scenes = [
+            {
+                "index": 1,
+                "state": "voiced",
+                "start_seconds": 0,
+                "end_seconds": 13,
+                "duration_seconds": 13,
+                "lyrics_indices": [],
+            },
+            {
+                "index": 2,
+                "state": "voiced",
+                "start_seconds": 13,
+                "end_seconds": 14,
+                "duration_seconds": 1,
+                "lyrics_indices": [],
+            },
+            {
+                "index": 3,
+                "state": "voiced",
+                "start_seconds": 14,
+                "end_seconds": 24,
+                "duration_seconds": 10,
+                "lyrics_indices": [],
+            },
+        ]
+        adjustments = vocal.normalize_chainable_scenes(
+            scenes,
+            max_scene_seconds=15,
+        )
+        self.assertEqual(adjustments, 1)
+        self.assertEqual(
+            [
+                (scene["state"], scene["start_seconds"], scene["end_seconds"])
+                for scene in scenes
+            ],
+            [("voiced", 0, 12), ("voiced", 12, 24)],
+        )
+        self.assertTrue(
+            all(scene["duration_seconds"] >= 2 for scene in scenes[:-1])
+        )
+
+    def test_context_normalization_expands_isolated_one_second_vocal(self) -> None:
+        scenes = [
+            {
+                "index": 1,
+                "state": "silent",
+                "start_seconds": 0,
+                "end_seconds": 5,
+                "duration_seconds": 5,
+                "lyrics_indices": [],
+            },
+            {
+                "index": 2,
+                "state": "voiced",
+                "start_seconds": 5,
+                "end_seconds": 6,
+                "duration_seconds": 1,
+                "lyrics_indices": [],
+            },
+            {
+                "index": 3,
+                "state": "silent",
+                "start_seconds": 6,
+                "end_seconds": 10,
+                "duration_seconds": 4,
+                "lyrics_indices": [],
+            },
+        ]
+        adjustments = vocal.normalize_chainable_scenes(
+            scenes,
+            max_scene_seconds=15,
+        )
+        self.assertEqual(adjustments, 1)
+        self.assertEqual(
+            [
+                (scene["state"], scene["start_seconds"], scene["end_seconds"])
+                for scene in scenes
+            ],
+            [("silent", 0, 4), ("voiced", 4, 6), ("silent", 6, 10)],
+        )
+        self.assertTrue(
+            all(scene["duration_seconds"] >= 2 for scene in scenes[:-1])
+        )
+
     def test_prompt_srt_and_json_include_only_resolved_lyrics(self) -> None:
         scenes = [
             {
@@ -702,6 +788,12 @@ class VocalPromptNodeTests(unittest.TestCase):
             ),
         ]
         prompt = vocal.build_prompt_text(scenes, alignments)
+        scene_comments = [
+            line for line in prompt.splitlines() if line.startswith("// シーン ")
+        ]
+        self.assertEqual(scene_comments, ["// シーン 1", "// シーン 2"])
+        self.assertIn("// シーン 1\n# シーン 1秒", prompt)
+        self.assertIn("// シーン 2\n# シーン 2秒 継続", prompt)
         self.assertIn("// 歌詞: こんにちは", prompt)
         self.assertNotIn("// 歌詞: 未解決", prompt)
         self.assertIn("* 発声: なし", prompt)

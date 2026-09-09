@@ -24,7 +24,7 @@ LOGGER = logging.getLogger("cl_japanese2json")
 MAX_SEED = 4_294_967_295
 RETRY_SEED_STRIDE = 1_000_003
 INFERENCE_HEARTBEAT_SECONDS = 10.0
-MAX_RECORDS_PER_INFERENCE = 64
+MAX_RECORDS_PER_INFERENCE = 32
 CODE_FENCE_RE = re.compile(r"```", re.IGNORECASE)
 THINK_RE = re.compile(r"<\s*/?\s*think\b", re.IGNORECASE)
 THINK_BLOCK_RE = re.compile(
@@ -1010,6 +1010,7 @@ def _call_llm(
     seed: int,
     stop_token: str,
     progress_callback: Callable[[int], None] | None = None,
+    interrupt_callback: Callable[[], Any] | None = None,
 ) -> Any:
     kwargs = {
         "messages": messages,
@@ -1023,6 +1024,8 @@ def _call_llm(
     if hasattr(llm, "complete_chat"):
         if progress_callback is not None:
             kwargs["progress_callback"] = progress_callback
+        if interrupt_callback is not None:
+            kwargs["interrupt_callback"] = interrupt_callback
         return llm.complete_chat(**kwargs)
 
     reset = getattr(llm, "reset", None)
@@ -1806,6 +1809,7 @@ def _translate_batch(
     batch_count: int,
     debug_events: list[dict[str, Any]] | None,
     progress_callback: Callable[[int, int, int, int, int], None] | None,
+    interrupt_callback: Callable[[], Any] | None,
 ) -> list[str]:
     validated: list[str | None] = [None] * len(records)
     unresolved_indices = list(range(len(records)))
@@ -1915,6 +1919,7 @@ def _translate_batch(
                 seed=attempt_seed,
                 stop_token=stream.stop_token,
                 progress_callback=report_stream_progress,
+                interrupt_callback=interrupt_callback,
             )
             _capture_debug_response(event, response)
             content, finish_reason = _response_content(response)
@@ -2076,6 +2081,7 @@ def translate_markdown(
     retry_max: int = 1,
     debug_events: list[dict[str, Any]] | None = None,
     progress_callback: Callable[[int, int, int, int, int], None] | None = None,
+    interrupt_callback: Callable[[], Any] | None = None,
 ) -> str:
     """Translate Japanese bullet payloads and rebuild canonical Markdown."""
 
@@ -2117,6 +2123,7 @@ def translate_markdown(
                 batch_count=len(batches),
                 debug_events=debug_events,
                 progress_callback=progress_callback,
+                interrupt_callback=interrupt_callback,
             )
             for record, translated in zip(batch, translations):
                 record.translated = translated

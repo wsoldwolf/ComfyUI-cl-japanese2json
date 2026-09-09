@@ -41,6 +41,7 @@ _TARGETED_RETRY_MINIMUM_SECONDS = 0.1
 _TARGETED_RETRY_WINDOW_SECONDS = 12.0
 _TARGETED_RETRY_WINDOW_OVERLAP_SECONDS = 2.0
 _TARGETED_RETRY_DUPLICATE_CENTER_SECONDS = 0.35
+_MIN_CHAINABLE_SCENE_SECONDS = 2
 _SRT_TIME_OFFSET_MIN = -(2**31)
 _SRT_TIME_OFFSET_MAX = 2**31 - 1
 _ANSI_CYAN = "\x1b[96m"
@@ -1368,6 +1369,138 @@ def build_scenes(
     return scenes, timeline_seconds, trailing_padding
 
 
+def normalize_chainable_scenes(
+    scenes: list[dict[str, Any]],
+    *,
+    max_scene_seconds: int,
+) -> int:
+    """Remove one-second intermediate scenes without losing vocal coverage.
+
+    With the normal 22-frame H3 continuation context, a one-second scene
+    delivers only 17 reusable frames. Resolved Lyrics can promote a short
+    VAD-silent scene after the initial balanced split, so normalize the final
+    state ranges before assigning Lyrics to scenes.
+    """
+    if len(scenes) < 2:
+        return 0
+
+    original_signature = [
+        (
+            str(scene["state"]),
+            int(scene["start_seconds"]),
+            int(scene["end_seconds"]),
+        )
+        for scene in scenes
+    ]
+    ranges: list[list[Any]] = []
+    expected_start = 0
+    for scene in scenes:
+        state = str(scene["state"])
+        start = int(scene["start_seconds"])
+        end = int(scene["end_seconds"])
+        if state not in _VALID_STATES or start != expected_start or end <= start:
+            raise VocalPromptError(
+                "Scene plan must be contiguous and contain valid states before "
+                "context-safe normalization"
+            )
+        if ranges and ranges[-1][0] == state:
+            ranges[-1][2] = end
+        else:
+            ranges.append([state, start, end])
+        expected_start = end
+
+    adjustments = 0
+    while True:
+        short_index = next(
+            (
+                index
+                for index, (_, start, end) in enumerate(ranges[:-1])
+                if end - start < _MIN_CHAINABLE_SCENE_SECONDS
+            ),
+            None,
+        )
+        if short_index is None:
+            break
+
+        state, start, end = ranges[short_index]
+        if state == "silent":
+            # A one-second silent gap cannot feed the next H3 continuation.
+            # Treating it as voiced is conservative: Source Vocal remains
+            # authoritative and no real vocal PCM is classified as silent.
+            ranges[short_index][0] = "voiced"
+        else:
+            neighbor_indices = [
+                index
+                for index in (short_index - 1, short_index + 1)
+                if 0 <= index < len(ranges)
+            ]
+            if not neighbor_indices:
+                break
+            neighbor_index = max(
+                neighbor_indices,
+                key=lambda index: ranges[index][2] - ranges[index][1],
+            )
+            if neighbor_index < short_index:
+                ranges[neighbor_index][2] -= 1
+                ranges[short_index][1] -= 1
+            else:
+                ranges[short_index][2] += 1
+                ranges[neighbor_index][1] += 1
+            ranges = [item for item in ranges if item[2] > item[1]]
+        adjustments += 1
+
+        merged: list[list[Any]] = []
+        for item in ranges:
+            if merged and merged[-1][0] == item[0]:
+                merged[-1][2] = item[2]
+            else:
+                merged.append(item[:])
+        ranges = merged
+
+    rebuilt: list[dict[str, Any]] = []
+    for range_index, (state, start, end) in enumerate(ranges):
+        length = end - start
+        scene_count = math.ceil(length / max_scene_seconds)
+        base_length = length // scene_count
+        remainder = length % scene_count
+        scene_start = start
+        for part_index in range(scene_count):
+            scene_length = base_length + (1 if part_index < remainder else 0)
+            is_final_scene = (
+                range_index == len(ranges) - 1
+                and part_index == scene_count - 1
+            )
+            if (
+                scene_length < _MIN_CHAINABLE_SCENE_SECONDS
+                and not is_final_scene
+            ):
+                raise VocalPromptError(
+                    "max_scene_seconds is too small to create a context-safe "
+                    "Scene plan; use at least 3 seconds"
+                )
+            scene_end = scene_start + scene_length
+            rebuilt.append(
+                {
+                    "index": len(rebuilt) + 1,
+                    "state": state,
+                    "start_seconds": scene_start,
+                    "end_seconds": scene_end,
+                    "duration_seconds": scene_length,
+                    "lyrics_indices": [],
+                }
+            )
+            scene_start = scene_end
+
+    rebuilt_signature = [
+        (scene["state"], scene["start_seconds"], scene["end_seconds"])
+        for scene in rebuilt
+    ]
+    scenes[:] = rebuilt
+    if rebuilt_signature == original_signature:
+        return 0
+    return max(1, adjustments)
+
+
 def assign_lyrics_to_scenes(
     alignments: list[LyricAlignment], scenes: list[dict[str, Any]]
 ) -> list[LyricAlignment]:
@@ -1488,8 +1621,9 @@ def build_prompt_text(
         "// 次の行を、全Sceneに共通する画風、背景、照明及び制約へ編集できます。",
         "* 全シーンで一貫した画風、照明、背景及び人物の外観を維持する。",
     ]
-    for scene in scenes:
+    for scene_number, scene in enumerate(scenes, start=1):
         lines.append("")
+        lines.append(f"// シーン {scene_number}")
         continuation = "" if scene["index"] == 1 else " 継続"
         lines.append(
             f"# シーン {scene['duration_seconds']}秒{continuation}"
@@ -2263,6 +2397,21 @@ class CLVocalToPromptSegments:
                 promoted_scene_count = promote_resolved_lyrics_scenes(
                     scenes, alignments
                 )
+                scenes_before_context_normalization = len(scenes)
+                context_scene_adjustments = normalize_chainable_scenes(
+                    scenes,
+                    max_scene_seconds=max_scene_seconds,
+                )
+                if context_scene_adjustments:
+                    LOGGER.info(
+                        "[cl_vocal2promptseg] Rebalanced %d short Scene "
+                        "boundary/boundaries for H3 continuation context; "
+                        "scenes=%d->%d, minimum chained duration=%ds",
+                        context_scene_adjustments,
+                        scenes_before_context_normalization,
+                        len(scenes),
+                        _MIN_CHAINABLE_SCENE_SECONDS,
+                    )
                 alignments = assign_lyrics_to_scenes(alignments, scenes)
                 prompt_text = build_prompt_text(
                     scenes,

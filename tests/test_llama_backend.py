@@ -328,6 +328,63 @@ class LlamaBackendTests(unittest.TestCase):
                 "Translated stream",
             )
 
+    def test_qwen3_stream_installs_and_polls_interrupt_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "qwen3-model.gguf"
+            path.write_bytes(b"x")
+            backend = backend_module.LlamaBackend(
+                llama_module=FakeLlamaModule,
+                llama_class=FakeRawCompletionLlama,
+            )
+            loaded = self._load(backend, path)
+            checks = []
+
+            backend.complete_chat(
+                messages=[{"role": "user", "content": "translate /no_think"}],
+                max_tokens=32,
+                temperature=0.1,
+                top_p=0.9,
+                repeat_penalty=1.05,
+                seed=1,
+                stop=["CLJT0ENDX"],
+                progress_callback=lambda _value: None,
+                interrupt_callback=lambda: checks.append("checked") or False,
+            )
+
+            criterion = loaded.text_completion_kwargs["stopping_criteria"]
+            self.assertTrue(callable(criterion))
+            self.assertFalse(criterion(None, None))
+            self.assertGreaterEqual(len(checks), 2)
+
+    def test_interrupt_exception_propagates_before_inference(self) -> None:
+        class TestInterrupt(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "qwen3-model.gguf"
+            path.write_bytes(b"x")
+            backend = backend_module.LlamaBackend(
+                llama_module=FakeLlamaModule,
+                llama_class=FakeRawCompletionLlama,
+            )
+            loaded = self._load(backend, path)
+
+            def interrupt() -> None:
+                raise TestInterrupt()
+
+            with self.assertRaises(TestInterrupt):
+                backend.complete_chat(
+                    messages=[{"role": "user", "content": "translate"}],
+                    max_tokens=32,
+                    temperature=0.1,
+                    top_p=0.9,
+                    repeat_penalty=1.05,
+                    seed=1,
+                    progress_callback=lambda _value: None,
+                    interrupt_callback=interrupt,
+                )
+            self.assertIsNone(loaded.text_completion_kwargs)
+
     def test_streaming_completion_reports_progress_and_rebuilds_response(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "qwen3-model.gguf"

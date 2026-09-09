@@ -10,6 +10,8 @@ from typing import Any
 
 from .compiler.errors import CLJapaneseToJSONError
 from .compiler.jsongen import (
+    DEFAULT_CONTINUATION_CONTEXT_LENGTH,
+    H3_CONTEXT_LENGTHS,
     SPEECH_GUARD_STRICT,
     SPEECH_GUARD_WARN,
     generate_json,
@@ -30,6 +32,13 @@ try:  # Available only when loaded by ComfyUI.
     from comfy.utils import ProgressBar as _ComfyProgressBar  # type: ignore
 except ImportError:  # pragma: no cover - standalone unit-test environment
     _ComfyProgressBar = None
+
+try:  # Available only when loaded by ComfyUI.
+    from comfy.model_management import (  # type: ignore
+        throw_exception_if_processing_interrupted as _throw_if_interrupted,
+    )
+except ImportError:  # pragma: no cover - standalone unit-test environment
+    _throw_if_interrupted = None
 
 
 class CLJapaneseToJSONGGUF:
@@ -143,6 +152,13 @@ class CLJapaneseToJSONGGUF:
                         "tooltip": "strict stops on unprotected speech cues; warn logs a warning and still generates JSON, which may produce unintended vocalization.",
                     },
                 ),
+                "continuation_context_length": (
+                    list(H3_CONTEXT_LENGTHS),
+                    {
+                        "default": DEFAULT_CONTINUATION_CONTEXT_LENGTH,
+                        "tooltip": "Head-overlap frames used by continued Scenes. The compiler writes matching H3 raw lengths so the delivered video covers the complete requested timeline. Keep this aligned with the Contex-Loop generation profile.",
+                    },
+                ),
             },
         }
 
@@ -185,6 +201,7 @@ class CLJapaneseToJSONGGUF:
         retry_max: int,
         save_debug_output: bool,
         speech_guard: str,
+        continuation_context_length: int,
     ) -> None:
         if not isinstance(plain_text, str) or plain_text.strip() == "":
             raise CLJapaneseToJSONError("plain_text must contain Japanese reduced Markdown")
@@ -233,6 +250,14 @@ class CLJapaneseToJSONGGUF:
             or speech_guard not in {SPEECH_GUARD_STRICT, SPEECH_GUARD_WARN}
         ):
             raise CLJapaneseToJSONError("speech_guard must be strict or warn")
+        if (
+            not isinstance(continuation_context_length, int)
+            or isinstance(continuation_context_length, bool)
+            or continuation_context_length not in H3_CONTEXT_LENGTHS
+        ):
+            raise CLJapaneseToJSONError(
+                "continuation_context_length must be an H3-supported context length"
+            )
 
     def clear_model(self) -> None:
         self._backend.clear_model()
@@ -288,6 +313,7 @@ class CLJapaneseToJSONGGUF:
         retry_max: int = 10,
         save_debug_output: bool = False,
         speech_guard: str = SPEECH_GUARD_STRICT,
+        continuation_context_length: int = DEFAULT_CONTINUATION_CONTEXT_LENGTH,
     ) -> tuple[str]:
         with self._lock:
             if keep_last_prompt and self.last_json_text is not None:
@@ -362,6 +388,7 @@ class CLJapaneseToJSONGGUF:
                 "retry_max": retry_max,
                 "save_debug_output": save_debug_output,
                 "speech_guard": speech_guard,
+                "continuation_context_length": continuation_context_length,
             }
             try:
                 self._validate_parameters(
@@ -383,6 +410,7 @@ class CLJapaneseToJSONGGUF:
                     retry_max=retry_max,
                     save_debug_output=save_debug_output,
                     speech_guard=speech_guard,
+                    continuation_context_length=continuation_context_length,
                 )
                 system_prompt = load_system_prompt()
                 model_path = resolve_model_name(model_name)
@@ -409,12 +437,14 @@ class CLJapaneseToJSONGGUF:
                         debug_events if save_debug_output is True else None
                     ),
                     progress_callback=translation_progress,
+                    interrupt_callback=_throw_if_interrupted,
                 )
                 emd = parse_markdown(canonical)
                 json_text = generate_json(
                     emd,
                     steps=steps,
                     speech_guard=speech_guard,
+                    continuation_context_length=continuation_context_length,
                 )
                 validate_final_json(json_text)
                 self.last_json_text = json_text
