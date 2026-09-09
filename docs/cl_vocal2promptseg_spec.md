@@ -41,7 +41,7 @@
 - 全Sceneで`ソース音声: 完全維持`を指定する。最終音声の正本はContex-Loopの`source_timeline`へ接続したロック済みフルミックスである。
 - 入力ボーカルステム自体を最終ミックスへ追加しない。ボーカルステムは`lip_sync_voice`の口形駆動専用である。
 - 本ノードは入力PCMを変更、パディング、切り詰め、リサンプル、正規化、保存又は出力しない。
-- 必要な末尾無音は既存`CLAudioPad`で追加する。本ノードは必要量だけを報告する。
+- 単一音源に必要な末尾無音は`CLAudioPad`、full mixとvocal stemの整列には`CLAudioPadPair`を使用する。本ノードは必要量だけを報告する。
 - `llama-cpp-python`及びGGUFモデルを使用しない。
 - ComfyUI本体、Contex-Loop及び他の`custom_nodes`へ依存したimportを行わない。
 - Pythonパッケージを自動インストール、更新又はダウンロードしない。
@@ -624,7 +624,7 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 
 次はWARNINGを出して継続する。
 
-- `trailing_padding_seconds > 0`: `CLAudioPad`の`pad_position=end`でフルミックスとボーカルステムを計画尺まで補完する必要がある。
+- `trailing_padding_seconds > 0`: `CLAudioPadPair`の`pad_position=end`でフルミックスとボーカルステムを共通の計画尺まで補完する必要がある。
 - 有声区間が0件: 全Sceneを無音として生成する。
 - 無音区間が0件: 全Sceneを有声として生成する。
 - 最も大きい解析窓RMSが閾値未満又は閾値との差が1 dB以下で、設定調整が必要と推定できる。
@@ -651,10 +651,12 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 推奨接続は次である。
 
 ```text
-Load Audio (full mix) ──> CLAudioPad ──> Contex-Loop source_timeline
+Load Audio (full mix) ──> CLAudioPadPair.audio_a
 Load Audio (vocal stem) ─> CLVocalToPromptSegments.vocal_audio
 Suno Lyrics STRING ──────> CLVocalToPromptSegments.lyrics_text
-Load Audio (vocal stem) ─> CLAudioPad ──> H3 Audio Tracks / lip_sync_voice
+Load Audio (vocal stem) ─> CLAudioPadPair.audio_b
+CLAudioPadPair outputs ──> H3 Audio Tracks
+Load Audio (vocal stem) ─> lip_sync_voice
 CLVocalToPromptSegments.prompt_text ─> CL Japanese to JSON (GGUF).plain_text
 CLVocalToPromptSegments.srt_text ─────> Preview/Save Text or subtitle workflow
 ```
@@ -662,9 +664,9 @@ CLVocalToPromptSegments.srt_text ─────> Preview/Save Text or subtitle 
 - full mixとvocal stemは同一開始時刻、同一速度及び同一楽曲長で書き出す。
 - vocal stemの先頭無音を削除しない。
 - Lyricsの`[Intro]`等は維持したまま入力できるが、見出し自体は歌詞及びSRTへ出力しない。
-- full mixを時間軸の基準にし、短い方だけを`CLAudioPad`の`pad_position=end`で補完する。
+- full mixとvocal stemの長い方を時間軸の基準にし、短い方だけを`CLAudioPadPair`の`pad_position=end`で補完する。
 - `trailing_padding_seconds`が0より大きい場合は、少なくともその端数を両トラックの末尾へ確保する。
-- `CLAudioPad`を相互に`match_audio`接続しない。
+- 2本の音声を単一の`CLAudioPadPair`へ接続し、入力尺に応じた配線変更や循環接続を行わない。
 - Plan依存のパディング済みvocalをGeneration Profileへ戻して循環依存を作らない。
 - 最終音声はsource timelineを使用し、Source Vocalを重ねて二重ボーカルにしない。
 

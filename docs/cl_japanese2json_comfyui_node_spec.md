@@ -9,8 +9,8 @@
 ## 2. 境界と独立性
 
 - パッケージ名: `ComfyUI-cl-japanese2json`
-- ノードクラス: `CLJapaneseToJSONGGUF`, `CLAudioPad`, `CLVocalToPromptSegments`, `CLLoadTextFile`
-- 表示名: `CL Japanese to JSON (GGUF)`, `CL Audio Pad (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`
+- ノードクラス: `CLJapaneseToJSONGGUF`, `CLAudioPad`, `CLAudioPadPair`, `CLVocalToPromptSegments`, `CLLoadTextFile`
+- 表示名: `CL Japanese to JSON (GGUF)`, `CL Audio Pad (PCM Silence)`, `CL Audio Pad Pair (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`
 - カテゴリ: `MiniMax H3/Prompt Tools`, `MiniMax H3/Audio Tools`
 - 出力ノードではない。
 - ComfyUI本体及び他の`custom_nodes`を変更しない。
@@ -32,6 +32,7 @@
 NODE_CLASS_MAPPINGS = {
     "CLJapaneseToJSONGGUF": CLJapaneseToJSONGGUF,
     "CLAudioPad": CLAudioPad,
+    "CLAudioPadPair": CLAudioPadPair,
     "CLVocalToPromptSegments": CLVocalToPromptSegments,
     "CLLoadTextFile": CLLoadTextFile,
 }
@@ -39,6 +40,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLJapaneseToJSONGGUF": "CL Japanese to JSON (GGUF)",
     "CLAudioPad": "CL Audio Pad (PCM Silence)",
+    "CLAudioPadPair": "CL Audio Pad Pair (PCM Silence)",
     "CLVocalToPromptSegments": "CL Vocal to Prompt Segments",
     "CLLoadTextFile": "CL Load Text File (Drag & Drop)",
 }
@@ -155,13 +157,23 @@ padding_samples = output_samples - original_samples
 
 `plan`がない場合の`plan_target_samples`、`match_audio`がない場合の`match_target_samples`はそれぞれ0である。Planにfpsがない場合は24fpsを既定とする。`match_audio`は波形を混合、連結又は出力せず、その継続時間だけを入力音声のサンプルレートへ換算して最小目標に使用する。基準より入力音声が長い場合も入力を切り詰めてはならない。`target_duration_seconds=0`、Planなし、`match_audio`なし、`extra_padding_seconds=0`なら入力AUDIOを同一オブジェクトのまま返す。
 
-MiniMax H3 Audio Tracksへfull mixとvocal stemを渡す場合、full mixを時間軸の基準とする。Planで補完したfull mixの`padded_audio`をvocal側`CLAudioPad.match_audio`へ接続し、vocal側`extra_padding_seconds`は0とする。これにより、元の開始時刻を保ったまま短いvocal stemだけを基準トラックと同じ尺まで補完できる。`CLAudioPad`相互の`match_audio`接続は禁止する。Planへ戻るGeneration Profileを構成するLip-Sync OptionsにはPlan依存の`padded_audio`を接続せず、元のvocal stemを接続してComfyUIの循環依存を避ける。
+MiniMax H3 Audio Tracksへfull mixとvocal stemを渡す場合は、後述の`CLAudioPadPair`を使用する。Planへ戻るGeneration Profileを構成するLip-Sync OptionsにはPlan依存のパディング済みAUDIOを接続せず、元のvocal stemを接続してComfyUIの循環依存を避ける。
 
 `end`は原音の開始位置を維持して末尾へ全量を追加する。`start`は先頭、`both`は前後へほぼ等分し、奇数サンプルの余りを末尾へ置く。リップシンク用source trackでは`end`を既定かつ推奨とし、`start`と`both`は原音の時刻を移動させることをtooltipで明示する。
 
 出力は`padded_audio`, `original_duration`, `padded_duration`, `padding_added`, `status`の順とする。秒数出力はFLOAT、状態はSTRINGである。
 
 Python logger名及びユーザー可視ログ接頭辞は`cl_audiopad`とし、翻訳コンパイラの`cl_japanese2json`から分離する。
+
+### 4.2.1 CL Audio Pad Pair (PCM Silence)
+
+requiredは`audio_a`, `audio_b`, `target_duration_seconds`, `extra_padding_seconds`, `pad_position`、optionalは`plan: H3_CHAIN_PLAN`とする。2本のAUDIOは同じ開始時刻と速度を持つ整列済みトラックでなければならない。
+
+各入力の元尺、UI目標尺及びPlan完成尺の最大値を共通基準尺とし、`extra_padding_seconds`を一度加えた後、各入力のサンプルレートへ換算する。短い入力だけへPCM値`0.0`を追加し、長い入力を切り詰めてはならない。入力ごとのdtype、デバイス、バッチ、チャンネル及びサンプルレートを維持する。
+
+出力は`padded_audio_a`, `padded_audio_b`, `original_duration_a`, `original_duration_b`, `aligned_duration`, `padding_added_a`, `padding_added_b`, `status`の順とする。同一サンプルレートの入力では2出力のサンプル数を完全一致させる。異なるサンプルレートでは同じ時間尺へ個別換算し、リサンプルは行わない。
+
+推奨接続は、`audio_a=full mix`、`audio_b=vocal stem`、両出力を同じ順序で`MiniMax H3 Audio Tracks`へ渡す構成とする。どちらが長いかによって配線を変更してはならない。Lip-Sync OptionsにはPlan依存の出力ではなく元のvocal stemを接続する。
 
 ### 4.3 CL Load Text File (Drag & Drop)
 

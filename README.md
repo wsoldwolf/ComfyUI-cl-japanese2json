@@ -1,6 +1,6 @@
 # ComfyUI-cl-japanese2json
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡し、`CL Audio Pad (PCM Silence)`は音源がH3 Plan又は基準トラックより短い場合の不足サンプルを自動計算して無音補完します。
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をH3 Plan又は最長入力へ無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -56,7 +56,7 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。サブディレクトリも再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。ファイル名に`mmproj`を含むGGUFは除外します。
 3. 使用環境向けの`llama-cpp-python`がComfyUIのPythonからimportできることを確認します。
 4. Vocal区間・SRT生成を使用する場合は、OpenAI WhisperをComfyUIのPython環境へユーザー自身で導入し、任意の公式`.pt`チェックポイントを`ComfyUI/models/whisper/`以下へ配置します。モデル名指定による暗黙ダウンロードは使用しません。
-5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Vocal to Prompt Segments`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`を追加します。
+5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Vocal to Prompt Segments`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
 
 モデルの自動ダウンロードは行いません。
 
@@ -496,7 +496,7 @@ CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
 
 生成されたテンプレートのSubject、画風、背景、人物動作及びカメラワークは用途に合わせて編集してください。歌唱の母音伸長、コーラス、重唱、リバーブ及び分離残留によりWhisper時刻はずれることがあるため、SRTは行単位の初期同期データとして確認してください。未解決LyricsはコメントとSRTへ出力されませんが、`segments_json`に`unresolved`として残り、最良のWhisper候補と候補時刻も診断用に確認できます。
 
-テンプレートの`ソースボーカル`は`<Audio 1>`ではなく、Contex-LoopのSource Vocal入力です。ボーカルステムを最終音声へ重ねず、ロック済みフルミックスをSource Timelineとして維持します。入力末尾が整数秒でない場合は`status`の不足量に従い、フルミックスとボーカルステムを`CL Audio Pad`の`pad_position=end`で同じ計画尺まで補完してください。
+テンプレートの`ソースボーカル`は`<Audio 1>`ではなく、Contex-LoopのSource Vocal入力です。ボーカルステムを最終音声へ重ねず、ロック済みフルミックスをSource Timelineとして維持します。入力末尾が整数秒でない場合は、フルミックスとボーカルステムを`CL Audio Pad Pair`へ接続し、`pad_position=end`で長い入力と同じ計画尺まで補完してください。
 
 ## PCM無音パディング
 
@@ -524,20 +524,20 @@ Contex-Loop Planを接続すると、`total_delivered_frames / fps`から必要�
 
 出力にはパディング済みAUDIOのほか、元尺、出力尺、追加秒数及び状態文字列があります。音源が既に十分長く、追加マージンも0なら入力をそのまま返します。最終Assembleで`audio_source: source`を使うと、Planを超える安全マージンだけが動画尺で切られ、元音源部分は維持されます。
 
-フルミックスとボーカルステムを`MiniMax H3 Audio Tracks`へ渡す場合は、フルミックスを基準尺として次のように接続します。ステム分離による数百ミリ秒の末尾差があっても、短いボーカルだけがPCM値`0.0`で延長されます。
+フルミックスとボーカルステムを`MiniMax H3 Audio Tracks`へ渡す場合は、2本を`CL Audio Pad Pair (PCM Silence)`へ直接接続します。フルミックスとボーカルのどちらが長い場合でも、短い側だけが最長入力、Plan及びUI目標の最大尺までPCM値`0.0`で延長されます。
 
 ```text
-Full Mix Load Audio ──> Full Mix CL Audio Pad.audio
-Contex-Loop Plan ─────> Full Mix CL Audio Pad.plan
-Full Mix CL Audio Pad.padded_audio ──┬─> MiniMax H3 Audio Tracks.full_mix
-                                     └─> Vocal CL Audio Pad.match_audio
+Full Mix Load Audio ──> CL Audio Pad Pair.audio_a
+Vocal Load Audio ─────> CL Audio Pad Pair.audio_b
+Contex-Loop Plan ─────> CL Audio Pad Pair.plan
 
-Vocal Load Audio ──┬─> Vocal CL Audio Pad.audio
-                   └─> MiniMax H3 Lip-Sync Options.voice
-Vocal CL Audio Pad.padded_audio ───────> MiniMax H3 Audio Tracks.vocals
+CL Audio Pad Pair.padded_audio_a ──> MiniMax H3 Audio Tracks.full_mix
+CL Audio Pad Pair.padded_audio_b ──> MiniMax H3 Audio Tracks.vocals
+
+Vocal Load Audio ──────────────────> MiniMax H3 Lip-Sync Options.voice
 ```
 
-Vocal側は`pad_position=end`、`extra_padding_seconds=0`にします。両`CLAudioPad`を相互に`match_audio`接続しないでください。また、Planから補完したボーカルをLip-Sync Options経由でGeneration Profileへ戻すと循環するため、Lip-Sync Optionsには元のボーカルを直接接続します。入力音声が基準より長い場合は切り詰めないため、基準にするフルミックス自体が最長であることを確認してください。
+`pad_position=end`、`extra_padding_seconds=0`を基本とします。どちらの入力も切り詰めず、同じ共通尺へ出力するため、長い側の事前判定や配線変更は不要です。Plan依存のパディング済みボーカルをLip-Sync Options経由でGeneration Profileへ戻すと循環するため、Lip-Sync Optionsには元のボーカルを直接接続します。
 
 パディング処理のログは翻訳処理と区別できるよう、`[cl_audiopad]`接頭辞で出力されます。
 

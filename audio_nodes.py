@@ -50,6 +50,38 @@ def _plan_target_samples(plan: Any, sample_rate: int) -> tuple[int, str] | None:
     return target, f"plan={frames} frames at {float(fps):g} fps"
 
 
+def _pad_audio_to_samples(
+    audio: dict[str, Any],
+    waveform: Any,
+    current_samples: int,
+    output_samples: int,
+    pad_position: str,
+) -> dict[str, Any]:
+    """Return ``audio`` padded to an exact sample count without modifying it."""
+    if output_samples < current_samples:
+        raise ValueError("output sample count cannot be shorter than input audio")
+    if output_samples == current_samples:
+        return audio
+
+    padding_samples = output_samples - current_samples
+    if pad_position == "end":
+        before_samples = 0
+    elif pad_position == "start":
+        before_samples = padding_samples
+    else:
+        before_samples = padding_samples // 2
+
+    output_shape = list(waveform.shape)
+    output_shape[-1] = output_samples
+    padded_waveform = waveform.new_zeros(tuple(output_shape))
+    padded_waveform[
+        ..., before_samples : before_samples + current_samples
+    ] = waveform
+    padded_audio = dict(audio)
+    padded_audio["waveform"] = padded_waveform
+    return padded_audio
+
+
 class CLAudioPad:
     """Pad ComfyUI AUDIO with exact zero-valued PCM without trimming input."""
 
@@ -207,22 +239,13 @@ class CLAudioPad:
             LOGGER.info("[cl_audiopad] %s", status)
             return (audio, original_duration, original_duration, 0.0, status)
 
-        if pad_position == "end":
-            before_samples, after_samples = 0, padding_samples
-        elif pad_position == "start":
-            before_samples, after_samples = padding_samples, 0
-        else:
-            before_samples = padding_samples // 2
-            after_samples = padding_samples - before_samples
-
-        output_shape = list(waveform.shape)
-        output_shape[-1] = output_samples
-        padded_waveform = waveform.new_zeros(tuple(output_shape))
-        padded_waveform[
-            ..., before_samples : before_samples + current_samples
-        ] = waveform
-        padded_audio = dict(audio)
-        padded_audio["waveform"] = padded_waveform
+        padded_audio = _pad_audio_to_samples(
+            audio,
+            waveform,
+            current_samples,
+            output_samples,
+            pad_position,
+        )
 
         status = (
             f"padded {padding_samples} zero sample(s) "
@@ -236,5 +259,175 @@ class CLAudioPad:
             original_duration,
             padded_duration,
             padding_duration,
+            status,
+        )
+
+
+class CLAudioPadPair:
+    """Pad two aligned AUDIO tracks to their common longest duration."""
+
+    RETURN_TYPES = (
+        "AUDIO",
+        "AUDIO",
+        "FLOAT",
+        "FLOAT",
+        "FLOAT",
+        "FLOAT",
+        "FLOAT",
+        "STRING",
+    )
+    RETURN_NAMES = (
+        "padded_audio_a",
+        "padded_audio_b",
+        "original_duration_a",
+        "original_duration_b",
+        "aligned_duration",
+        "padding_added_a",
+        "padding_added_b",
+        "status",
+    )
+    FUNCTION = "pad_audio_pair"
+    CATEGORY = "MiniMax H3/Audio Tools"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, Any]:
+        return {
+            "required": {
+                "audio_a": (
+                    "AUDIO",
+                    {
+                        "tooltip": "First aligned track, such as the full mix. It is padded only when shorter than the common target.",
+                    },
+                ),
+                "audio_b": (
+                    "AUDIO",
+                    {
+                        "tooltip": "Second aligned track, such as the vocal stem. It is padded only when shorter than the common target.",
+                    },
+                ),
+                "target_duration_seconds": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 86400.0,
+                        "step": 0.001,
+                        "tooltip": "Optional minimum duration for both tracks. 0 disables this target.",
+                    },
+                ),
+                "extra_padding_seconds": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 3600.0,
+                        "step": 0.001,
+                        "tooltip": "Additional silence appended after satisfying both inputs, the UI target, and the optional H3 plan.",
+                    },
+                ),
+                "pad_position": (
+                    list(_PAD_POSITIONS),
+                    {
+                        "default": "end",
+                        "tooltip": "Where silence is inserted into each shorter track. Use end to preserve source-timeline synchronization.",
+                    },
+                ),
+            },
+            "optional": {
+                "plan": (
+                    "H3_CHAIN_PLAN",
+                    {
+                        "tooltip": "Optional MiniMax H3 Contex-Loop plan. Both tracks are padded to at least its delivered duration.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def pad_audio_pair(
+        cls,
+        audio_a: dict[str, Any],
+        audio_b: dict[str, Any],
+        target_duration_seconds: float,
+        extra_padding_seconds: float,
+        pad_position: str,
+        plan: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any], float, float, float, float, float, str]:
+        waveform_a, sample_rate_a, samples_a = CLAudioPad._validate_audio(audio_a)
+        waveform_b, sample_rate_b, samples_b = CLAudioPad._validate_audio(audio_b)
+        target_seconds = _non_negative_seconds(
+            target_duration_seconds, "target_duration_seconds", 86400.0
+        )
+        extra_seconds = _non_negative_seconds(
+            extra_padding_seconds, "extra_padding_seconds", 3600.0
+        )
+        if pad_position not in _PAD_POSITIONS:
+            raise ValueError(f"pad_position must be one of {_PAD_POSITIONS}")
+
+        duration_a = samples_a / float(sample_rate_a)
+        duration_b = samples_b / float(sample_rate_b)
+        plan_target_a = _plan_target_samples(plan, sample_rate_a)
+        plan_target_b = _plan_target_samples(plan, sample_rate_b)
+        plan_seconds = (
+            0.0
+            if plan_target_a is None
+            else max(
+                plan_target_a[0] / float(sample_rate_a),
+                plan_target_b[0] / float(sample_rate_b),
+            )
+        )
+        base_duration = max(duration_a, duration_b, target_seconds, plan_seconds)
+        output_duration = base_duration + extra_seconds
+
+        output_samples_a = max(samples_a, int(round(output_duration * sample_rate_a)))
+        output_samples_b = max(samples_b, int(round(output_duration * sample_rate_b)))
+        padding_samples_a = output_samples_a - samples_a
+        padding_samples_b = output_samples_b - samples_b
+        padding_a = padding_samples_a / float(sample_rate_a)
+        padding_b = padding_samples_b / float(sample_rate_b)
+        padded_duration_a = output_samples_a / float(sample_rate_a)
+        padded_duration_b = output_samples_b / float(sample_rate_b)
+        aligned_duration = max(padded_duration_a, padded_duration_b)
+
+        padded_audio_a = _pad_audio_to_samples(
+            audio_a,
+            waveform_a,
+            samples_a,
+            output_samples_a,
+            pad_position,
+        )
+        padded_audio_b = _pad_audio_to_samples(
+            audio_b,
+            waveform_b,
+            samples_b,
+            output_samples_b,
+            pad_position,
+        )
+
+        target_parts = [
+            f"longest input={max(duration_a, duration_b):.6f}s",
+        ]
+        if target_seconds > 0.0:
+            target_parts.append(f"UI target={target_seconds:.6f}s")
+        if plan_target_a is not None:
+            target_parts.append(plan_target_a[1])
+        if extra_seconds > 0.0:
+            target_parts.append(f"extra={extra_seconds:.6f}s")
+        status = (
+            f"aligned audio pair at {aligned_duration:.6f}s using {pad_position} "
+            f"padding: audio_a {duration_a:.6f}s + {padding_a:.6f}s; "
+            f"audio_b {duration_b:.6f}s + {padding_b:.6f}s; "
+            + ", ".join(target_parts)
+        )
+        LOGGER.info("[cl_audiopad] %s", status)
+        return (
+            padded_audio_a,
+            padded_audio_b,
+            duration_a,
+            duration_b,
+            aligned_duration,
+            padding_a,
+            padding_b,
             status,
         )

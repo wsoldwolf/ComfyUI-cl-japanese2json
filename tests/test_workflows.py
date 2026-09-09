@@ -145,24 +145,24 @@ class WorkflowCompatibilityTests(unittest.TestCase):
         nodes = {int(node["id"]): node for node in workflow["nodes"]}
         links = {int(link[0]): link for link in workflow["links"]}
 
-        full_mix_pad = nodes[2023]
-        vocal_pad = nodes[2020]
-        self.assertEqual(full_mix_pad["type"], "CLAudioPad")
-        self.assertEqual(vocal_pad["type"], "CLAudioPad")
+        audio_pair = nodes[2023]
+        self.assertNotIn(2020, nodes)
+        self.assertEqual(audio_pair["type"], "CLAudioPadPair")
         self.assertEqual(
-            full_mix_pad["widgets_values_named"],
+            audio_pair["widgets_values_named"],
             {
                 "target_duration_seconds": 0.0,
                 "extra_padding_seconds": 0.0,
                 "pad_position": "end",
             },
         )
-        self.assertEqual(vocal_pad["widgets_values_named"], full_mix_pad["widgets_values_named"])
         self.assertEqual(links[3760][1:5], [2022, 0, 2023, 0])
-        self.assertEqual(links[3571][1:5], [2008, 0, 2020, 0])
-        self.assertEqual(links[3790][1:5], [2023, 0, 2020, 2])
+        self.assertEqual(links[3571][1:5], [2008, 0, 2023, 1])
+        self.assertEqual(links[3761][1:5], [1700, 0, 2023, 2])
+        self.assertNotIn(3779, links)
+        self.assertNotIn(3790, links)
         self.assertEqual(links[3763][1:5], [2023, 0, 2024, 0])
-        self.assertEqual(links[3762][1:5], [2020, 0, 2024, 1])
+        self.assertEqual(links[3762][1:5], [2023, 1, 2024, 1])
         self.assertEqual(links[3764][1:5], [2024, 0, 1701, 3])
         self.assertEqual(links[3778][1:5], [2008, 0, 2025, 0])
 

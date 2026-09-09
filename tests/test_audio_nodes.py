@@ -201,3 +201,79 @@ class AudioPadTests(unittest.TestCase):
             audio_nodes.CLAudioPad.pad_audio(
                 audio([1.0]), 0.0, 0.0, "end", match_audio={}
             )
+
+
+class AudioPadPairTests(unittest.TestCase):
+    def test_registration_and_metadata(self) -> None:
+        cls = PKG.NODE_CLASS_MAPPINGS["CLAudioPadPair"]
+        self.assertIs(cls, audio_nodes.CLAudioPadPair)
+        self.assertEqual(
+            PKG.NODE_DISPLAY_NAME_MAPPINGS["CLAudioPadPair"],
+            "CL Audio Pad Pair (PCM Silence)",
+        )
+        self.assertEqual(cls.FUNCTION, "pad_audio_pair")
+        self.assertEqual(cls.RETURN_NAMES[:2], ("padded_audio_a", "padded_audio_b"))
+
+    def test_ui_exposes_two_tracks_and_one_optional_plan(self) -> None:
+        inputs = audio_nodes.CLAudioPadPair.INPUT_TYPES()
+        self.assertEqual(
+            list(inputs["required"]),
+            [
+                "audio_a",
+                "audio_b",
+                "target_duration_seconds",
+                "extra_padding_seconds",
+                "pad_position",
+            ],
+        )
+        self.assertEqual(inputs["optional"]["plan"][0], "H3_CHAIN_PLAN")
+
+    def test_shorter_first_track_is_padded_to_second_track(self) -> None:
+        first = audio([1.0, 2.0, 3.0])
+        second = audio([4.0, 5.0, 6.0, 7.0])
+        result = audio_nodes.CLAudioPadPair.pad_audio_pair(
+            first, second, 0.0, 0.0, "end"
+        )
+        self.assertEqual(result[0]["waveform"].samples, [1.0, 2.0, 3.0, 0.0])
+        self.assertIs(result[1], second)
+        self.assertEqual(result[2:7], (0.75, 1.0, 1.0, 0.25, 0.0))
+
+    def test_shorter_second_track_is_padded_to_first_track(self) -> None:
+        first = audio([1.0, 2.0, 3.0, 4.0])
+        second = audio([5.0, 6.0])
+        result = audio_nodes.CLAudioPadPair.pad_audio_pair(
+            first, second, 0.0, 0.0, "end"
+        )
+        self.assertIs(result[0], first)
+        self.assertEqual(result[1]["waveform"].samples, [5.0, 6.0, 0.0, 0.0])
+        self.assertEqual(result[2:7], (1.0, 0.5, 1.0, 0.0, 0.5))
+
+    def test_plan_and_extra_padding_apply_once_to_both_tracks(self) -> None:
+        result = audio_nodes.CLAudioPadPair.pad_audio_pair(
+            audio([1.0, 2.0, 3.0]),
+            audio([4.0, 5.0]),
+            0.0,
+            0.5,
+            "both",
+            plan={"total_delivered_frames": 2, "compatibility": {"fps": 2}},
+        )
+        self.assertEqual(
+            result[0]["waveform"].samples,
+            [0.0, 1.0, 2.0, 3.0, 0.0, 0.0],
+        )
+        self.assertEqual(
+            result[1]["waveform"].samples,
+            [0.0, 0.0, 4.0, 5.0, 0.0, 0.0],
+        )
+        self.assertEqual(result[4:7], (1.5, 0.75, 1.0))
+        self.assertIn("plan=2 frames at 2 fps", result[7])
+
+    def test_pair_uses_each_tracks_sample_rate(self) -> None:
+        first = audio([1.0, 2.0], sample_rate=2)
+        second = audio([3.0, 4.0, 5.0, 6.0, 7.0, 8.0], sample_rate=4)
+        result = audio_nodes.CLAudioPadPair.pad_audio_pair(
+            first, second, 0.0, 0.0, "end"
+        )
+        self.assertEqual(result[0]["waveform"].samples, [1.0, 2.0, 0.0])
+        self.assertIs(result[1], second)
+        self.assertEqual(result[4], 1.5)
