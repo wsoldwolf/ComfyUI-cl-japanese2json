@@ -40,6 +40,20 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     vocal = vocal_nodes[0]
                     input_names = [item["name"] for item in vocal["inputs"]]
                     self.assertIn("lyrics_neighbor_threshold", input_names)
+                    self.assertIn("condition_on_previous_text", input_names)
+                    self.assertIn("srt_time_offset", input_names)
+                    self.assertIn("include_lyrics_comments", input_names)
+                    self.assertTrue(
+                        vocal["widgets_values_named"][
+                            "condition_on_previous_text"
+                        ]
+                    )
+                    self.assertEqual(
+                        vocal["widgets_values_named"]["srt_time_offset"], 0
+                    )
+                    self.assertTrue(
+                        vocal["widgets_values_named"]["include_lyrics_comments"]
+                    )
                     self.assertEqual(
                         vocal["widgets_values_named"]["lyrics_match_threshold"],
                         0.55,

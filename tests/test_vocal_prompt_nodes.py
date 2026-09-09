@@ -32,7 +32,7 @@ class FakeAudioShape:
 
 
 class FakeBackend:
-    def __init__(self, result: dict) -> None:
+    def __init__(self, result: dict | list[dict]) -> None:
         self.result = result
         self.ensure_calls: list[tuple[Path, str]] = []
         self.transcribe_calls: list[dict] = []
@@ -42,15 +42,26 @@ class FakeBackend:
         self.ensure_calls.append((model_path, device))
         return self
 
-    def transcribe(self, audio, *, language, device, initial_prompt):
+    def transcribe(
+        self,
+        audio,
+        *,
+        language,
+        device,
+        initial_prompt,
+        condition_on_previous_text,
+    ):
         self.transcribe_calls.append(
             {
                 "audio": audio,
                 "language": language,
                 "device": device,
                 "initial_prompt": initial_prompt,
+                "condition_on_previous_text": condition_on_previous_text,
             }
         )
+        if isinstance(self.result, list):
+            return self.result[len(self.transcribe_calls) - 1]
         return self.result
 
     def clear_model(self) -> None:
@@ -74,7 +85,8 @@ class VocalPromptNodeTests(unittest.TestCase):
         with patch.object(
             cls, "discover_model_names", return_value=["large-v3.pt"]
         ):
-            required = cls.INPUT_TYPES()["required"]
+            input_types = cls.INPUT_TYPES()
+            required = input_types["required"]
         self.assertEqual(
             list(required),
             [
@@ -98,6 +110,18 @@ class VocalPromptNodeTests(unittest.TestCase):
         self.assertTrue(required["lyrics_text"][1]["forceInput"])
         self.assertEqual(required["max_scene_seconds"][1]["default"], 10)
         self.assertEqual(required["language"][0], ["ja", "en", "auto"])
+        self.assertTrue(
+            input_types["optional"]["condition_on_previous_text"][1]["default"]
+        )
+        self.assertEqual(
+            input_types["optional"]["srt_time_offset"][1]["default"], 0
+        )
+        self.assertEqual(
+            input_types["optional"]["srt_time_offset"][1]["step"], 1
+        )
+        self.assertTrue(
+            input_types["optional"]["include_lyrics_comments"][1]["default"]
+        )
         self.assertEqual(
             required["lyrics_neighbor_threshold"][1]["default"], 0.45
         )
@@ -248,6 +272,365 @@ class VocalPromptNodeTests(unittest.TestCase):
         self.assertEqual(aligned[1].match_method, "neighbor")
         self.assertEqual(aligned[1].whisper_text, "abcdeXXXXX")
 
+    def test_alignment_skips_early_candidate_below_threshold(self) -> None:
+        aligned = vocal.align_lyrics(
+            [lyric(1, "target lyric")],
+            [
+                word(1, "unrelated", 1.0, 1.5),
+                word(2, "target", 20.0, 20.3),
+                word(3, "lyric", 20.3, 20.7),
+            ],
+            match_threshold=0.8,
+            search_seconds=60.0,
+            audio_duration_seconds=30.0,
+        )
+        self.assertEqual(aligned[0].whisper_text, "targetlyric")
+        self.assertEqual(aligned[0].start_ms, 20000)
+
+    def test_post_anchor_search_does_not_jump_to_later_repeated_chorus(self) -> None:
+        lyrics = [
+            lyric(1, "We walk the path we never chose"),
+            lyric(2, "BIT BY BIT!"),
+            lyric(3, "We become the wounds nobody knows"),
+        ]
+        words = [
+            word(1, "We walk the path we never chose", 1.0, 2.0),
+            word(2, "By", 2.1, 2.2),
+            word(3, "breath", 2.2, 2.5),
+            word(4, "We become the wounds nobody knows", 2.6, 4.0),
+            word(5, "BIT", 55.0, 55.2),
+            word(6, "BY", 55.2, 55.4),
+            word(7, "BIT", 55.4, 55.6),
+        ]
+        aligned = vocal.align_lyrics(
+            lyrics,
+            words,
+            match_threshold=0.55,
+            neighbor_match_threshold=0.45,
+            search_seconds=60.0,
+            audio_duration_seconds=60.0,
+        )
+        self.assertEqual(
+            [entry.status for entry in aligned],
+            ["resolved", "unresolved", "resolved"],
+        )
+        self.assertEqual(aligned[1].candidate_whisper_text, "Bybreath")
+        self.assertEqual(aligned[2].start_ms, 2600)
+
+    def test_repeated_refrain_uses_following_lyrics_to_select_earlier_match(self) -> None:
+        lyrics = [
+            lyric(1, "opening anchor"),
+            lyric(2, "BIT BY BIT!"),
+            lyric(3, "we carve our history in tears"),
+            lyric(4, "through every scar"),
+            lyric(5, "BIT BY BIT!"),
+            lyric(6, "until the end is drawing near"),
+        ]
+        words = [
+            word(1, "opening anchor", 1.0, 2.0),
+            word(2, "BIT BY BIT", 2.1, 2.5),
+            word(3, "we carve our history in tears", 2.6, 4.0),
+            word(4, "through every scar", 4.1, 5.0),
+            word(5, "BIT BY BIT", 10.0, 10.4),
+            word(6, "until the end is drawing near", 10.5, 12.0),
+        ]
+        aligned = vocal.align_lyrics(
+            lyrics,
+            words,
+            match_threshold=0.55,
+            neighbor_match_threshold=0.45,
+            search_seconds=60.0,
+            audio_duration_seconds=20.0,
+        )
+        self.assertEqual([entry.status for entry in aligned], ["resolved"] * 6)
+        self.assertEqual(aligned[1].start_ms, 2100)
+        self.assertEqual(aligned[4].start_ms, 10000)
+        self.assertEqual(aligned[5].start_ms, 10500)
+
+    def test_weaker_candidate_is_left_for_the_following_lyric(self) -> None:
+        lyrics = [
+            lyric(1, "opening anchor"),
+            lyric(2, "through the ashes"),
+            lyric(3, "through the years"),
+            lyric(4, "closing anchor"),
+        ]
+        words = [
+            word(1, "opening anchor", 1.0, 2.0),
+            word(2, "through the years", 2.1, 3.0),
+            word(3, "closing anchor", 3.1, 4.0),
+        ]
+        aligned = vocal.align_lyrics(
+            lyrics,
+            words,
+            match_threshold=0.55,
+            neighbor_match_threshold=0.45,
+            search_seconds=10.0,
+            audio_duration_seconds=5.0,
+        )
+        self.assertEqual(
+            [entry.status for entry in aligned],
+            ["resolved", "unresolved", "resolved", "resolved"],
+        )
+        self.assertEqual(aligned[2].whisper_text, "through the years")
+        self.assertEqual(aligned[2].start_ms, 2100)
+
+    def test_targeted_retry_recovers_only_a_bounded_unresolved_run(self) -> None:
+        lyrics = [
+            lyric(1, "opening anchor"),
+            lyric(2, "missing harsh line"),
+            lyric(3, "second missing line"),
+            lyric(4, "closing anchor"),
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                lyrics[0], "resolved", 1.0, "opening anchor", 0, 1000,
+                match_method="primary",
+            ),
+            vocal.LyricAlignment(lyrics[1], "unresolved", 0.0, "", None, None),
+            vocal.LyricAlignment(lyrics[2], "unresolved", 0.0, "", None, None),
+            vocal.LyricAlignment(
+                lyrics[3], "resolved", 1.0, "closing anchor", 4000, 5000,
+                match_method="primary",
+            ),
+        ]
+        retry_result = {
+            "segments": [
+                {
+                    "text": "missing harsh line second missing line",
+                    "words": [
+                        {
+                            "word": "missing harsh line",
+                            "start": 0.2,
+                            "end": 1.0,
+                        },
+                        {
+                            "word": "second missing line",
+                            "start": 1.1,
+                            "end": 2.0,
+                        },
+                    ],
+                }
+            ]
+        }
+        backend = FakeBackend(retry_result)
+        updated, attempts, recovered, invalid = (
+            vocal.targeted_retry_unresolved_lyrics(
+                alignments,
+                list(range(5 * 16000)),
+                backend,
+                language="en",
+                device="cpu",
+                condition_on_previous_text=True,
+                match_threshold=0.55,
+                neighbor_match_threshold=0.45,
+            )
+        )
+        self.assertEqual((attempts, recovered, invalid), (1, 2, 0))
+        self.assertEqual(
+            [entry.status for entry in updated],
+            ["resolved", "resolved", "resolved", "resolved"],
+        )
+        self.assertEqual(updated[1].match_method, "targeted")
+        self.assertEqual((updated[1].start_ms, updated[1].end_ms), (1200, 2000))
+        self.assertEqual((updated[2].start_ms, updated[2].end_ms), (2100, 3000))
+        self.assertEqual(
+            backend.transcribe_calls[0]["initial_prompt"],
+            "opening anchor",
+        )
+        scenes = [
+            {
+                "index": 1,
+                "state": "voiced",
+                "start_seconds": 0,
+                "end_seconds": 1,
+                "duration_seconds": 1,
+                "lyrics_indices": [],
+            },
+            {
+                "index": 2,
+                "state": "silent",
+                "start_seconds": 1,
+                "end_seconds": 4,
+                "duration_seconds": 3,
+                "lyrics_indices": [],
+            },
+            {
+                "index": 3,
+                "state": "voiced",
+                "start_seconds": 4,
+                "end_seconds": 5,
+                "duration_seconds": 1,
+                "lyrics_indices": [],
+            },
+        ]
+        self.assertEqual(vocal.promote_resolved_lyrics_scenes(scenes, updated), 1)
+        self.assertEqual([scene["state"] for scene in scenes], ["voiced"] * 3)
+
+    def test_resolved_primary_lyric_promotes_vad_boundary_scene(self) -> None:
+        scenes = [
+            {
+                "index": 1,
+                "state": "silent",
+                "start_seconds": 50,
+                "end_seconds": 60,
+                "duration_seconds": 10,
+                "lyrics_indices": [],
+            },
+            {
+                "index": 2,
+                "state": "voiced",
+                "start_seconds": 60,
+                "end_seconds": 70,
+                "duration_seconds": 10,
+                "lyrics_indices": [],
+            },
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                lyric(1, "What is the meaning of the life we bear?"),
+                "resolved",
+                1.0,
+                "What is the meaning of the life we bear?",
+                59_940,
+                63_140,
+                match_method="primary",
+            )
+        ]
+
+        self.assertEqual(
+            vocal.promote_resolved_lyrics_scenes(scenes, alignments), 1
+        )
+        self.assertEqual([scene["state"] for scene in scenes], ["voiced", "voiced"])
+        assigned = vocal.assign_lyrics_to_scenes(alignments, scenes)
+        self.assertEqual(assigned[0].scene_index, 1)
+        prompt = vocal.build_prompt_text(scenes, assigned)
+        self.assertIn("// 歌詞: What is the meaning of the life we bear?", prompt)
+
+    def test_targeted_retry_splits_a_long_gap_into_overlapping_windows(self) -> None:
+        lyrics = [
+            lyric(1, "opening anchor"),
+            lyric(2, "look into the void"),
+            lyric(3, "tell me what you see"),
+            lyric(4, "no hand below"),
+            lyric(5, "closing anchor"),
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                lyrics[0], "resolved", 1.0, "opening anchor", 0, 1000,
+                match_method="primary",
+            ),
+            *[
+                vocal.LyricAlignment(line, "unresolved", 0.0, "", None, None)
+                for line in lyrics[1:4]
+            ],
+            vocal.LyricAlignment(
+                lyrics[4], "resolved", 1.0, "closing anchor", 31000, 32000,
+                match_method="primary",
+            ),
+        ]
+        backend = FakeBackend(
+            [
+                {
+                    "segments": [{
+                        "text": "look into the void",
+                        "words": [{
+                            "word": "look into the void", "start": 1.0, "end": 2.0,
+                        }],
+                    }],
+                },
+                {
+                    "segments": [{
+                        "text": "tell me what you see",
+                        "words": [{
+                            "word": "tell me what you see", "start": 3.0, "end": 4.0,
+                        }],
+                    }],
+                },
+                {
+                    "segments": [{
+                        "text": "no hand below",
+                        "words": [{
+                            "word": "no hand below", "start": 5.0, "end": 6.0,
+                        }],
+                    }],
+                },
+            ]
+        )
+        updated, attempts, recovered, invalid = (
+            vocal.targeted_retry_unresolved_lyrics(
+                alignments,
+                list(range(32 * 16000)),
+                backend,
+                language="en",
+                device="cpu",
+                condition_on_previous_text=True,
+                match_threshold=0.55,
+                neighbor_match_threshold=0.45,
+            )
+        )
+        self.assertEqual((attempts, recovered, invalid), (1, 3, 0))
+        self.assertEqual(len(backend.transcribe_calls), 3)
+        self.assertEqual(
+            [len(call["audio"]) for call in backend.transcribe_calls],
+            [12 * 16000, 12 * 16000, 10 * 16000],
+        )
+        self.assertEqual(
+            [(entry.start_ms, entry.end_ms) for entry in updated[1:4]],
+            [(2000, 3000), (14000, 15000), (26000, 27000)],
+        )
+        self.assertEqual(
+            [entry.match_method for entry in updated[1:4]],
+            ["targeted"] * 3,
+        )
+        self.assertEqual(
+            [call["initial_prompt"] for call in backend.transcribe_calls],
+            [
+                "opening anchor",
+                "opening anchor\nlook into the void",
+                "opening anchor\nlook into the void\ntell me what you see",
+            ],
+        )
+
+    def test_targeted_window_merge_deduplicates_overlap_by_timestamp(self) -> None:
+        merged = vocal._merge_targeted_window_words(
+            [
+                word(1, "same", 10.9, 11.4),
+                word(2, "same", 11.0, 11.2),
+                word(3, "same", 12.0, 12.2),
+            ]
+        )
+        self.assertEqual(len(merged), 2)
+        self.assertEqual((merged[0].start, merged[0].end), (11.0, 11.2))
+        self.assertEqual([entry.source_order for entry in merged], [0, 1])
+
+    def test_unique_supported_line_can_resynchronize_after_long_gap(self) -> None:
+        lyrics = [
+            lyric(1, "opening anchor"),
+            lyric(2, "missing vocal line"),
+            lyric(3, "unique return point"),
+            lyric(4, "following lyric confirms order"),
+        ]
+        words = [
+            word(1, "opening anchor", 1.0, 2.0),
+            word(2, "unrelated growl", 2.1, 2.8),
+            word(3, "unique return point", 30.0, 31.0),
+            word(4, "following lyric confirms order", 31.1, 32.5),
+        ]
+        aligned = vocal.align_lyrics(
+            lyrics,
+            words,
+            match_threshold=0.55,
+            neighbor_match_threshold=0.45,
+            search_seconds=60.0,
+            audio_duration_seconds=40.0,
+        )
+        self.assertEqual(
+            [entry.status for entry in aligned],
+            ["resolved", "unresolved", "resolved", "resolved"],
+        )
+        self.assertEqual(aligned[2].match_method, "resync")
+        self.assertEqual(aligned[2].start_ms, 30000)
+
     def test_unbounded_trailing_near_match_remains_unresolved_with_diagnostics(self) -> None:
         lyrics = [lyric(1, "開始"), lyric(2, "abcdefghij")]
         words = [
@@ -319,11 +702,31 @@ class VocalPromptNodeTests(unittest.TestCase):
             ),
         ]
         prompt = vocal.build_prompt_text(scenes, alignments)
-        self.assertIn("// こんにちは", prompt)
-        self.assertNotIn("// 未解決", prompt)
+        self.assertIn("// 歌詞: こんにちは", prompt)
+        self.assertNotIn("// 歌詞: 未解決", prompt)
         self.assertIn("* 発声: なし", prompt)
         self.assertIn("* リップシンク: <Subject 1> <- ソースボーカル", prompt)
         module("compiler.llmj2e").lex_japanese_markdown(prompt)
+        prompt_without_lyrics = vocal.build_prompt_text(
+            scenes,
+            alignments,
+            include_lyrics_comments=False,
+        )
+        self.assertNotIn("// 歌詞:", prompt_without_lyrics)
+        self.assertIn("// 検出状態: voiced", prompt_without_lyrics)
+        misassigned = [
+            vocal.LyricAlignment(
+                lyric(1, "誤割当"),
+                "resolved",
+                1.0,
+                "誤割当",
+                200,
+                800,
+                1,
+            )
+        ]
+        with self.assertRaisesRegex(errors.VocalPromptError, "non-voiced scene"):
+            vocal.build_prompt_text(scenes, misassigned)
 
         srt = vocal.build_srt_text(alignments)
         self.assertEqual(
@@ -331,11 +734,49 @@ class VocalPromptNodeTests(unittest.TestCase):
             "1\n00:00:01,200 --> 00:00:01,900\nこんにちは\n\n",
         )
         vocal._validate_srt_text(srt)
+        shifted = vocal.build_srt_text(
+            alignments,
+            srt_time_offset=250,
+            audio_duration_ms=2500,
+        )
+        self.assertIn(
+            "00:00:01,450 --> 00:00:02,150",
+            shifted,
+        )
+        negatively_shifted = vocal.build_srt_text(
+            alignments,
+            srt_time_offset=-200,
+            audio_duration_ms=2500,
+        )
+        self.assertIn(
+            "00:00:01,000 --> 00:00:01,700",
+            negatively_shifted,
+        )
+        with self.assertRaisesRegex(errors.VocalPromptError, "before the audio start"):
+            vocal.build_srt_text(
+                alignments,
+                srt_time_offset=-1201,
+                audio_duration_ms=2500,
+            )
+        with self.assertRaisesRegex(errors.VocalPromptError, "beyond the audio end"):
+            vocal.build_srt_text(
+                alignments,
+                srt_time_offset=601,
+                audio_duration_ms=2500,
+            )
+        with self.assertRaisesRegex(errors.VocalPromptError, "must be an integer"):
+            vocal.build_srt_text(alignments, srt_time_offset=True)
         with self.assertRaisesRegex(errors.VocalPromptError, "overlap"):
             vocal._validate_srt_text(
                 "1\n00:00:01,000 --> 00:00:02,000\na\n\n"
                 "2\n00:00:01,900 --> 00:00:03,000\nb\n\n"
             )
+
+        self.assertFalse(
+            vocal.lyrics_srt_self_test(
+                [lyric(1, "こんにちは"), lyric(2, "未解決")], srt
+            )["passed"]
+        )
 
         payload = json.loads(
             vocal.build_segments_json(
@@ -405,21 +846,96 @@ class VocalPromptNodeTests(unittest.TestCase):
                     lyrics_match_threshold=0.8,
                     lyrics_neighbor_threshold=0.45,
                     lyrics_search_seconds=60.0,
+                    srt_time_offset=100,
                 )
 
-        self.assertIn("// こんにちは", prompt)
-        self.assertIn("// 世界", prompt)
-        self.assertIn("00:00:00,200 --> 00:00:00,800", srt)
-        self.assertEqual(json.loads(segments_text)["whisper"]["device"], "cpu")
+        self.assertIn("// 歌詞: こんにちは", prompt)
+        self.assertIn("// 歌詞: 世界", prompt)
+        self.assertIn("00:00:00,300 --> 00:00:00,900", srt)
+        segments = json.loads(segments_text)
+        self.assertEqual(segments["whisper"]["device"], "cpu")
+        self.assertEqual(segments["settings"]["srt_time_offset"], 100)
+        self.assertTrue(segments["settings"]["include_lyrics_comments"])
         self.assertIn(
-            "lyrics=2 resolved (0 neighbor-recovered), 0 unresolved", status
+            "lyrics=2 resolved (0 neighbor-recovered, 0 resynchronized, "
+            "0 targeted-recovered in 0 run(s), 0 scene(s) promoted), "
+            "0 unresolved",
+            status,
         )
         self.assertEqual(backend.ensure_calls, [(model, "cpu")])
         self.assertEqual(backend.transcribe_calls[0]["language"], "ja")
         self.assertEqual(
             backend.transcribe_calls[0]["initial_prompt"], "こんにちは\n世界"
         )
+        self.assertTrue(
+            backend.transcribe_calls[0]["condition_on_previous_text"]
+        )
+        self.assertIn("self_test=passed", status)
+        self.assertIn("srt_time_offset=100ms", status)
+        self.assertIn("lyrics_comments=enabled", status)
         self.assertGreaterEqual(backend.clear_count, 1)
+
+    def test_quality_diagnostics_log_vad_similarity_and_colored_self_test(self) -> None:
+        lyrics = [lyric(1, "one"), lyric(2, "two")]
+        alignments = [
+            vocal.LyricAlignment(
+                lyrics[0], "resolved", 0.8, "one", 100, 200, match_method="primary"
+            ),
+            vocal.LyricAlignment(
+                lyrics[1], "resolved", 1.0, "two", 300, 400, match_method="primary"
+            ),
+        ]
+        srt = vocal.build_srt_text(alignments)
+        with self.assertLogs("cl_vocal2promptseg", level="INFO") as captured:
+            result = vocal.log_quality_diagnostics(
+                lyrics=lyrics,
+                srt_text=srt,
+                alignments=alignments,
+                intervals=[
+                    vocal.DetectedInterval("silent", 0, 100),
+                    vocal.DetectedInterval("voiced", 100, 900),
+                    vocal.DetectedInterval("silent", 900, 1000),
+                ],
+                sample_rate=1000,
+                total_samples=1000,
+                silence_threshold_dbfs=-45.0,
+                analysis_window_ms=20,
+                min_voiced_ms=120,
+                min_silence_ms=300,
+                voice_padding_ms=80,
+                accepted_whisper_words=2,
+                invalid_whisper_words=0,
+                outside_voiced_words=1,
+            )
+        output = "\n".join(captured.output)
+        self.assertTrue(result["passed"])
+        self.assertIn("VAD interval duration stats", output)
+        self.assertIn("all similarity min=0.8000 max=1.0000 avg=0.9000", output)
+        self.assertIn("\x1b[96m", output)
+        self.assertIn("self test passed", output)
+
+        with self.assertLogs("cl_vocal2promptseg", level="ERROR") as captured:
+            failed = vocal.log_quality_diagnostics(
+                lyrics=lyrics,
+                srt_text=vocal.build_srt_text(alignments[:1]),
+                alignments=[alignments[0], vocal.LyricAlignment(
+                    lyrics[1], "unresolved", 0.2, "", None, None
+                )],
+                intervals=[vocal.DetectedInterval("voiced", 0, 1000)],
+                sample_rate=1000,
+                total_samples=1000,
+                silence_threshold_dbfs=-45.0,
+                analysis_window_ms=20,
+                min_voiced_ms=120,
+                min_silence_ms=300,
+                voice_padding_ms=80,
+                accepted_whisper_words=1,
+                invalid_whisper_words=0,
+                outside_voiced_words=0,
+            )
+        self.assertFalse(failed["passed"])
+        self.assertIn("\x1b[91m", "\n".join(captured.output))
+        self.assertIn("self test failed", "\n".join(captured.output))
 
     def test_neighbor_threshold_must_not_exceed_primary_threshold(self) -> None:
         node = vocal.CLVocalToPromptSegments()
@@ -432,6 +948,7 @@ class VocalPromptNodeTests(unittest.TestCase):
                 whisper_model="base.pt",
                 language="ja",
                 device="auto",
+                condition_on_previous_text=True,
                 keep_whisper_loaded=False,
                 max_scene_seconds=10,
                 silence_threshold_dbfs=-45.0,
@@ -455,6 +972,7 @@ class VocalPromptNodeTests(unittest.TestCase):
                 whisper_model="base.pt",
                 language="us",
                 device="auto",
+                condition_on_previous_text=True,
                 keep_whisper_loaded=False,
                 max_scene_seconds=10,
                 silence_threshold_dbfs=-45.0,

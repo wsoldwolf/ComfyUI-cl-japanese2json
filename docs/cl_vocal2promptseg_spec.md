@@ -35,7 +35,7 @@
 - 入力は、フルミックスと同じ開始時刻を持つボーカルステムを想定する。
 - ボーカルステム内の人声らしいエネルギーの有無だけを検出する。検出結果が歌詞又は音素の境界と一致することは保証しない。
 - Lyricsの非見出し行を歌詞本文の正本とし、Whisperは対応する音声時刻を求めるためだけに使用する。
-- Lyrics全文をWhisperの`initial_prompt`へ渡さない。冒頭の認識脱落を抑えるため、セクション見出しを除いた先頭Lyricsだけを12行かつ160文字以内で渡す。Whisperのプロンプト容量を占有し続けたり、後半の無音部へ架空の歌詞を誘発したりしないよう、`condition_on_previous_text=False`を維持する。
+- Lyrics全文をWhisperの`initial_prompt`へ渡さない。冒頭の認識脱落を抑えるため、セクション見出しを除いた先頭Lyricsだけを12行かつ160文字以内で渡す。既定の`condition_on_previous_text=True`ではWhisper CLIと同じく内部復号窓間の文脈を維持し、長尺又はグロウルを含む歌唱の連続認識を優先する。無音後の反復幻覚が増える音源ではUIからFalseへ変更できる。
 - 出力Markdownは`<Subject 1>`だけを使用する。
 - 有声Sceneは`ソースボーカル`で口形を駆動し、無音Sceneは人物発声を禁止する。
 - 全Sceneで`ソース音声: 完全維持`を指定する。最終音声の正本はContex-Loopの`source_timeline`へ接続したロック済みフルミックスである。
@@ -96,9 +96,17 @@ requiredは次の順序とする。
 | `voice_padding_ms` | INT | 80 | 0～2000、step 10 | 確定有声区間の前後へ加える検出余白 |
 | `lyrics_match_threshold` | FLOAT | 0.55 | 0.0～1.0、step 0.01 | Lyrics行とWhisper候補範囲を確定する最小類似度 |
 | `lyrics_neighbor_threshold` | FLOAT | 0.45 | 0.0～`lyrics_match_threshold`、step 0.01 | 両隣が通常閾値で確定した未解決Lyricsだけに使う救済類似度 |
-| `lyrics_search_seconds` | FLOAT | 60.0 | 1.0～600.0、step 1.0 | 現在の整列カーソルから1歌詞行を探索する最大時間 |
+| `lyrics_search_seconds` | FLOAT | 60.0 | 1.0～600.0、step 1.0 | 最初の整列アンカーを取得するまでの最大探索時間。アンカー確定後はコード側で最大20秒に制限する |
 
-optional入力は持たない。
+optionalは次とする。
+
+| 名前 | 型 | 既定 | 範囲 | 用途 |
+| --- | --- | --- | --- | --- |
+| `condition_on_previous_text` | BOOLEAN | True | True/False | Whisper内部復号窓間で直前テキストを次窓の条件として使う。TrueはWhisper CLI既定と同じ |
+| `srt_time_offset` | INT | 0 | 符号付き32bit整数、step 1 | SRTの全開始・終了時刻だけへ加算するミリ秒単位の一律オフセット。正数は遅延、負数は前進 |
+| `include_lyrics_comments` | BOOLEAN | True | True/False | 解決済みLyricsを割当先の有声Sceneへ`// 歌詞: ...`コメントとして出力する |
+
+`condition_on_previous_text`、`srt_time_offset`及び`include_lyrics_comments`は既存ワークフローとの互換性のためoptionalとする。保存済みワークフローに入力が存在しない場合は、それぞれTrue、0及びTrueを使用し、ComfyUIのprompt検証で実行を拒否してはならない。
 
 `lyrics_text`は入力ソケット専用で、ノード内へ大きな編集widgetを重複表示しない。空白だけ、又は見出し以外の歌詞行が0件の場合は実行時エラーとする。
 
@@ -222,7 +230,7 @@ task = "transcribe"
 temperature = 0.0
 beam_size = 5
 word_timestamps = True
-condition_on_previous_text = False
+condition_on_previous_text = UIのcondition_on_previous_text（既定True）
 initial_prompt = section headingsを除く先頭Lyricsのうち最大12行かつ160文字
 verbose = None
 language = "ja" when language=ja, "en" when language=en, otherwise None
@@ -235,7 +243,7 @@ Whisperの英語言語コードは`en`である。`us`又は`en-US`はWhisperが
 
 入力全体を1回の`transcribe()`へ渡し、独自に各有声runを別推論へ分割しない。これによりWhisper内部の連続時間軸と絶対時刻を維持する。VAD結果は推論の切り出しには使わず、後段で無音部の幻覚候補を除外するために使う。
 
-`initial_prompt`は行の途中を避け、先頭から12歌詞行又は改行を含む160文字のどちらか先に達する範囲へ制限する。最初の1行だけで160文字を超える場合に限り、その1行を160文字で切る。これは冒頭の固有語と歌詞順をWhisperの最初の復号窓へ示すヒントであり、認識結果、SRT本文又は時刻の正本ではない。後続窓へ繰り返し注入する`carry_initial_prompt`相当の挙動は使用しない。
+`initial_prompt`は行の途中を避け、先頭から12歌詞行又は改行を含む160文字のどちらか先に達する範囲へ制限する。最初の1行だけで160文字を超える場合に限り、その1行を160文字で切る。これは冒頭の固有語と歌詞順をWhisperの最初の復号窓へ示すヒントであり、認識結果、SRT本文又は時刻の正本ではない。後続窓へ繰り返し注入する`carry_initial_prompt`相当の挙動は使用しない。`condition_on_previous_text=True`は初期ヒントの再注入ではなく、Whisperが直前の復号結果を内部窓間で引き継ぐ公式CLI既定の挙動である。これにより長尺歌唱の文脈を保ちやすくなる一方、無音後に既出文を反復する場合があるため、音声末尾を超えるwordとVAD確定有声区間外のwordを後段で除外し、既知Lyricsへ一致しない認識本文は出力しない。
 
 Whisper結果の各`segments[].words[]`から、空でない`word`、有限な`start`及び`end`を抽出する。`0 <= start < end <= audio_duration_seconds`を満たさないwordはWARNING付きで除外する。word配列が存在しない場合は、segment単位へ黙ってフォールバックせずエラーにする。
 
@@ -246,15 +254,26 @@ Whisper wordを開始時刻順へ安定整列し、同時刻では元のsegment�
 Lyrics行を先頭から1回ずつ処理し、確定したWhisper word範囲より前へ戻らない単調整列とする。
 
 1. 最初の探索カーソルは候補word 0とする。
-2. 現在のカーソル以降で、カーソル時刻から`lyrics_search_seconds`以内に開始する連続word範囲を候補とする。
+2. 最初の解決済みアンカーを得るまでは、現在のカーソル以降でカーソル時刻から`lyrics_search_seconds`以内に開始する連続word範囲を候補とする。1行以上を解決した後は、各行の探索範囲を`min(lyrics_search_seconds, 20.0)`秒へ制限する。この20秒はUI値ではなく整列の安全上限であり、後方の反復Chorusへ飛んで以降の歌詞カーソルを失うことを防ぐ。
 3. 候補文字列は範囲内wordを空白なしで連結し、8.2の照合正規化を行う。
 4. 正規化Lyricsを`a`、正規化候補を`b`として、類似度を`1 - levenshtein(a,b) / max(len(a), len(b))`で求める。
 5. `b`の文字数が`max(1, floor(len(a) * 0.4))`未満、又は`ceil(len(a) * 2.5) + 8`を超える候補は比較しない。
-6. 類似度が最大の候補を選ぶ。同値では開始が早い候補、それも同じならword数が少ない候補を選ぶ。
-7. 最大類似度が`lyrics_match_threshold`以上なら解決済みとし、カーソルを候補終端の次へ進める。
-8. 閾値未満なら未解決とし、カーソルを動かさず次のLyrics行を処理する。
+6. 有効探索範囲内で類似度が最大の候補を選ぶ。同値では開始が早い候補、それも同じならword数が少ない候補を選ぶ。アンカー確定後は手順2の20秒上限外を比較対象にしてはならない。
+7. 同じ正規化Lyricsが入力内に複数回現れる場合は、候補直後で次のLyrics行が`lyrics_match_threshold`以上に一致することを必須とする。続く最大4行の一致数と合計類似度が最大の候補を選び、同値なら早い候補を選ぶ。直後行による確認ができない反復候補は確定せず、後方の同一Chorusへカーソルを飛ばさない。
+8. 現在行の候補文字列が、現在行より直後のLyricsへ0.15以上高い類似度で一致する場合は、現在行を未解決にしてカーソルを動かさない。Whisperがグロウル等を脱落させて次行だけを返した際、その次行アンカーを現在行として消費してはならない。
+9. 上記の順序検証を満たし、最大類似度が`lyrics_match_threshold`以上なら解決済みとし、カーソルを候補終端の次へ進める。
+10. 閾値未満又は順序検証で棄却した場合は未解決とし、利用できる最大類似度候補だけを診断用に保持する。カーソルは動かさず次のLyrics行を処理する。
 
-この規則により、Whisperが1歌詞行を複数wordへ分割した場合及び複数歌詞行を一続きに認識した場合を吸収する。繰り返されるChorusはカーソルより後の出現だけに一致し、過去の同一文へ戻らない。
+この規則により、Whisperが1歌詞行を複数wordへ分割した場合及び複数歌詞行を一続きに認識した場合を吸収する。最初のアンカー取得前は`lyrics_search_seconds=60`により長いイントロを越えられる。一度アンカーを取得した後は20秒の安全上限により、現在位置の`By breath`のような閾値未満の誤認識を越えて、約50秒後の反復Chorusにある完全一致`BIT BY BIT`へ飛ぶことはない。20秒内に同じ`BIT BY BIT`が複数ある場合も、直後のLyricsを確認して前側の正しい出現を選ぶ。また`Through the ashes`が脱落し、Whisper候補として次行の`Through the years`だけが残った場合は、その候補を次行へ残して以降の連鎖的なずれを防ぐ。棄却された行はカーソルを進めず、次の固有歌詞行で現在位置への整列を継続する。
+
+20秒範囲内で複数のLyrics行を解決できず、現在カーソルから先へ進めない場合は、各未解決行について次の条件をすべて満たす場合だけ`lyrics_search_seconds`まで再同期探索する。
+
+1. 正規化歌詞が8文字以上である。
+2. 同じ正規化歌詞が入力Lyrics全体で1回だけ出現する。
+3. 広域候補の類似度が`max(lyrics_match_threshold, 0.8)`以上である。
+4. 広域候補の後方20秒以内で、続く最大3 Lyrics行のいずれかが`lyrics_match_threshold`以上に一致する。
+
+すべてを満たす候補だけを`match_method=resync`として確定する。反復Chorus、短い掛け声、単独の偶然一致又は後続順序を確認できない候補で再同期してはならない。再同期アンカーの前に残った行は未解決のままとし、後段の前後アンカー限定救済だけを適用できる。
 
 通常整列の後、未解決Lyricsの連続runについて次の限定的な救済を1回行う。
 
@@ -267,7 +286,27 @@ Lyrics行を先頭から1回ずつ処理し、確定したWhisper word範囲よ�
 
 LyricsとWhisperのどちらにも存在しない文字列を補完してはならない。Lyrics行の順序変更、Whisper時刻だけに基づく未解決行の均等配置及び前後行からの時刻内挿は禁止する。
 
-### 8.5 確定歌詞時刻
+### 8.5 未解決区間の局所Whisper再認識
+
+通常整列と前後アンカー限定救済の後も未解決Lyricsが残る場合、前後に解決済みLyricsがある連続runだけを対象として、全尺音声を再推論せず局所Whisper再認識を行う。
+
+1. PCM範囲の開始を直前の解決済みLyricsの`end_ms`、終了を直後の解決済みLyricsの`start_ms`とする。
+2. 100ms未満の範囲、先頭run、末尾run又は前後時刻を確定できないrunは再認識しない。
+3. 16kHz mono Whisper入力から当該PCM範囲だけを切り出す。元音声ファイル、ComfyUI入出力ディレクトリ又は一時ファイルへ書き出してはならない。
+4. 当該PCM範囲が12秒以下なら、そのPCMを1個の復号窓とする。12秒を超える場合は最大12秒、隣接窓間2秒重複の短い復号窓へ分割する。
+5. 各窓の`initial_prompt`には、その窓でこれから認識するLyricsを入れず、直前の解決済みLyricsと、その窓の推定位置より前にあるrun内Lyricsだけを末尾側から最大12行・160文字入れる。Whisperは`initial_prompt`を既出文脈として扱うため、現在窓のLyricsを入れて認識済みとして読み飛ばさせてはならない。窓の相対位置は直前文脈の選択だけに使い、歌詞時刻の決定には使わない。
+6. 最初の推論と同じモデル、language、device、`temperature=0.0`、`beam_size=5`、`condition_on_previous_text`及びword timestamp設定を使用する。
+7. 各窓で得たword timestampを元の局所PCM時刻へ戻す。重複部分に同じ正規化wordが350ms以内の中心時刻で複数存在する場合は、持続時間が短い方を残して1個へ統合する。
+8. 統合した局所word列は、当該PCM範囲全体を有声の照合範囲として8.4の単調整列を1回行う。これは既知の未解決範囲に限定した再認識であり、全尺VADによるword除外を再適用しない。
+9. `lyrics_match_threshold`又は前後アンカー限定の`lyrics_neighbor_threshold`を満たした実在word範囲だけを採用し、局所時刻へPCM開始時刻を加算する。Lyrics本文から時刻を推測したり、窓又はrunへ均等な時刻を割り当てたりしてはならない。
+10. 前後アンカー外へ出る時刻はクリップし、`end_ms <= start_ms`となる結果は採用しない。
+11. 回収行の`match_method`を`targeted`とする。未回収行は従来の診断情報を保持して未解決のまま返す。
+12. 局所再認識の完了後、整列方法を問わず、すべての解決済みLyricsの実word timestampと時間的に重なるSceneを確認する。全尺VADがそのSceneを無音としていた場合は有声へ昇格し、Source Vocalリップシンクを有効にする。Whisper wordのVAD採用判定は単語の中点を使う一方、歌詞区間の開始時刻が整数秒Scene境界の直前になる場合があるため、解決済みLyricsの実時刻をVADより強い発声根拠として扱う。`detected_intervals`とVAD統計自体は比較可能性のため元の判定を保持する。
+13. 局所再認識の失敗はWARNINGとして扱い、最初の推論で得た部分出力を失わない。
+
+この再認識は、長尺推論でWhisperがBridgeやグロウル等の連続区間を過大な1 segmentとして脱落させた場合に、その約数十秒だけを短いLyricsヒント付き窓で復号し直すためのものである。
+
+### 8.6 確定歌詞時刻
 
 解決済み歌詞行の生時刻は、対応word範囲の最初の`start`から最後の`end`までとする。SRT用ミリ秒は次で決める。
 
@@ -363,8 +402,8 @@ remainder = L % scene_count
 ```markdown
 # シーン 10秒 継続
 // 検出状態: voiced。ソース範囲 00:10.000-00:20.000。
-// 赤い林檎を　ひとつ頬張り
-// おまえの勘定を　笑ってやろう
+// 歌詞: 赤い林檎を　ひとつ頬張り
+// 歌詞: おまえの勘定を　笑ってやろう
 ## ショット
 // 次の行を、この区間の具体的な人物動作とカメラワークへ編集できます。
 * <Subject 1>はソースボーカルの抑揚に合わせて自然に演技する。
@@ -376,7 +415,9 @@ remainder = L % scene_count
 
 1件目の場合だけ`継続`を省略する。Scene秒数及びコメント内の範囲は実際のScene計画へ置換する。
 
-解決済み歌詞行は、その`start_ms`を含むSceneの検出状態コメント直後へ、Lyrics順で`// `と原文を連結して1回だけ出力する。ここで仕様記述上の`// <歌詞>`にある`<歌詞>`はメタ変数であり、実出力へ山括弧を追加しない。歌詞がScene境界をまたいでも、開始Sceneだけへコメントする。未解決Lyrics及びWhisperだけが認識した文はコメントへ出力しない。
+`include_lyrics_comments=True`の場合、解決済み歌詞行は、その`start_ms`を含む有声Sceneの検出状態コメント直後へ、Lyrics順で固定プレフィクス`// 歌詞: `と原文を連結して1回だけ出力する。プレフィクスにより、人又はテンプレートを読む外部ツールが通常の案内コメントと歌詞を区別できるようにする。歌詞がScene境界をまたいでも、開始Sceneだけへコメントする。未解決Lyrics及びWhisperだけが認識した文はコメントへ出力しない。Scene割当前に、解決済み歌詞区間と重なるVAD-silent Sceneを自動的に有声へ昇格する。昇格後も解決済みLyricsが無音Sceneへ割り当てられた場合は内部矛盾としてエラーとし、歌詞コメントを無音Sceneへ出力してはならない。
+
+`include_lyrics_comments=False`の場合、歌詞コメントだけを全て省略する。検出状態、Source範囲及び編集案内コメントは維持し、SRT、Whisper整列、Scene状態又は`segments_json.lyrics`を変更しない。Cスタイルコメントは後段の`cl_japanese2json`が翻訳前に除去するため、どちらの設定でも歌詞コメントを翻訳LLM又は最終JSONへ渡してはならない。
 
 `リップシンク`行はScene内に1個だけ置く。Source Vocalの実際の有声区間、無音区間、音素、持続音及びフレーズ境界を正本とし、追加の歌声又は台詞を生成する許可として扱わない。
 
@@ -424,6 +465,9 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
 - Sunoセクション見出し、未解決Lyrics行及びWhisperだけが認識した文を出力しない。
 - 解決済み行が0件の場合は空文字列を返し、WARNINGを出す。
 - SRT時刻はボーカルステム先頭を`00:00:00,000`とする絶対時刻であり、各Scene先頭からの相対時刻ではない。
+- 各解決済み行のWhisper実測`start_ms`及び`end_ms`へ`srt_time_offset`を加算してからSRT時刻へ変換する。正数は全字幕を後ろへ、負数は全字幕を前へ移動する。
+- オフセットは`srt_text`だけへ適用し、Whisper整列結果、`prompt_text`のScene、`segments_json.lyrics[].start_ms/end_ms`及びVAD区間を変更しない。
+- オフセット適用後に開始時刻が0ms未満となる、又は終了時刻が入力PCMの終端を超えるエントリが1件でもある場合は実行時エラーとして処理を停止する。クリップ、折返し、該当行の省略又は部分適用を行わない。
 
 ## 12. segments_json
 
@@ -452,9 +496,13 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
     "voice_padding_ms": 80,
     "lyrics_match_threshold": 0.55,
     "lyrics_neighbor_threshold": 0.45,
+    "condition_on_previous_text": true,
+    "srt_time_offset": 0,
+    "include_lyrics_comments": true,
     "whisper_initial_prompt_lines": 8,
     "whisper_initial_prompt_characters": 116,
-    "lyrics_search_seconds": 60.0
+    "lyrics_search_seconds": 60.0,
+    "post_anchor_search_seconds": 20.0
   },
   "detected_intervals": [
     {
@@ -511,7 +559,7 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
 }
 ```
 
-`detected_intervals`はサンプル精度の検出結果、`lyrics`は入力行ごとの整列結果、`scenes`は整数秒へ量子化・分割したMarkdown生成結果である。`whisper.model`には絶対パスではなく選択された表示IDを保存する。`match_method`は`primary`、`neighbor`又はnullとする。未解決行の`whisper_text`、時刻とSceneは従来どおり空文字列又はnullとし、最良候補が存在した場合だけ`candidate_whisper_text`と候補時刻を診断用に保存する。候補本文をコメント又はSRTへ出力してはならない。例示値は説明用であり、各配列が入力全体を表すとは限らない。
+`detected_intervals`はサンプル精度の検出結果、`lyrics`は入力行ごとの整列結果、`scenes`は整数秒へ量子化・分割したMarkdown生成結果である。`whisper.model`には絶対パスではなく選択された表示IDを保存する。`match_method`は`primary`、`neighbor`、`resync`、`targeted`又はnullとする。未解決行の`whisper_text`、時刻とSceneは従来どおり空文字列又はnullとし、最良候補が存在した場合だけ`candidate_whisper_text`と候補時刻を診断用に保存する。候補本文をコメント又はSRTへ出力してはならない。例示値は説明用であり、各配列が入力全体を表すとは限らない。
 
 ## 13. statusとログ
 
@@ -521,6 +569,9 @@ statusは1行の英数字中心の文字列とし、少なくとも次を含む�
 - 確定有声区間数
 - Whisperモデル、推論device及び検出言語
 - Lyrics総行数、解決数及び未解決数
+- Lyrics入力本文とSRT本文の完全一致セルフテスト結果
+- SRTへ適用したミリ秒単位の一律オフセット
+- テンプレートへの歌詞コメント出力が有効か無効か
 - 生成Scene数と有声・無音Scene数
 - 計画秒数
 - 必要な末尾パディング秒数
@@ -528,7 +579,7 @@ statusは1行の英数字中心の文字列とし、少なくとも次を含む�
 例:
 
 ```text
-analyzed 12470400 samples at 48000 Hz (259.800000s); whisper=large-v3.pt on cuda language=ja; lyrics=42 resolved (2 neighbor-recovered), 3 unresolved; detected 14 voiced interval(s); generated 28 scene(s): 22 voiced, 6 silent; timeline=260s; end padding required=0.200000s
+analyzed 12470400 samples at 48000 Hz (259.800000s); whisper=large-v3.pt on cuda language=ja; lyrics=42 resolved (2 neighbor-recovered, 1 resynchronized, 4 targeted-recovered in 1 run(s)), 3 unresolved; self_test=failed; srt_time_offset=0ms; lyrics_comments=enabled; detected 14 voiced interval(s); generated 28 scene(s): 22 voiced, 6 silent; timeline=260s; end padding required=0.200000s
 ```
 
 logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする。
@@ -538,6 +589,15 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 ```
 
 通常ログへPCM、プロンプト全文又は区間JSON全文を出力しない。ファイルへの自動保存及びComfyUI `input`/`output`への書き込みを行わない。
+
+処理完了時には、分離アルゴリズム及びステム品質を比較できるよう次をコンソールへ出力する。
+
+- VAD設定、音声総尺、有声・無音区間数、各総秒数及び有声率
+- 有声区間長と無音区間長それぞれの最小・最大・平均
+- 採用、無効及びVAD区間外として除外したWhisper word数
+- 全Lyricsと解決済みLyricsそれぞれの類似度の最小・最大・平均、primary・neighbor・resync・targeted・未解決数及び解決率
+- 入力Lyrics本文列と出力SRT本文列が同じ件数、順序及び文字列で完全一致した場合、ANSIシアン色で`self test passed`をINFO出力する。
+- 1行でも省略、追加、順序差又は文字列差がある場合、ANSI赤色で`self test failed`をERROR出力する。ただし診断を目的とする非致命エラーであり、生成済み4出力は返す。歌詞本文自体は通常ログへ出さず、総数、一致数、出力数及び最初の不一致番号だけを示す。
 
 ## 14. エラーと警告
 
@@ -584,7 +644,7 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 - Whisperを`temperature=0.0`で実行し、同じPCM、Lyrics、モデル、device及びUI値からは同じ整列規則と出力形式を使用する。異なるハードウェア又はWhisper版による認識差まで同一とは保証しない。
 - テンソルの元dtype及びデバイスにかかわらず、RMS計算は少なくともfloat32相当の精度で行う。
 - UIを長時間無応答にしないよう、VAD、Whisper、Lyrics整列及び出力生成の各段階でComfyUI進捗を更新し、中断要求を定期的に確認できる構造にする。
-- 通常ログへWhisper開始を記録し、推論中は10秒ごとに経過秒数をINFOで記録する。公開APIから安全に取得できない内部30秒窓の進捗率を推測して表示してはならない。完了時はLyrics解決数を含むstatusをINFOで記録する。歌詞本文と生書き起こしは通常ログへ出さない。
+- 通常ログへWhisper開始を記録し、推論中は10秒ごとに経過秒数をINFOで記録する。公開APIから安全に取得できない内部30秒窓の進捗率を推測して表示してはならない。完了時はLyrics解決数、VAD及び類似度統計、色付きセルフテスト並びにstatusを記録する。歌詞本文と生書き起こしは通常ログへ出さない。
 
 ## 16. ワークフロー接続
 
@@ -658,6 +718,7 @@ CLVocalToPromptSegments.srt_text ─────> Preview/Save Text or subtitle 
 - 1 Sceneは1 Shotだけを持つ。
 - Scene durationは1～`max_scene_seconds`の整数である。
 - 検出済みの有声PCMを`発声: なし`のSceneへ割り当てない。
+- 解決済みLyricsの実word timestampと重なるSceneを、整列方法にかかわらず`voiced`として扱う。
 - 無音Sceneではリップシンクと人物由来音声を無効にする。
 - 有声SceneではSource Vocalだけを口形駆動に使用し、別の声を生成しない。
 - ロック済みSource Timelineを全Sceneで完全維持する。

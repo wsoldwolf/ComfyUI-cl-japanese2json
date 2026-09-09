@@ -92,6 +92,7 @@ class WhisperBackendTests(unittest.TestCase):
                 language="ja",
                 device="cpu",
                 initial_prompt="冒頭歌詞",
+                condition_on_previous_text=True,
             )
 
             self.assertEqual(result, {"segments": []})
@@ -104,7 +105,7 @@ class WhisperBackendTests(unittest.TestCase):
                         "temperature": 0.0,
                         "beam_size": 5,
                         "word_timestamps": True,
-                        "condition_on_previous_text": False,
+                        "condition_on_previous_text": True,
                         "initial_prompt": "冒頭歌詞",
                         "verbose": None,
                         "language": "ja",
@@ -133,7 +134,11 @@ class WhisperBackendTests(unittest.TestCase):
         backend = backend_module.WhisperBackend()
         with self.assertRaisesRegex(errors.WhisperLoadError, "not loaded"):
             backend.transcribe(
-                "pcm", language=None, device="cpu", initial_prompt=None
+                "pcm",
+                language=None,
+                device="cpu",
+                initial_prompt=None,
+                condition_on_previous_text=True,
             )
 
         class BrokenModel:
@@ -143,13 +148,21 @@ class WhisperBackendTests(unittest.TestCase):
         backend.model = BrokenModel()
         with self.assertRaisesRegex(errors.VocalPromptError, "transcription failed"):
             backend.transcribe(
-                "pcm", language=None, device="cpu", initial_prompt=None
+                "pcm",
+                language=None,
+                device="cpu",
+                initial_prompt=None,
+                condition_on_previous_text=True,
             )
 
         backend.model = FakeModel(result=[])
         with self.assertRaisesRegex(errors.VocalPromptError, "non-object"):
             backend.transcribe(
-                "pcm", language=None, device="cpu", initial_prompt=None
+                "pcm",
+                language=None,
+                device="cpu",
+                initial_prompt=None,
+                condition_on_previous_text=True,
             )
 
 

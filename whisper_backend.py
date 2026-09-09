@@ -77,6 +77,7 @@ class WhisperBackend:
         language: str | None,
         device: str,
         initial_prompt: str | None,
+        condition_on_previous_text: bool,
     ) -> dict[str, Any]:
         with self._lock:
             if self.model is None:
@@ -88,7 +89,7 @@ class WhisperBackend:
                     temperature=0.0,
                     beam_size=5,
                     word_timestamps=True,
-                    condition_on_previous_text=False,
+                    condition_on_previous_text=condition_on_previous_text,
                     initial_prompt=initial_prompt,
                     verbose=None,
                     language=language,

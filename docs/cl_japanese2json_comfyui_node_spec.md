@@ -847,7 +847,7 @@ set "FORCE_CMAKE=1"
 - `CLLoadTextFile`の登録、`WEB_DIRECTORY`、1出力及び非表示transport入力
 - テキストファイルのUTF-8/BOM復号、LF正規化、空ファイル、Base64/NUL/容量エラー及び内容依存キャッシュ指紋
 - フロントエンドがFile APIとD&Dを使用し、upload API又は本文プレビューを持たないこと
-- ローカルWhisperモデル探索、PCM有声検出、先頭Lyricsを制限したWhisper初期ヒント、通常閾値と前後アンカー限定救済によるSuno Lyrics単調整列、SRT及び現行Markdownテンプレート生成（詳細は`docs/cl_vocal2promptseg_spec.md`）
+- ローカルWhisperモデル探索、PCM有声検出、先頭Lyricsを制限したWhisper初期ヒント、Whisper CLI既定の前文引き継ぎ、初回60秒・アンカー後20秒の探索上限と前後アンカー限定救済によるSuno Lyrics単調整列、VAD・類似度統計、入力Lyrics対SRTセルフテスト、範囲外を拒否するミリ秒単位SRT一律オフセット、有声Sceneへの任意歌詞コメント、SRT及び現行Markdownテンプレート生成（詳細は`docs/cl_vocal2promptseg_spec.md`）
 - UI秒数、H3 Planフレーム数及び追加マージンからのサンプル数計算
 - `match_audio`の継続時間を基準とする同一及び異種サンプルレートでのサンプル数計算
 - `end`、`start`、`both`のPCM値0.0配置

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import importlib
 import json
@@ -32,6 +32,20 @@ _VAD_CHUNK_WINDOWS = 2_048
 _WHISPER_LANGUAGE_OPTIONS = ("ja", "en", "auto")
 _WHISPER_INITIAL_PROMPT_MAX_LINES = 12
 _WHISPER_INITIAL_PROMPT_MAX_CHARACTERS = 160
+_POST_ANCHOR_SEARCH_SECONDS = 20.0
+_RESYNC_MINIMUM_SCORE = 0.8
+_RESYNC_LOOKAHEAD_LINES = 3
+_REPEATED_LINE_LOOKAHEAD_LINES = 4
+_FOLLOWING_LINE_COLLISION_MARGIN = 0.15
+_TARGETED_RETRY_MINIMUM_SECONDS = 0.1
+_TARGETED_RETRY_WINDOW_SECONDS = 12.0
+_TARGETED_RETRY_WINDOW_OVERLAP_SECONDS = 2.0
+_TARGETED_RETRY_DUPLICATE_CENTER_SECONDS = 0.35
+_SRT_TIME_OFFSET_MIN = -(2**31)
+_SRT_TIME_OFFSET_MAX = 2**31 - 1
+_ANSI_CYAN = "\x1b[96m"
+_ANSI_RED = "\x1b[91m"
+_ANSI_RESET = "\x1b[0m"
 
 try:  # Available only when loaded by ComfyUI.
     from comfy.utils import ProgressBar as _ComfyProgressBar  # type: ignore
@@ -573,21 +587,21 @@ def match_similarity(left: str, right: str) -> float:
     return 1.0 - levenshtein_distance(left, right) / denominator
 
 
-def _best_word_candidate(
+def _word_candidates(
     line: LyricLine,
     words: list[WhisperWord],
     *,
     start_index: int,
     end_index: int,
     search_seconds: float,
-) -> _WordCandidate | None:
+) -> list[_WordCandidate]:
     if start_index >= end_index or start_index >= len(words):
-        return None
+        return []
     end_index = min(end_index, len(words))
     search_origin = words[start_index].start
     minimum_length = max(1, math.floor(len(line.normalized) * 0.4))
     maximum_length = math.ceil(len(line.normalized) * 2.5) + 8
-    best: _WordCandidate | None = None
+    candidates: list[_WordCandidate] = []
     for candidate_start in range(start_index, end_index):
         first = words[candidate_start]
         if first.start - search_origin > search_seconds:
@@ -603,24 +617,134 @@ def _best_word_candidate(
                 break
             if candidate_length < minimum_length:
                 continue
-            proposal = _WordCandidate(
-                match_similarity(line.normalized, candidate_text),
-                candidate_start,
-                candidate_end,
+            candidates.append(
+                _WordCandidate(
+                    match_similarity(line.normalized, candidate_text),
+                    candidate_start,
+                    candidate_end,
+                )
             )
-            if best is None or proposal.score > best.score + 1e-12:
-                best = proposal
-                continue
-            if abs(proposal.score - best.score) > 1e-12:
-                continue
-            best_word_count = best.end_index - best.start_index + 1
-            proposal_word_count = proposal.end_index - proposal.start_index + 1
-            if proposal.start_index < best.start_index or (
-                proposal.start_index == best.start_index
-                and proposal_word_count < best_word_count
-            ):
-                best = proposal
+    return candidates
+
+
+def _best_word_candidate(
+    line: LyricLine,
+    words: list[WhisperWord],
+    *,
+    start_index: int,
+    end_index: int,
+    search_seconds: float,
+) -> _WordCandidate | None:
+    best: _WordCandidate | None = None
+    for proposal in _word_candidates(
+        line,
+        words,
+        start_index=start_index,
+        end_index=end_index,
+        search_seconds=search_seconds,
+    ):
+        if best is None or proposal.score > best.score + 1e-12:
+            best = proposal
+            continue
+        if abs(proposal.score - best.score) > 1e-12:
+            continue
+        best_word_count = best.end_index - best.start_index + 1
+        proposal_word_count = proposal.end_index - proposal.start_index + 1
+        if proposal.start_index < best.start_index or (
+            proposal.start_index == best.start_index
+            and proposal_word_count < best_word_count
+        ):
+            best = proposal
     return best
+
+
+def _best_supported_repeated_candidate(
+    lyrics: list[LyricLine],
+    line_index: int,
+    words: list[WhisperWord],
+    *,
+    start_index: int,
+    end_index: int,
+    match_threshold: float,
+    search_seconds: float,
+) -> _WordCandidate | None:
+    """Disambiguate repeated refrains by testing the Lyrics that follow them."""
+    following = lyrics[
+        line_index + 1 : line_index + 1 + _REPEATED_LINE_LOOKAHEAD_LINES
+    ]
+    if not following:
+        return _best_word_candidate(
+            lyrics[line_index],
+            words,
+            start_index=start_index,
+            end_index=end_index,
+            search_seconds=search_seconds,
+        )
+
+    best: _WordCandidate | None = None
+    best_rank: tuple[int, float, int, float] | None = None
+    for candidate in _word_candidates(
+        lyrics[line_index],
+        words,
+        start_index=start_index,
+        end_index=end_index,
+        search_seconds=search_seconds,
+    ):
+        if candidate.score < match_threshold:
+            continue
+        support_cursor = candidate.end_index + 1
+        support_count = 0
+        support_score = 0.0
+        for following_offset, next_line in enumerate(following):
+            support = _best_word_candidate(
+                next_line,
+                words,
+                start_index=support_cursor,
+                end_index=end_index,
+                search_seconds=search_seconds,
+            )
+            if support is None or support.score < match_threshold:
+                if following_offset == 0:
+                    break
+                continue
+            support_count += 1
+            support_score += support.score
+            support_cursor = support.end_index + 1
+        if support_count == 0:
+            continue
+        # Prefer the candidate which preserves the greatest number of following
+        # Lyrics lines. For an equal sequence fit, the earlier refrain is the
+        # safe choice; otherwise a later identical chorus can swallow a block.
+        rank = (
+            support_count,
+            support_score,
+            -candidate.start_index,
+            candidate.score,
+        )
+        if best_rank is None or rank > best_rank:
+            best = candidate
+            best_rank = rank
+    return best
+
+
+def _candidate_better_fits_following_line(
+    lyrics: list[LyricLine],
+    line_index: int,
+    candidate: _WordCandidate,
+    words: list[WhisperWord],
+) -> bool:
+    if line_index + 1 >= len(lyrics):
+        return False
+    current = lyrics[line_index]
+    following = lyrics[line_index + 1]
+    if current.normalized == following.normalized:
+        return False
+    candidate_normalized = "".join(
+        word.normalized
+        for word in words[candidate.start_index : candidate.end_index + 1]
+    )
+    following_score = match_similarity(following.normalized, candidate_normalized)
+    return following_score >= candidate.score + _FOLLOWING_LINE_COLLISION_MARGIN
 
 
 def _candidate_text(candidate: _WordCandidate, words: list[WhisperWord]) -> str:
@@ -679,6 +803,33 @@ def _resolved_alignment(
     )
 
 
+def _has_resync_support(
+    lyrics: list[LyricLine],
+    line_index: int,
+    candidate: _WordCandidate,
+    words: list[WhisperWord],
+    *,
+    match_threshold: float,
+    search_seconds: float,
+) -> bool:
+    support_start = candidate.end_index + 1
+    if support_start >= len(words):
+        return False
+    for next_line in lyrics[
+        line_index + 1 : line_index + 1 + _RESYNC_LOOKAHEAD_LINES
+    ]:
+        support = _best_word_candidate(
+            next_line,
+            words,
+            start_index=support_start,
+            end_index=len(words),
+            search_seconds=min(search_seconds, _POST_ANCHOR_SEARCH_SECONDS),
+        )
+        if support is not None and support.score >= match_threshold:
+            return True
+    return False
+
+
 def align_lyrics(
     lyrics: list[LyricLine],
     words: list[WhisperWord],
@@ -693,15 +844,94 @@ def align_lyrics(
     audio_end_ms = math.ceil(audio_duration_seconds * 1000)
     alignments: list[LyricAlignment] = []
     resolved_spans: list[tuple[int, int] | None] = []
-
+    has_primary_anchor = False
+    normalized_occurrences: dict[str, int] = {}
     for line in lyrics:
+        normalized_occurrences[line.normalized] = (
+            normalized_occurrences.get(line.normalized, 0) + 1
+        )
+    resynchronized = 0
+
+    for line_index, line in enumerate(lyrics):
+        effective_search_seconds = (
+            search_seconds
+            if not has_primary_anchor
+            else min(search_seconds, _POST_ANCHOR_SEARCH_SECONDS)
+        )
         best = _best_word_candidate(
             line,
             words,
             start_index=cursor,
             end_index=len(words),
-            search_seconds=search_seconds,
+            search_seconds=effective_search_seconds,
         )
+        if normalized_occurrences[line.normalized] > 1:
+            supported_repeated = _best_supported_repeated_candidate(
+                lyrics,
+                line_index,
+                words,
+                start_index=cursor,
+                end_index=len(words),
+                match_threshold=match_threshold,
+                search_seconds=effective_search_seconds,
+            )
+            if supported_repeated is not None:
+                best = supported_repeated
+            elif best is not None and best.score >= match_threshold:
+                # Keep the candidate in diagnostics, but do not advance over an
+                # ambiguous repeated refrain without any following-line support.
+                alignments.append(
+                    _unresolved_alignment(
+                        line, best, words, audio_end_ms=audio_end_ms
+                    )
+                )
+                resolved_spans.append(None)
+                continue
+        if (
+            best is not None
+            and best.score >= match_threshold
+            and _candidate_better_fits_following_line(
+                lyrics, line_index, best, words
+            )
+        ):
+            # Whisper may omit one harshly sung line and return the following
+            # lyric instead. Do not consume that stronger following-line anchor,
+            # otherwise every later line in the verse can shift forward.
+            alignments.append(
+                _unresolved_alignment(line, best, words, audio_end_ms=audio_end_ms)
+            )
+            resolved_spans.append(None)
+            continue
+        match_method = "primary"
+        if (
+            has_primary_anchor
+            and effective_search_seconds < search_seconds
+            and (best is None or best.score < match_threshold)
+            and normalized_occurrences[line.normalized] == 1
+            and len(line.normalized) >= 8
+        ):
+            broad_candidate = _best_word_candidate(
+                line,
+                words,
+                start_index=cursor,
+                end_index=len(words),
+                search_seconds=search_seconds,
+            )
+            resync_threshold = max(match_threshold, _RESYNC_MINIMUM_SCORE)
+            if (
+                broad_candidate is not None
+                and broad_candidate.score >= resync_threshold
+                and _has_resync_support(
+                    lyrics,
+                    line_index,
+                    broad_candidate,
+                    words,
+                    match_threshold=match_threshold,
+                    search_seconds=search_seconds,
+                )
+            ):
+                best = broad_candidate
+                match_method = "resync"
         if best is None or best.score < match_threshold:
             alignments.append(
                 _unresolved_alignment(line, best, words, audio_end_ms=audio_end_ms)
@@ -714,7 +944,7 @@ def align_lyrics(
             words,
             previous_end_ms=previous_end_ms,
             maximum_end_ms=audio_end_ms,
-            match_method="primary",
+            match_method=match_method,
         )
         if resolved is None:
             alignments.append(
@@ -726,6 +956,9 @@ def align_lyrics(
         resolved_spans.append((best.start_index, best.end_index))
         cursor = best.end_index + 1
         previous_end_ms = resolved.end_ms or previous_end_ms
+        has_primary_anchor = True
+        if match_method == "resync":
+            resynchronized += 1
 
     recovered = 0
     previous_anchor: int | None = None
@@ -782,7 +1015,283 @@ def align_lyrics(
             recovered,
             neighbor_match_threshold,
         )
+    if resynchronized:
+        LOGGER.info(
+            "[cl_vocal2promptseg] Re-synchronized %d time(s) using a unique "
+            "high-confidence Lyrics line with following-line support",
+            resynchronized,
+        )
     return alignments
+
+
+def _unresolved_runs(
+    alignments: list[LyricAlignment],
+) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for index in range(len(alignments) + 1):
+        unresolved = (
+            index < len(alignments) and alignments[index].status != "resolved"
+        )
+        if unresolved and run_start is None:
+            run_start = index
+        elif not unresolved and run_start is not None:
+            runs.append((run_start, index))
+            run_start = None
+    return runs
+
+
+def _targeted_retry_windows(total_seconds: float) -> list[tuple[float, float]]:
+    """Return short overlapping decode windows covering one bounded gap."""
+
+    if total_seconds <= _TARGETED_RETRY_WINDOW_SECONDS:
+        return [(0.0, total_seconds)]
+    windows: list[tuple[float, float]] = []
+    start = 0.0
+    while start < total_seconds:
+        end = min(start + _TARGETED_RETRY_WINDOW_SECONDS, total_seconds)
+        windows.append((start, end))
+        if end >= total_seconds:
+            break
+        start = end - _TARGETED_RETRY_WINDOW_OVERLAP_SECONDS
+    return windows
+
+
+def _targeted_window_prompt(
+    lyrics: list[LyricLine],
+    *,
+    preceding_line: LyricLine,
+    window_start_seconds: float,
+    total_seconds: float,
+) -> str:
+    """Build preceding context without placing current Lyrics in the prompt."""
+
+    fraction = min(1.0, max(0.0, window_start_seconds / total_seconds))
+    approximate_index = min(len(lyrics), math.floor(fraction * len(lyrics)))
+    context = [preceding_line, *lyrics[:approximate_index]]
+    selected: list[str] = []
+    for line in reversed(context):
+        candidate = "\n".join([line.text, *selected])
+        if (
+            len(selected) < _WHISPER_INITIAL_PROMPT_MAX_LINES
+            and len(candidate) <= _WHISPER_INITIAL_PROMPT_MAX_CHARACTERS
+        ):
+            selected.insert(0, line.text)
+            continue
+        break
+    if selected:
+        return "\n".join(selected)
+    return context[-1].text[-_WHISPER_INITIAL_PROMPT_MAX_CHARACTERS:]
+
+
+def _merge_targeted_window_words(words: list[WhisperWord]) -> list[WhisperWord]:
+    """Deduplicate word timestamps produced by overlapping decode windows."""
+
+    ordered = sorted(words, key=lambda word: (word.start, word.source_order))
+    merged: list[WhisperWord] = []
+    for candidate in ordered:
+        candidate_center = (candidate.start + candidate.end) / 2.0
+        duplicate_index: int | None = None
+        for index in range(len(merged) - 1, -1, -1):
+            existing = merged[index]
+            existing_center = (existing.start + existing.end) / 2.0
+            if (
+                candidate_center - existing_center
+                > _TARGETED_RETRY_DUPLICATE_CENTER_SECONDS
+            ):
+                break
+            if (
+                candidate.normalized == existing.normalized
+                and abs(candidate_center - existing_center)
+                <= _TARGETED_RETRY_DUPLICATE_CENTER_SECONDS
+            ):
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            merged.append(candidate)
+            continue
+        existing = merged[duplicate_index]
+        # A word decoded away from a window edge normally has the tighter,
+        # more useful timestamp. Retain the shorter duplicate interval.
+        if candidate.end - candidate.start < existing.end - existing.start:
+            merged[duplicate_index] = candidate
+    merged.sort(key=lambda word: (word.start, word.source_order))
+    return [replace(word, source_order=index) for index, word in enumerate(merged)]
+
+
+def targeted_retry_unresolved_lyrics(
+    alignments: list[LyricAlignment],
+    whisper_audio: Any,
+    backend: WhisperBackend,
+    *,
+    language: str | None,
+    device: str,
+    condition_on_previous_text: bool,
+    match_threshold: float,
+    neighbor_match_threshold: float,
+) -> tuple[list[LyricAlignment], int, int, int]:
+    """Retry only unresolved Lyrics runs bounded by reliable time anchors."""
+
+    updated = list(alignments)
+    attempted_runs = 0
+    recovered_lines = 0
+    invalid_words = 0
+    for run_start, run_end in _unresolved_runs(alignments):
+        # An unbounded run has no safe PCM window. Keep it unresolved rather
+        # than re-running the full recording or inventing a time range.
+        if run_start == 0 or run_end >= len(alignments):
+            continue
+        previous = updated[run_start - 1]
+        following = updated[run_end]
+        if previous.end_ms is None or following.start_ms is None:
+            continue
+        slice_start_ms = previous.end_ms
+        slice_end_ms = following.start_ms
+        slice_seconds = (slice_end_ms - slice_start_ms) / 1000.0
+        if slice_seconds < _TARGETED_RETRY_MINIMUM_SECONDS:
+            continue
+        first_sample = max(
+            0, math.floor(slice_start_ms * _WHISPER_SAMPLE_RATE / 1000)
+        )
+        final_sample = min(
+            len(whisper_audio),
+            math.ceil(slice_end_ms * _WHISPER_SAMPLE_RATE / 1000),
+        )
+        if final_sample <= first_sample:
+            continue
+        run_lyrics = [entry.line for entry in updated[run_start:run_end]]
+        windows = _targeted_retry_windows(slice_seconds)
+        attempted_runs += 1
+        LOGGER.info(
+            "[cl_vocal2promptseg] Targeted Whisper retry %d: Lyrics %d-%d, "
+            "audio=%.3f-%.3fs (%.3fs), windows=%d (max %.1fs, overlap %.1fs)",
+            attempted_runs,
+            run_lyrics[0].lyrics_index,
+            run_lyrics[-1].lyrics_index,
+            slice_start_ms / 1000.0,
+            slice_end_ms / 1000.0,
+            slice_seconds,
+            len(windows),
+            _TARGETED_RETRY_WINDOW_SECONDS,
+            _TARGETED_RETRY_WINDOW_OVERLAP_SECONDS,
+        )
+        local_words: list[WhisperWord] = []
+        local_samples = final_sample - first_sample
+        try:
+            for window_index, (window_start, window_end) in enumerate(
+                windows, start=1
+            ):
+                window_first = first_sample + math.floor(
+                    window_start * _WHISPER_SAMPLE_RATE
+                )
+                window_final = min(
+                    final_sample,
+                    first_sample
+                    + math.ceil(window_end * _WHISPER_SAMPLE_RATE),
+                )
+                window_samples = window_final - window_first
+                if window_samples <= 0:  # pragma: no cover - defensive rounding
+                    continue
+                prompt = _targeted_window_prompt(
+                    run_lyrics,
+                    preceding_line=previous.line,
+                    window_start_seconds=window_start,
+                    total_seconds=slice_seconds,
+                )
+                LOGGER.info(
+                    "[cl_vocal2promptseg] Targeted Whisper window %d/%d: "
+                    "relative=%.3f-%.3fs, prompt=%d line(s)/%d char(s)",
+                    window_index,
+                    len(windows),
+                    window_start,
+                    window_end,
+                    prompt.count("\n") + 1 if prompt else 0,
+                    len(prompt),
+                )
+                with _InferenceHeartbeat(
+                    f"targeted Lyrics {run_lyrics[0].lyrics_index}-"
+                    f"{run_lyrics[-1].lyrics_index} window "
+                    f"{window_index}/{len(windows)}"
+                ):
+                    result = backend.transcribe(
+                        whisper_audio[window_first:window_final],
+                        language=language,
+                        device=device,
+                        initial_prompt=prompt or None,
+                        condition_on_previous_text=condition_on_previous_text,
+                    )
+                window_words, local_invalid, _ = extract_whisper_words(
+                    result,
+                    audio_duration_seconds=window_samples
+                    / _WHISPER_SAMPLE_RATE,
+                    intervals=[DetectedInterval("voiced", 0, window_samples)],
+                    sample_rate=_WHISPER_SAMPLE_RATE,
+                )
+                invalid_words += local_invalid
+                window_offset = (
+                    window_first - first_sample
+                ) / _WHISPER_SAMPLE_RATE
+                local_words.extend(
+                    replace(
+                        word,
+                        start=word.start + window_offset,
+                        end=word.end + window_offset,
+                    )
+                    for word in window_words
+                )
+            local_words = _merge_targeted_window_words(local_words)
+            if not local_words:
+                raise VocalPromptError(
+                    "targeted Whisper windows returned no usable word timestamps"
+                )
+            local_alignments = align_lyrics(
+                run_lyrics,
+                local_words,
+                match_threshold=match_threshold,
+                neighbor_match_threshold=neighbor_match_threshold,
+                search_seconds=max(slice_seconds, 1.0),
+                audio_duration_seconds=local_samples / _WHISPER_SAMPLE_RATE,
+            )
+        except VocalPromptError as exc:
+            LOGGER.warning(
+                "[cl_vocal2promptseg] Targeted Whisper retry for Lyrics %d-%d "
+                "did not produce usable word timestamps: %s",
+                run_lyrics[0].lyrics_index,
+                run_lyrics[-1].lyrics_index,
+                exc,
+            )
+            continue
+
+        offset_ms = math.floor(first_sample * 1000 / _WHISPER_SAMPLE_RATE)
+        run_recovered = 0
+        for local_index, local in enumerate(local_alignments):
+            if (
+                local.status != "resolved"
+                or local.start_ms is None
+                or local.end_ms is None
+            ):
+                continue
+            absolute_start = max(slice_start_ms, offset_ms + local.start_ms)
+            absolute_end = min(slice_end_ms, offset_ms + local.end_ms)
+            if absolute_end <= absolute_start:
+                continue
+            updated[run_start + local_index] = replace(
+                local,
+                start_ms=absolute_start,
+                end_ms=absolute_end,
+                match_method="targeted",
+            )
+            run_recovered += 1
+        recovered_lines += run_recovered
+        LOGGER.info(
+            "[cl_vocal2promptseg] Targeted Whisper retry recovered %d/%d "
+            "Lyrics line(s) in range %d-%d",
+            run_recovered,
+            len(run_lyrics),
+            run_lyrics[0].lyrics_index,
+            run_lyrics[-1].lyrics_index,
+        )
+    return updated, attempted_runs, recovered_lines, invalid_words
 
 
 def build_scenes(
@@ -897,6 +1406,42 @@ def assign_lyrics_to_scenes(
     return assigned
 
 
+def promote_resolved_lyrics_scenes(
+    scenes: list[dict[str, Any]], alignments: list[LyricAlignment]
+) -> int:
+    """Promote VAD-silent scenes touched by verified lyric timing.
+
+    Whisper word acceptance uses word midpoints, while a lyric interval can begin
+    just before the integer-second VAD scene that contains those midpoints. Treat
+    resolved Lyrics timing as stronger vocal evidence than the energy VAD.
+    """
+    promoted: set[int] = set()
+    for alignment in alignments:
+        if (
+            alignment.status != "resolved"
+            or alignment.start_ms is None
+            or alignment.end_ms is None
+        ):
+            continue
+        for scene in scenes:
+            scene_start_ms = int(scene["start_seconds"]) * 1000
+            scene_end_ms = int(scene["end_seconds"]) * 1000
+            if (
+                scene_end_ms > alignment.start_ms
+                and scene_start_ms < alignment.end_ms
+                and scene["state"] != "voiced"
+            ):
+                scene["state"] = "voiced"
+                promoted.add(int(scene["index"]))
+    if promoted:
+        LOGGER.info(
+            "[cl_vocal2promptseg] Promoted %d VAD-silent scene(s) to voiced "
+            "because resolved Lyrics timing overlaps them",
+            len(promoted),
+        )
+    return len(promoted)
+
+
 def _source_timestamp(milliseconds: int) -> str:
     minutes, remainder = divmod(milliseconds, 60_000)
     seconds, millis = divmod(remainder, 1_000)
@@ -911,11 +1456,25 @@ def _srt_timestamp(milliseconds: int) -> str:
 
 
 def build_prompt_text(
-    scenes: list[dict[str, Any]], alignments: list[LyricAlignment]
+    scenes: list[dict[str, Any]],
+    alignments: list[LyricAlignment],
+    *,
+    include_lyrics_comments: bool = True,
 ) -> str:
+    _validate_bool(include_lyrics_comments, "include_lyrics_comments")
     lyrics_by_scene: dict[int, list[str]] = {}
+    scene_states = {
+        int(scene["index"]): str(scene["state"]) for scene in scenes
+    }
     for alignment in alignments:
-        if alignment.status == "resolved" and alignment.scene_index is not None:
+        if alignment.status != "resolved" or alignment.scene_index is None:
+            continue
+        if scene_states.get(alignment.scene_index) != "voiced":
+            raise VocalPromptError(
+                f"Resolved Lyrics line {alignment.line.lyrics_index} is "
+                "assigned to a non-voiced scene"
+            )
+        if include_lyrics_comments:
             lyrics_by_scene.setdefault(alignment.scene_index, []).append(
                 alignment.line.text
             )
@@ -941,7 +1500,7 @@ def build_prompt_text(
             f"// 検出状態: {scene['state']}。ソース範囲 {source_start}-{source_end}。"
         )
         for lyric in lyrics_by_scene.get(scene["index"], []):
-            lines.append(f"// {lyric}")
+            lines.append(f"// 歌詞: {lyric}")
         lines.extend(
             [
                 "## ショット",
@@ -970,7 +1529,27 @@ def build_prompt_text(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_srt_text(alignments: list[LyricAlignment]) -> str:
+def build_srt_text(
+    alignments: list[LyricAlignment],
+    *,
+    srt_time_offset: int = 0,
+    audio_duration_ms: int | None = None,
+) -> str:
+    srt_time_offset = _validate_int(
+        srt_time_offset,
+        "srt_time_offset",
+        _SRT_TIME_OFFSET_MIN,
+        _SRT_TIME_OFFSET_MAX,
+    )
+    if (
+        audio_duration_ms is not None
+        and (
+            not isinstance(audio_duration_ms, int)
+            or isinstance(audio_duration_ms, bool)
+            or audio_duration_ms < 0
+        )
+    ):
+        raise VocalPromptError("audio_duration_ms must be a non-negative integer")
     blocks: list[str] = []
     for alignment in alignments:
         if (
@@ -979,12 +1558,25 @@ def build_srt_text(alignments: list[LyricAlignment]) -> str:
             or alignment.end_ms is None
         ):
             continue
+        start_ms = alignment.start_ms + srt_time_offset
+        end_ms = alignment.end_ms + srt_time_offset
+        entry_number = len(blocks) + 1
+        if start_ms < 0:
+            raise VocalPromptError(
+                f"srt_time_offset moves SRT entry {entry_number} before "
+                f"the audio start ({start_ms} ms)"
+            )
+        if audio_duration_ms is not None and end_ms > audio_duration_ms:
+            raise VocalPromptError(
+                f"srt_time_offset moves SRT entry {entry_number} beyond "
+                f"the audio end ({end_ms} ms > {audio_duration_ms} ms)"
+            )
         blocks.append(
             "\n".join(
                 [
-                    str(len(blocks) + 1),
-                    f"{_srt_timestamp(alignment.start_ms)} --> "
-                    f"{_srt_timestamp(alignment.end_ms)}",
+                    str(entry_number),
+                    f"{_srt_timestamp(start_ms)} --> "
+                    f"{_srt_timestamp(end_ms)}",
                     alignment.line.text,
                 ]
             )
@@ -1028,6 +1620,192 @@ def _validate_srt_text(text: str) -> None:
                 "Generated SRT timestamps overlap or are not increasing"
             )
         previous_end = end_ms
+
+
+def _srt_lyric_lines(text: str) -> list[str]:
+    _validate_srt_text(text)
+    if not text:
+        return []
+    return [block.split("\n")[2] for block in text[:-2].split("\n\n")]
+
+
+def lyrics_srt_self_test(
+    lyrics: list[LyricLine],
+    srt_text: str,
+) -> dict[str, int | bool | None]:
+    expected = [line.text for line in lyrics]
+    actual = _srt_lyric_lines(srt_text)
+    first_mismatch: int | None = None
+    for index in range(max(len(expected), len(actual))):
+        expected_line = expected[index] if index < len(expected) else None
+        actual_line = actual[index] if index < len(actual) else None
+        if expected_line != actual_line:
+            first_mismatch = index + 1
+            break
+
+    # SRT is an in-order subset when alignment is incomplete. Counting that
+    # subsequence keeps coverage meaningful after the first omitted entry.
+    matched_count = 0
+    actual_index = 0
+    for expected_line in expected:
+        if actual_index < len(actual) and expected_line == actual[actual_index]:
+            matched_count += 1
+            actual_index += 1
+
+    return {
+        "passed": expected == actual,
+        "expected_count": len(expected),
+        "actual_count": len(actual),
+        "matched_count": matched_count,
+        "first_mismatch": first_mismatch,
+    }
+
+
+def _minimum_maximum_average(values: Iterable[float]) -> tuple[float, float, float]:
+    materialized = list(values)
+    if not materialized:
+        return 0.0, 0.0, 0.0
+    return min(materialized), max(materialized), sum(materialized) / len(materialized)
+
+
+def log_quality_diagnostics(
+    *,
+    lyrics: list[LyricLine],
+    srt_text: str,
+    alignments: list[LyricAlignment],
+    intervals: list[DetectedInterval],
+    sample_rate: int,
+    total_samples: int,
+    silence_threshold_dbfs: float,
+    analysis_window_ms: int,
+    min_voiced_ms: int,
+    min_silence_ms: int,
+    voice_padding_ms: int,
+    accepted_whisper_words: int,
+    invalid_whisper_words: int,
+    outside_voiced_words: int,
+) -> dict[str, int | bool | None]:
+    audio_seconds = total_samples / sample_rate
+    voiced_durations = [
+        (interval.end_sample - interval.start_sample) / sample_rate
+        for interval in intervals
+        if interval.state == "voiced"
+    ]
+    silent_durations = [
+        (interval.end_sample - interval.start_sample) / sample_rate
+        for interval in intervals
+        if interval.state == "silent"
+    ]
+    voiced_seconds = sum(voiced_durations)
+    silent_seconds = sum(silent_durations)
+    voiced_min, voiced_max, voiced_average = _minimum_maximum_average(
+        voiced_durations
+    )
+    silent_min, silent_max, silent_average = _minimum_maximum_average(
+        silent_durations
+    )
+    LOGGER.info(
+        "[cl_vocal2promptseg] VAD stats: threshold=%.1f dBFS window=%dms "
+        "min_voiced=%dms min_silence=%dms padding=%dms; audio=%.3fs; "
+        "voiced=%d interval(s)/%.3fs/%.2f%%, silent=%d interval(s)/%.3fs; "
+        "Whisper words accepted=%d invalid=%d outside_voiced=%d",
+        silence_threshold_dbfs,
+        analysis_window_ms,
+        min_voiced_ms,
+        min_silence_ms,
+        voice_padding_ms,
+        audio_seconds,
+        len(voiced_durations),
+        voiced_seconds,
+        (100.0 * voiced_seconds / audio_seconds) if audio_seconds else 0.0,
+        len(silent_durations),
+        silent_seconds,
+        accepted_whisper_words,
+        invalid_whisper_words,
+        outside_voiced_words,
+    )
+    LOGGER.info(
+        "[cl_vocal2promptseg] VAD interval duration stats: "
+        "voiced min=%.3fs max=%.3fs avg=%.3fs; "
+        "silent min=%.3fs max=%.3fs avg=%.3fs",
+        voiced_min,
+        voiced_max,
+        voiced_average,
+        silent_min,
+        silent_max,
+        silent_average,
+    )
+
+    all_min, all_max, all_average = _minimum_maximum_average(
+        alignment.match_score for alignment in alignments
+    )
+    resolved_scores = [
+        alignment.match_score
+        for alignment in alignments
+        if alignment.status == "resolved"
+    ]
+    resolved_min, resolved_max, resolved_average = _minimum_maximum_average(
+        resolved_scores
+    )
+    primary_count = sum(
+        alignment.match_method == "primary" for alignment in alignments
+    )
+    neighbor_count = sum(
+        alignment.match_method == "neighbor" for alignment in alignments
+    )
+    resync_count = sum(
+        alignment.match_method == "resync" for alignment in alignments
+    )
+    targeted_count = sum(
+        alignment.match_method == "targeted" for alignment in alignments
+    )
+    unresolved_count = sum(
+        alignment.status != "resolved" for alignment in alignments
+    )
+    coverage = 100.0 * len(resolved_scores) / len(alignments) if alignments else 0.0
+    LOGGER.info(
+        "[cl_vocal2promptseg] Lyrics alignment stats: resolved=%d/%d "
+        "(%.2f%%), primary=%d neighbor=%d resync=%d targeted=%d unresolved=%d; "
+        "all similarity min=%.4f max=%.4f avg=%.4f; "
+        "resolved similarity min=%.4f max=%.4f avg=%.4f",
+        len(resolved_scores),
+        len(alignments),
+        coverage,
+        primary_count,
+        neighbor_count,
+        resync_count,
+        targeted_count,
+        unresolved_count,
+        all_min,
+        all_max,
+        all_average,
+        resolved_min,
+        resolved_max,
+        resolved_average,
+    )
+
+    result = lyrics_srt_self_test(lyrics, srt_text)
+    if result["passed"]:
+        LOGGER.info(
+            "%s[cl_vocal2promptseg] self test passed: input Lyrics and output "
+            "SRT lyrics match exactly (%d/%d)%s",
+            _ANSI_CYAN,
+            result["actual_count"],
+            result["expected_count"],
+            _ANSI_RESET,
+        )
+    else:
+        LOGGER.error(
+            "%s[cl_vocal2promptseg] self test failed: input Lyrics and output "
+            "SRT lyrics differ (matched=%d/%d, output=%d, first_mismatch=%s)%s",
+            _ANSI_RED,
+            result["matched_count"],
+            result["expected_count"],
+            result["actual_count"],
+            result["first_mismatch"],
+            _ANSI_RESET,
+        )
+    return result
 
 
 def _interval_json(interval: DetectedInterval, sample_rate: int) -> dict[str, Any]:
@@ -1234,7 +2012,46 @@ class CLVocalToPromptSegments:
                     "FLOAT",
                     {"default": 60.0, "min": 1.0, "max": 600.0, "step": 1.0},
                 ),
-            }
+            },
+            "optional": {
+                "condition_on_previous_text": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Preserve Whisper decoder context between internal "
+                            "windows. This matches the Whisper CLI default and "
+                            "usually improves long or harsh vocals. Existing "
+                            "workflows may omit this input and use True."
+                        ),
+                    },
+                ),
+                "srt_time_offset": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": _SRT_TIME_OFFSET_MIN,
+                        "max": _SRT_TIME_OFFSET_MAX,
+                        "step": 1,
+                        "tooltip": (
+                            "Shift every generated SRT start/end timestamp by "
+                            "this many milliseconds. Out-of-audio timestamps "
+                            "stop execution. Prompt and alignment timing do not shift."
+                        ),
+                    },
+                ),
+                "include_lyrics_comments": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Add every resolved Lyrics line to its voiced scene "
+                            "as a '// 歌詞: ...' source-template comment. Comments "
+                            "are removed before translation and final JSON output."
+                        ),
+                    },
+                ),
+            },
         }
 
     @classmethod
@@ -1271,9 +2088,24 @@ class CLVocalToPromptSegments:
         lyrics_match_threshold: float,
         lyrics_neighbor_threshold: float,
         lyrics_search_seconds: float,
+        condition_on_previous_text: bool = True,
+        srt_time_offset: int = 0,
+        include_lyrics_comments: bool = True,
     ) -> tuple[str, str, str, str]:
         with self._lock:
+            _validate_bool(
+                condition_on_previous_text, "condition_on_previous_text"
+            )
+            _validate_bool(
+                include_lyrics_comments, "include_lyrics_comments"
+            )
             _validate_bool(keep_whisper_loaded, "keep_whisper_loaded")
+            srt_time_offset = _validate_int(
+                srt_time_offset,
+                "srt_time_offset",
+                _SRT_TIME_OFFSET_MIN,
+                _SRT_TIME_OFFSET_MAX,
+            )
             max_scene_seconds = _validate_int(
                 max_scene_seconds, "max_scene_seconds", 1, 60
             )
@@ -1361,12 +2193,14 @@ class CLVocalToPromptSegments:
                 LOGGER.info(
                     "[cl_vocal2promptseg] Starting Whisper transcription: "
                     "model=%s device=%s duration=%.3fs "
-                    "initial_prompt=%d line(s)/%d char(s)",
+                    "initial_prompt=%d line(s)/%d char(s) "
+                    "condition_on_previous_text=%s",
                     whisper_model,
                     resolved_device,
                     total_samples / sample_rate,
                     initial_prompt.count("\n") + 1 if initial_prompt else 0,
                     len(initial_prompt),
+                    condition_on_previous_text,
                 )
                 with _InferenceHeartbeat(whisper_model):
                     whisper_result = self._backend.transcribe(
@@ -1374,6 +2208,7 @@ class CLVocalToPromptSegments:
                         language=None if language == "auto" else language,
                         device=resolved_device,
                         initial_prompt=initial_prompt or None,
+                        condition_on_previous_text=condition_on_previous_text,
                     )
                 if progress is not None:
                     progress.update_absolute(4, 5)
@@ -1404,15 +2239,50 @@ class CLVocalToPromptSegments:
                     search_seconds=lyrics_search_seconds,
                     audio_duration_seconds=total_samples / sample_rate,
                 )
+                (
+                    alignments,
+                    targeted_attempt_count,
+                    targeted_resolved_count,
+                    targeted_invalid_words,
+                ) = targeted_retry_unresolved_lyrics(
+                    alignments,
+                    whisper_audio,
+                    self._backend,
+                    language=None if language == "auto" else language,
+                    device=resolved_device,
+                    condition_on_previous_text=condition_on_previous_text,
+                    match_threshold=lyrics_match_threshold,
+                    neighbor_match_threshold=lyrics_neighbor_threshold,
+                )
+                if targeted_invalid_words:
+                    LOGGER.warning(
+                        "[cl_vocal2promptseg] Ignored %d invalid Whisper word or "
+                        "segment value(s) during targeted retries",
+                        targeted_invalid_words,
+                    )
+                promoted_scene_count = promote_resolved_lyrics_scenes(
+                    scenes, alignments
+                )
                 alignments = assign_lyrics_to_scenes(alignments, scenes)
-                prompt_text = build_prompt_text(scenes, alignments)
+                prompt_text = build_prompt_text(
+                    scenes,
+                    alignments,
+                    include_lyrics_comments=include_lyrics_comments,
+                )
                 try:
                     lex_japanese_markdown(prompt_text)
                 except Exception as exc:
                     raise VocalPromptError(
                         "Generated prompt_text failed reduced-Markdown validation"
                     ) from exc
-                srt_text = build_srt_text(alignments)
+                audio_duration_ms = math.ceil(
+                    total_samples * 1000 / sample_rate
+                )
+                srt_text = build_srt_text(
+                    alignments,
+                    srt_time_offset=srt_time_offset,
+                    audio_duration_ms=audio_duration_ms,
+                )
                 settings = {
                     "max_scene_seconds": max_scene_seconds,
                     "silence_threshold_dbfs": silence_threshold_dbfs,
@@ -1422,11 +2292,17 @@ class CLVocalToPromptSegments:
                     "voice_padding_ms": voice_padding_ms,
                     "lyrics_match_threshold": lyrics_match_threshold,
                     "lyrics_neighbor_threshold": lyrics_neighbor_threshold,
+                    "condition_on_previous_text": condition_on_previous_text,
+                    "srt_time_offset": srt_time_offset,
+                    "include_lyrics_comments": include_lyrics_comments,
                     "whisper_initial_prompt_lines": (
                         initial_prompt.count("\n") + 1 if initial_prompt else 0
                     ),
                     "whisper_initial_prompt_characters": len(initial_prompt),
                     "lyrics_search_seconds": lyrics_search_seconds,
+                    "post_anchor_search_seconds": min(
+                        lyrics_search_seconds, _POST_ANCHOR_SEARCH_SECONDS
+                    ),
                 }
                 detected_language = whisper_result.get("language")
                 if detected_language is not None and not isinstance(
@@ -1454,11 +2330,34 @@ class CLVocalToPromptSegments:
                 neighbor_resolved_count = sum(
                     alignment.match_method == "neighbor" for alignment in alignments
                 )
+                resynchronized_count = sum(
+                    alignment.match_method == "resync" for alignment in alignments
+                )
+                targeted_resolved_count = sum(
+                    alignment.match_method == "targeted"
+                    for alignment in alignments
+                )
                 voiced_scene_count = sum(
                     scene["state"] == "voiced" for scene in scenes
                 )
                 voiced_interval_count = sum(
                     interval.state == "voiced" for interval in intervals
+                )
+                self_test = log_quality_diagnostics(
+                    lyrics=lyrics,
+                    srt_text=srt_text,
+                    alignments=alignments,
+                    intervals=intervals,
+                    sample_rate=sample_rate,
+                    total_samples=total_samples,
+                    silence_threshold_dbfs=silence_threshold_dbfs,
+                    analysis_window_ms=analysis_window_ms,
+                    min_voiced_ms=min_voiced_ms,
+                    min_silence_ms=min_silence_ms,
+                    voice_padding_ms=voice_padding_ms,
+                    accepted_whisper_words=len(words),
+                    invalid_whisper_words=invalid_words,
+                    outside_voiced_words=outside_words,
                 )
                 if unresolved_count:
                     LOGGER.warning(
@@ -1484,8 +2383,16 @@ class CLVocalToPromptSegments:
                     f"whisper={whisper_model} on {resolved_device} "
                     f"language={detected_language or language}; "
                     f"lyrics={resolved_count} resolved "
-                    f"({neighbor_resolved_count} neighbor-recovered), "
+                    f"({neighbor_resolved_count} neighbor-recovered, "
+                    f"{resynchronized_count} resynchronized, "
+                    f"{targeted_resolved_count} targeted-recovered in "
+                    f"{targeted_attempt_count} run(s), "
+                    f"{promoted_scene_count} scene(s) promoted), "
                     f"{unresolved_count} unresolved; "
+                    f"self_test={'passed' if self_test['passed'] else 'failed'}; "
+                    f"srt_time_offset={srt_time_offset}ms; "
+                    f"lyrics_comments="
+                    f"{'enabled' if include_lyrics_comments else 'disabled'}; "
                     f"detected {voiced_interval_count} voiced interval(s); "
                     f"generated {len(scenes)} scene(s): {voiced_scene_count} voiced, "
                     f"{len(scenes) - voiced_scene_count} silent; "
