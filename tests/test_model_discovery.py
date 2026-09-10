@@ -7,8 +7,8 @@ import unittest
 from .helpers import module
 
 
-discovery = module("model_discovery")
-errors = module("compiler.errors")
+discovery = module("common.gguf.discovery")
+errors = module("common.errors")
 
 
 class FakeFolderPaths:

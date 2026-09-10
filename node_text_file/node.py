@@ -8,7 +8,7 @@ import hashlib
 import logging
 from typing import Any
 
-from .compiler.errors import TextFileLoadError
+from .errors import TextFileLoadError
 
 
 LOGGER = logging.getLogger("cl_textfile")

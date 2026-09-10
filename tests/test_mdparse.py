@@ -5,8 +5,8 @@ import unittest
 from .helpers import module
 
 
-parse_markdown = module("compiler.mdparse").parse_markdown
-errors = module("compiler.errors")
+parse_markdown = module("node_japanese_to_json.compiler.mdparse").parse_markdown
+errors = module("node_japanese_to_json.compiler.errors")
 
 
 CANONICAL = """# Subjects

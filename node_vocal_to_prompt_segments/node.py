@@ -15,9 +15,9 @@ import time
 import unicodedata
 from typing import Any, Iterable
 
-from .compiler.errors import VocalPromptError
-from .compiler.llmj2e import lex_japanese_markdown
-from .whisper_backend import WhisperBackend
+from .errors import VocalPromptError
+from ..node_japanese_to_json.compiler.llmj2e import lex_japanese_markdown
+from .whisper_runtime import WhisperBackend
 from .whisper_discovery import (
     discover_whisper_model_names,
     resolve_whisper_model_name,

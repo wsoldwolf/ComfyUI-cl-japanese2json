@@ -9,8 +9,8 @@ from unittest.mock import patch
 from .helpers import PKG, ROOT, module
 
 
-vocal = module("vocal_prompt_nodes")
-errors = module("compiler.errors")
+vocal = module("node_vocal_to_prompt_segments.node")
+errors = module("node_vocal_to_prompt_segments.errors")
 
 
 def lyric(index: int, text: str) -> object:
@@ -798,7 +798,7 @@ class VocalPromptNodeTests(unittest.TestCase):
         self.assertNotIn("// 歌詞: 未解決", prompt)
         self.assertIn("* 発声: なし", prompt)
         self.assertIn("* リップシンク: <Subject 1> <- ソースボーカル", prompt)
-        module("compiler.llmj2e").lex_japanese_markdown(prompt)
+        module("node_japanese_to_json.compiler.llmj2e").lex_japanese_markdown(prompt)
         prompt_without_lyrics = vocal.build_prompt_text(
             scenes,
             alignments,

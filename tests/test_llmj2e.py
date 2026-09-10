@@ -13,8 +13,8 @@ from .helpers import (
 )
 
 
-llmj2e = module("compiler.llmj2e")
-errors = module("compiler.errors")
+llmj2e = module("node_japanese_to_json.compiler.llmj2e")
+errors = module("node_japanese_to_json.compiler.errors")
 
 
 SOURCE = """# サブジェクト

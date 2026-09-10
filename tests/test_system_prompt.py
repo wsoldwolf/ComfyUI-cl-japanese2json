@@ -9,8 +9,8 @@ from unittest.mock import patch
 from .helpers import module
 
 
-system_prompt = module("system_prompt")
-errors = module("compiler.errors")
+system_prompt = module("node_japanese_to_json.compiler.system_prompt")
+errors = module("node_japanese_to_json.compiler.errors")
 
 
 class SystemPromptTests(unittest.TestCase):

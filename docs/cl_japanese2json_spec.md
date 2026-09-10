@@ -47,20 +47,29 @@ LLMは最終JSON、ディレクティブ、ショット構造、参照関係、�
 ## 3. ファイル構成
 
 ```text
-compiler/
-  comments.py
+node_japanese_to_json/
+  node.py
+  debug_output.py
+  compiler/
+    comments.py
+    errors.py
+    structures.py
+    protected_text.py
+    llmj2e.py
+    mdparse.py
+    jsongen.py
+    system_prompt.py
+    prompts/
+      llmj2e_qwen3_8b_system_prompt.txt
+common/
   errors.py
-  structures.py
-  protected_text.py
-  llmj2e.py
-  mdparse.py
-  jsongen.py
-prompts/
-  llmj2e_qwen3_8b_system_prompt.txt
+  gguf/
+    discovery.py
+    runtime.py
 tests/
 ```
 
-`comments.py`はコメント走査、`structures.py`は中間表現、`protected_text.py`は保護と復元、`llmj2e.py`は字句解析・翻訳、`mdparse.py`は正規形パース、`jsongen.py`はPlan生成と最終検証を担当する。
+`node_japanese_to_json/compiler/`はこのコンパイラだけに密結合した実装を所有する。`comments.py`はコメント走査、`structures.py`は中間表現、`protected_text.py`は保護と復元、`llmj2e.py`は字句解析・翻訳、`mdparse.py`は正規形パース、`jsongen.py`はPlan生成と最終検証を担当する。GGUF探索及びllama.cppランタイムは、後続ノードからも再利用できる`common/gguf/`に置く。
 
 ## 4. 文字列共通規則
 
@@ -386,7 +395,7 @@ BGM再利用は固定構造としてPythonが変換し、`SND`翻訳区間へ含
 
 ### 7.3 システムプロンプト
 
-システムプロンプトは`prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み込む。
+システムプロンプトは`node_japanese_to_json/compiler/prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み込む。
 
 最低限、次をモデルへ要求する。
 

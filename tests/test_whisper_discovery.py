@@ -7,8 +7,8 @@ import unittest
 from .helpers import module
 
 
-discovery = module("whisper_discovery")
-errors = module("compiler.errors")
+discovery = module("node_vocal_to_prompt_segments.whisper_discovery")
+errors = module("node_vocal_to_prompt_segments.errors")
 
 
 class FakeFolderPaths:

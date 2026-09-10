@@ -6,11 +6,13 @@ import hashlib
 from pathlib import Path
 import threading
 
-from .compiler.errors import SystemPromptError
+from .errors import SystemPromptError
 
 
-NODE_DIR = Path(__file__).resolve().parent
-SYSTEM_PROMPT_PATH = NODE_DIR / "prompts" / "llmj2e_qwen3_8b_system_prompt.txt"
+COMPILER_DIR = Path(__file__).resolve().parent
+SYSTEM_PROMPT_PATH = (
+    COMPILER_DIR / "prompts" / "llmj2e_qwen3_8b_system_prompt.txt"
+)
 _PROMPT_LOCK = threading.RLock()
 _PROMPT_CACHE: tuple[int, int, str, str] | None = None
 

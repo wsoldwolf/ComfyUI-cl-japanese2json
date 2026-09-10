@@ -5,7 +5,7 @@ import unittest
 from .helpers import PKG, module
 
 
-audio_nodes = module("audio_nodes")
+audio_nodes = module("node_audio_pad.node")
 
 
 class FakeWaveform:

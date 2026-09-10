@@ -1,9 +1,9 @@
 """ComfyUI custom-node registration."""
 
-from .audio_nodes import CLAudioPad, CLAudioPadPair
-from .nodes import CLJapaneseToJSONGGUF
-from .text_file_nodes import CLLoadTextFile
-from .vocal_prompt_nodes import CLVocalToPromptSegments
+from .node_audio_pad.node import CLAudioPad, CLAudioPadPair
+from .node_japanese_to_json.node import CLJapaneseToJSONGGUF
+from .node_text_file.node import CLLoadTextFile
+from .node_vocal_to_prompt_segments.node import CLVocalToPromptSegments
 
 
 NODE_CLASS_MAPPINGS = {

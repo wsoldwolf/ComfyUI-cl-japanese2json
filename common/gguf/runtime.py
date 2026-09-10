@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from .compiler.errors import ModelLoadError
+from ..errors import ModelLoadError
 
 
 LOGGER = logging.getLogger("cl_japanese2json")

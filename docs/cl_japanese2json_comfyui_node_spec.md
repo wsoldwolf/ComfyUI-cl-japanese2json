@@ -305,7 +305,7 @@ Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追
 ファイルは次である。
 
 ```text
-prompts/llmj2e_qwen3_8b_system_prompt.txt
+node_japanese_to_json/compiler/prompts/llmj2e_qwen3_8b_system_prompt.txt
 ```
 
 - UTF-8又はUTF-8 BOMとして読む。
@@ -385,7 +385,7 @@ with instance_lock:
 
 #### 9.1.1 コメント前処理
 
-`compiler/comments.py`の決定論的スキャナーをLLMJ2E字句解析より前に実行する。MDPARSEも防御的に同じスキャナーを使用する。
+`node_japanese_to_json/compiler/comments.py`の決定論的スキャナーをLLMJ2E字句解析より前に実行する。MDPARSEも防御的に同じスキャナーを使用する。
 
 - 行頭の空白を除いて`//`で始まる物理行は行末までコメント。
 - 通常本文後方の`//`及びURLの`//`は通常文字列。

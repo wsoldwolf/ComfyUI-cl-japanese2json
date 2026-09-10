@@ -8,8 +8,8 @@ from unittest.mock import patch
 from .helpers import module
 
 
-backend_module = module("whisper_backend")
-errors = module("compiler.errors")
+backend_module = module("node_vocal_to_prompt_segments.whisper_runtime")
+errors = module("node_vocal_to_prompt_segments.errors")
 
 
 class FakeModel:

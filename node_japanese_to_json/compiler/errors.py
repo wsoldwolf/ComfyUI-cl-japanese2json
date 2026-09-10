@@ -1,16 +1,10 @@
-"""Exception hierarchy for cl_japanese2json."""
+"""Exception hierarchy for the Japanese-to-JSON compiler."""
+
+from ...common.errors import CLNodeError
 
 
-class CLJapaneseToJSONError(RuntimeError):
+class CLJapaneseToJSONError(CLNodeError):
     """Base error raised by this custom node."""
-
-
-class ModelDiscoveryError(CLJapaneseToJSONError):
-    """A selected GGUF model could not be discovered or resolved."""
-
-
-class ModelLoadError(CLJapaneseToJSONError):
-    """The llama.cpp backend or GGUF model could not be loaded."""
 
 
 class SystemPromptError(CLJapaneseToJSONError):
@@ -43,19 +37,3 @@ class JSONGenerationError(CLJapaneseToJSONError):
 
 class JSONValidationError(CLJapaneseToJSONError):
     """Generated plan JSON failed the required subset validation."""
-
-
-class WhisperModelDiscoveryError(CLJapaneseToJSONError):
-    """A selected local OpenAI Whisper checkpoint could not be resolved."""
-
-
-class WhisperLoadError(CLJapaneseToJSONError):
-    """OpenAI Whisper or its selected local checkpoint could not be loaded."""
-
-
-class VocalPromptError(CLJapaneseToJSONError):
-    """Vocal analysis, lyrics alignment, or prompt generation failed."""
-
-
-class TextFileLoadError(CLJapaneseToJSONError):
-    """A browser-selected plain-text file could not be decoded safely."""

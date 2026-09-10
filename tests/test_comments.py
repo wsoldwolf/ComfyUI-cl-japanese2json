@@ -5,10 +5,10 @@ import unittest
 from .helpers import FakeLLM, module
 
 
-comments = module("compiler.comments")
-errors = module("compiler.errors")
-llmj2e = module("compiler.llmj2e")
-mdparse = module("compiler.mdparse")
+comments = module("node_japanese_to_json.compiler.comments")
+errors = module("node_japanese_to_json.compiler.errors")
+llmj2e = module("node_japanese_to_json.compiler.llmj2e")
+mdparse = module("node_japanese_to_json.compiler.mdparse")
 
 
 class CommentScannerTests(unittest.TestCase):

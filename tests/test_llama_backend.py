@@ -7,8 +7,9 @@ import unittest
 from .helpers import module
 
 
-backend_module = module("llama_backend")
-errors = module("compiler.errors")
+backend_module = module("common.gguf.runtime")
+errors = module("common.errors")
+compiler_errors = module("node_japanese_to_json.compiler.errors")
 
 
 class FakeLlamaModule:
@@ -420,7 +421,7 @@ class LlamaBackendTests(unittest.TestCase):
             nonlocal checks
             checks += 1
             if checks >= 2:
-                raise errors.InferenceStallError("test inference stalled")
+                raise compiler_errors.InferenceStallError("test inference stalled")
             return False
 
         with tempfile.TemporaryDirectory() as temp:
@@ -433,7 +434,7 @@ class LlamaBackendTests(unittest.TestCase):
             loaded = self._load(backend, path)
 
             with self.assertRaisesRegex(
-                errors.InferenceStallError, "test inference stalled"
+                compiler_errors.InferenceStallError, "test inference stalled"
             ):
                 backend.complete_chat(
                     messages=[{"role": "user", "content": "translate"}],

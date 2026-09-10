@@ -5,8 +5,8 @@ import unittest
 from .helpers import module
 
 
-protected = module("compiler.protected_text")
-ProtectedTextError = module("compiler.errors").ProtectedTextError
+protected = module("node_japanese_to_json.compiler.protected_text")
+ProtectedTextError = module("node_japanese_to_json.compiler.errors").ProtectedTextError
 
 
 class ProtectedTextTests(unittest.TestCase):

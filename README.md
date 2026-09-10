@@ -6,6 +6,43 @@ LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻�
 
 現在の入力文法はドラフト版です。旧来の明示的な`(Sx)`話者ID、暗黙ショット、`N秒生成する`、`継続する`との後方互換性はありません。
 
+## プロジェクト構成
+
+実行コードはComfyUIノード単位の`node_*`ディレクトリへ分離し、複数ノードから利用するGGUF基盤と共通例外だけを`common/`へ置きます。ルート`__init__.py`は既存のノード型名を登録するだけなので、保存済みワークフローの`CLJapaneseToJSONGGUF`、`CLVocalToPromptSegments`、`CLAudioPad`、`CLAudioPadPair`及び`CLLoadTextFile`は変更せず読み込めます。
+
+```text
+common/
+  errors.py
+  gguf/
+    discovery.py
+    runtime.py
+node_japanese_to_json/
+  node.py
+  debug_output.py
+  compiler/
+    comments.py
+    errors.py
+    structures.py
+    protected_text.py
+    llmj2e.py
+    mdparse.py
+    jsongen.py
+    system_prompt.py
+    prompts/
+node_vocal_to_prompt_segments/
+  node.py
+  errors.py
+  whisper_discovery.py
+  whisper_runtime.py
+node_audio_pad/
+  node.py
+node_text_file/
+  node.py
+  errors.py
+```
+
+配置と依存方向の詳細は`docs/project_module_layout_spec.md`を参照してください。
+
 ## 必要環境
 
 - Python 3.11以降を使用するComfyUI
@@ -446,7 +483,7 @@ Qwen3ではユーザーメッセージ末尾の`/no_think`に加え、llama-cpp-
 
 `save_debug_output=True`では、実行ごとのディレクトリを`ComfyUI/output/cl_japanese2json_debug/`へ作り、`source.md`、system prompt、保護要求、LLM生応答、検証メタデータ、成功時の`canonical.md`と`result.json`、失敗時の`error.txt`を保存します。入力内容を含むため共有前に確認してください。`ComfyUI/input`へは書きません。
 
-system promptは`prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み込みます。変更はComfyUIキャッシュ指紋へ反映されます。
+system promptは`node_japanese_to_json/compiler/prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み込みます。変更はComfyUIキャッシュ指紋へ反映されます。
 
 ## Contex-Loop Planへの接続
 

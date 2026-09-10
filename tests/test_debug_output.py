@@ -8,7 +8,7 @@ import unittest
 from .helpers import module
 
 
-debug_output = module("debug_output")
+debug_output = module("node_japanese_to_json.debug_output")
 
 
 class DebugOutputTests(unittest.TestCase):

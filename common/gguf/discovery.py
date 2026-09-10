@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .compiler.errors import ModelDiscoveryError
+from ..errors import ModelDiscoveryError
 
 
 LOGGER = logging.getLogger("cl_japanese2json")

@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 from typing import Any
 
-from .compiler.errors import WhisperLoadError, VocalPromptError
+from .errors import WhisperLoadError, VocalPromptError
 
 
 LOGGER = logging.getLogger("cl_vocal2promptseg")

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .compiler.errors import WhisperModelDiscoveryError
+from .errors import WhisperModelDiscoveryError
 
 
 LOGGER = logging.getLogger("cl_vocal2promptseg")

@@ -20,9 +20,9 @@ from .compiler.jsongen import (
 from .compiler.llmj2e import translate_markdown
 from .compiler.mdparse import parse_markdown
 from .debug_output import save_debug_bundle
-from .llama_backend import LlamaBackend
-from .model_discovery import discover_model_names, resolve_model_name
-from .system_prompt import load_system_prompt, system_prompt_fingerprint
+from .compiler.system_prompt import load_system_prompt, system_prompt_fingerprint
+from ..common.gguf.discovery import discover_model_names, resolve_model_name
+from ..common.gguf.runtime import LlamaBackend
 
 
 LOGGER = logging.getLogger("cl_japanese2json")

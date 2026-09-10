@@ -7,8 +7,8 @@ from unittest.mock import patch
 from .helpers import PKG, ROOT, module
 
 
-text_nodes = module("text_file_nodes")
-errors = module("compiler.errors")
+text_nodes = module("node_text_file.node")
+errors = module("node_text_file.errors")
 
 
 def encoded(raw: bytes) -> str:

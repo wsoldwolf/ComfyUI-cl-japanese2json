@@ -9,8 +9,8 @@ from unittest.mock import patch
 from .helpers import FakeBackend, PKG, module
 
 
-nodes = module("nodes")
-errors = module("compiler.errors")
+nodes = module("node_japanese_to_json.node")
+errors = module("node_japanese_to_json.compiler.errors")
 
 
 def arguments(**overrides):

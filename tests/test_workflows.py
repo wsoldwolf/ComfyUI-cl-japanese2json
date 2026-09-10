@@ -6,9 +6,9 @@ import unittest
 from .helpers import FakeLLM, ROOT, module
 
 
-llmj2e = module("compiler.llmj2e")
-mdparse = module("compiler.mdparse")
-jsongen = module("compiler.jsongen")
+llmj2e = module("node_japanese_to_json.compiler.llmj2e")
+mdparse = module("node_japanese_to_json.compiler.mdparse")
+jsongen = module("node_japanese_to_json.compiler.jsongen")
 
 
 class WorkflowCompatibilityTests(unittest.TestCase):

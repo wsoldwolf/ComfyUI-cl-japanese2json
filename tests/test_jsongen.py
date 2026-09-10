@@ -6,9 +6,9 @@ import unittest
 from .helpers import module
 
 
-jsongen = module("compiler.jsongen")
-structures = module("compiler.structures")
-errors = module("compiler.errors")
+jsongen = module("node_japanese_to_json.compiler.jsongen")
+structures = module("node_japanese_to_json.compiler.structures")
+errors = module("node_japanese_to_json.compiler.errors")
 Emd = structures.Emd
 RetentionRule = structures.RetentionRule
 Scene = structures.Scene
