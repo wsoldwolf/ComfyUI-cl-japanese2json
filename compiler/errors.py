@@ -25,6 +25,10 @@ class TranslationError(CLJapaneseToJSONError):
     """The LLM translation response failed structural validation."""
 
 
+class InferenceStallError(TranslationError):
+    """The local LLM stopped producing output before completing a response."""
+
+
 class ProtectedTextError(CLJapaneseToJSONError):
     """Protected tags or Japanese dialogue have invalid syntax."""
 

@@ -10,7 +10,7 @@ import time
 from typing import Any, Callable, Iterable
 
 from .comments import strip_c_comments
-from .errors import ProtectedTextError, TranslationError
+from .errors import InferenceStallError, ProtectedTextError, TranslationError
 from .protected_text import (
     ProtectedPayload,
     contains_unprotected_japanese,
@@ -24,7 +24,9 @@ LOGGER = logging.getLogger("cl_japanese2json")
 MAX_SEED = 4_294_967_295
 RETRY_SEED_STRIDE = 1_000_003
 INFERENCE_HEARTBEAT_SECONDS = 10.0
-MAX_RECORDS_PER_INFERENCE = 32
+INFERENCE_FIRST_CHUNK_TIMEOUT_SECONDS = 120.0
+INFERENCE_STALL_SECONDS = 45.0
+MAX_RECORDS_PER_INFERENCE = 16
 CODE_FENCE_RE = re.compile(r"```", re.IGNORECASE)
 THINK_RE = re.compile(r"<\s*/?\s*think\b", re.IGNORECASE)
 THINK_BLOCK_RE = re.compile(
@@ -1465,8 +1467,19 @@ def _parse_stream_text_values(
 
     parse_tokens = found_structural
     positions = [translated_stream.index(token) for token in parse_tokens]
-    if translated_stream[: positions[0]].strip():
-        raise TranslationError("LLM added text before the first structural placeholder")
+    leading_text = translated_stream[: positions[0]].strip()
+    if leading_text:
+        # The first structural marker gives the first record an exact boundary.
+        # Model-added chatter before that marker is therefore outside every
+        # translated record and can be discarded without guessing about the
+        # document.  Rejecting it here used to invalidate an otherwise intact
+        # multi-record response and unnecessarily retransmit the whole batch.
+        LOGGER.warning(
+            "[cl_japanese2json] Ignored model-added text before the first "
+            "structural placeholder; preserving %d marker-bounded text "
+            "segment(s)",
+            len(record_tokens),
+        )
 
     by_marker = {
         stream_record.marker_token: stream_record for stream_record in stream.records
@@ -1519,16 +1532,6 @@ def _salvage_stream_response(
     matches = list(structural_pattern.finditer(translated_stream))
     if not matches:
         return _salvage_markerless_response(translated_stream, stream)
-
-    leading_text = translated_stream[: matches[0].start()]
-    if (
-        leading_text.strip()
-        and THINK_RE.search(leading_text) is None
-        and CODE_FENCE_RE.search(leading_text) is None
-    ):
-        # Ordinary model-added prose outside every record remains a hard error.
-        # Only known response wrappers may be discarded during record salvage.
-        return {}
 
     expected_index = {token: index for index, token in enumerate(structural_tokens)}
     record_expected_indices = {
@@ -1816,9 +1819,10 @@ def _translate_batch(
     retry_number = 0
     first_error: TranslationError | None = None
     last_error: TranslationError | None = None
+    attempt_record_limit = len(records)
 
     while unresolved_indices:
-        attempt_indices = unresolved_indices
+        attempt_indices = unresolved_indices[:attempt_record_limit]
         attempt_records = [records[index] for index in attempt_indices]
         stream = _build_translation_stream(attempt_records)
         attempt_seed = _normalize_seed(
@@ -1879,6 +1883,35 @@ def _translate_batch(
                     callback_active,
                 )
 
+        def check_inference_abort() -> bool:
+            if interrupt_callback is not None:
+                requested = interrupt_callback()
+                if requested:
+                    return True
+            with progress_lock:
+                chunk_at = last_chunk_at
+                current = streamed_chunks
+            now = time.monotonic()
+            idle_started = chunk_at if chunk_at is not None else inference_started
+            idle_seconds = now - idle_started
+            timeout_seconds = (
+                INFERENCE_STALL_SECONDS
+                if chunk_at is not None
+                else INFERENCE_FIRST_CHUNK_TIMEOUT_SECONDS
+            )
+            if idle_seconds >= timeout_seconds:
+                phase = (
+                    "after output began"
+                    if chunk_at is not None
+                    else "before first output"
+                )
+                raise InferenceStallError(
+                    f"LLM inference stalled {phase}: no new streamed chunk for "
+                    f"{idle_seconds:.1f}s (received {current} chunk(s), timeout "
+                    f"{timeout_seconds:.0f}s)"
+                )
+            return False
+
         if progress_callback is not None:
             progress_callback(
                 batch_index + 1,
@@ -1919,7 +1952,7 @@ def _translate_batch(
                 seed=attempt_seed,
                 stop_token=stream.stop_token,
                 progress_callback=report_stream_progress,
-                interrupt_callback=interrupt_callback,
+                interrupt_callback=check_inference_abort,
             )
             _capture_debug_response(event, response)
             content, finish_reason = _response_content(response)
@@ -1963,6 +1996,16 @@ def _translate_batch(
                 _set_debug_result(event, "validated")
         except TranslationError as exc:
             attempt_error = exc
+            if isinstance(exc, InferenceStallError):
+                reduced_limit = max(1, len(attempt_indices) // 2)
+                if reduced_limit < attempt_record_limit:
+                    attempt_record_limit = reduced_limit
+                    LOGGER.warning(
+                        "[cl_japanese2json] Stalled inference will retry in "
+                        "smaller groups: %d -> %d text segment(s)",
+                        len(attempt_indices),
+                        attempt_record_limit,
+                    )
             salvaged = (
                 _salvage_stream_response(content, stream)
                 if content is not None
@@ -2004,6 +2047,17 @@ def _translate_batch(
                     max_tokens,
                 )
             return [value for value in validated if value is not None]
+        attempted_unresolved = [
+            index for index in attempt_indices if validated[index] is None
+        ]
+        if not attempted_unresolved and attempt_error is None:
+            LOGGER.info(
+                "[cl_japanese2json] Continuing adaptive split with %d "
+                "remaining text segment(s), at most %d per inference",
+                len(unresolved_indices),
+                attempt_record_limit,
+            )
+            continue
         if attempt_error is None:
             attempt_error = TranslationError(
                 "LLM retry did not resolve every failed text segment"

@@ -51,6 +51,37 @@ class _CombinedStoppingCriteria:
         return bool(self.interrupt_callback())
 
 
+class _NativeAbortBridge:
+    """Convert Python interrupts into llama.cpp's native decode abort signal."""
+
+    def __init__(self, callback: Callable[[], Any]) -> None:
+        self.callback = callback
+        self.exception: BaseException | None = None
+        self.requested = False
+        self.enabled = True
+
+    def poll(self, _data: Any) -> bool:
+        if not self.enabled:
+            return False
+        try:
+            requested = bool(self.callback())
+        except BaseException as exc:
+            self.exception = exc
+            requested = True
+        if requested:
+            self.requested = True
+        return requested
+
+    def raise_if_requested(self) -> None:
+        if self.exception is not None:
+            raise self.exception
+        if self.requested:
+            raise ModelLoadError("llama.cpp inference was aborted")
+
+    def disable(self) -> None:
+        self.enabled = False
+
+
 def model_signature(
     model_path: Path,
     *,
@@ -88,6 +119,10 @@ class LlamaBackend:
         self.llm: Any | None = None
         self.current_model_signature: tuple[Any, ...] | None = None
         self.current_model_path: Path | None = None
+        # llama.cpp retains the C callback pointer.  Keep both Python objects
+        # alive until the context is closed or a replacement is installed.
+        self._native_abort_bridge: _NativeAbortBridge | None = None
+        self._native_abort_callback: Any | None = None
 
     def _kv_type(self, selection: str) -> Any:
         if selection not in {"q8_0", "f16"}:
@@ -193,6 +228,8 @@ class LlamaBackend:
                         finalizer()
             except Exception as exc:
                 LOGGER.warning("[cl_japanese2json] Model close raised an error: %s", exc)
+        self._native_abort_bridge = None
+        self._native_abort_callback = None
         gc.collect()
         try:  # Torch is optional and is never installed by this package.
             import torch  # type: ignore
@@ -212,6 +249,45 @@ class LlamaBackend:
         accessor = getattr(self.llm, "n_ctx", None)
         value = accessor() if callable(accessor) else accessor
         return value if isinstance(value, int) and value > 0 else None
+
+    def _install_native_abort_bridge(
+        self,
+        interrupt_callback: Callable[[], Any] | None,
+    ) -> _NativeAbortBridge | None:
+        """Install an abort callback that is polled inside native decode work."""
+
+        if interrupt_callback is None or self.llm is None:
+            return None
+        callback_type = getattr(self.llama_module, "ggml_abort_callback", None)
+        setter = getattr(self.llama_module, "llama_set_abort_callback", None)
+        context = getattr(self.llm, "ctx", None)
+        if context is None:
+            internal_context = getattr(self.llm, "_ctx", None)
+            context = getattr(internal_context, "ctx", None)
+        if not callable(callback_type) or not callable(setter) or context is None:
+            return None
+
+        bridge = _NativeAbortBridge(interrupt_callback)
+        native_callback = callback_type(bridge.poll)
+        previous_bridge = self._native_abort_bridge
+        previous_callback = self._native_abort_callback
+        try:
+            setter(context, native_callback, None)
+        except (TypeError, ValueError, RuntimeError, OSError) as exc:
+            LOGGER.warning(
+                "[cl_japanese2json] Could not install llama.cpp native abort "
+                "callback; token-boundary interruption remains active: %s",
+                exc,
+            )
+            return None
+        self._native_abort_bridge = bridge
+        self._native_abort_callback = native_callback
+        if previous_bridge is not None:
+            previous_bridge.disable()
+        # Keep the previous callback alive until after llama.cpp has replaced
+        # its pointer.  The local reference intentionally expires here.
+        del previous_callback
+        return bridge
 
     def count_input_tokens(self, messages: list[dict[str, str]]) -> int:
         if self.llm is None:
@@ -470,48 +546,65 @@ class LlamaBackend:
             raise ModelLoadError("interrupt_callback must be callable")
         if interrupt_callback is not None:
             interrupt_callback()
-        is_qwen3 = self.is_qwen3()
-        if is_qwen3 and callable(getattr(self.llm, "create_completion", None)):
-            try:
-                return self._complete_qwen3_without_thinking(
-                    call_kwargs,
-                    progress_callback=progress_callback,
-                    interrupt_callback=interrupt_callback,
-                )
-            except TypeError as exc:
-                raise ModelLoadError(
-                    "llama-cpp-python rejected the strict Qwen3 non-thinking "
-                    "text-completion arguments; check backend compatibility"
-                ) from exc
-        if is_qwen3:
-            try:
-                parameters = inspect.signature(call).parameters
-            except (TypeError, ValueError):
-                parameters = {}
-            if "enable_thinking" in parameters:
-                call_kwargs["enable_thinking"] = False
-            if "chat_template_kwargs" in parameters:
-                call_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
-            if "reasoning" in parameters:
-                call_kwargs["reasoning"] = False
-        if progress_callback is not None:
-            call_kwargs["stream"] = True
-        if interrupt_callback is not None:
-            call_kwargs["stopping_criteria"] = _CombinedStoppingCriteria(
-                call_kwargs.get("stopping_criteria"), interrupt_callback
-            )
+        native_abort = self._install_native_abort_bridge(interrupt_callback)
         try:
-            response = call(**call_kwargs)
-            if progress_callback is None or isinstance(response, dict):
-                return response
-            return self._collect_streamed_chat_completion(
-                response,
-                messages=call_kwargs.get("messages", []),
-                progress_callback=progress_callback,
-                interrupt_callback=interrupt_callback,
-            )
-        except TypeError as exc:
-            raise ModelLoadError(
-                "llama-cpp-python rejected the Qwen chat-completion arguments; "
-                "check backend compatibility"
-            ) from exc
+            is_qwen3 = self.is_qwen3()
+            if is_qwen3 and callable(getattr(self.llm, "create_completion", None)):
+                try:
+                    response = self._complete_qwen3_without_thinking(
+                        call_kwargs,
+                        progress_callback=progress_callback,
+                        interrupt_callback=interrupt_callback,
+                    )
+                except TypeError as exc:
+                    raise ModelLoadError(
+                        "llama-cpp-python rejected the strict Qwen3 non-thinking "
+                        "text-completion arguments; check backend compatibility"
+                    ) from exc
+            else:
+                if is_qwen3:
+                    try:
+                        parameters = inspect.signature(call).parameters
+                    except (TypeError, ValueError):
+                        parameters = {}
+                    if "enable_thinking" in parameters:
+                        call_kwargs["enable_thinking"] = False
+                    if "chat_template_kwargs" in parameters:
+                        call_kwargs["chat_template_kwargs"] = {
+                            "enable_thinking": False
+                        }
+                    if "reasoning" in parameters:
+                        call_kwargs["reasoning"] = False
+                if progress_callback is not None:
+                    call_kwargs["stream"] = True
+                if interrupt_callback is not None:
+                    call_kwargs["stopping_criteria"] = _CombinedStoppingCriteria(
+                        call_kwargs.get("stopping_criteria"), interrupt_callback
+                    )
+                try:
+                    response = call(**call_kwargs)
+                    if progress_callback is not None and not isinstance(
+                        response, dict
+                    ):
+                        response = self._collect_streamed_chat_completion(
+                            response,
+                            messages=call_kwargs.get("messages", []),
+                            progress_callback=progress_callback,
+                            interrupt_callback=interrupt_callback,
+                        )
+                except TypeError as exc:
+                    raise ModelLoadError(
+                        "llama-cpp-python rejected the Qwen chat-completion "
+                        "arguments; check backend compatibility"
+                    ) from exc
+        except BaseException:
+            if native_abort is not None:
+                native_abort.raise_if_requested()
+            raise
+        else:
+            if native_abort is not None:
+                native_abort.raise_if_requested()
+            return response
+        finally:
+            if native_abort is not None:
+                native_abort.disable()

@@ -16,6 +16,20 @@ class FakeLlamaModule:
     GGML_TYPE_F16 = "F16"
 
 
+class FakeAbortLlamaModule(FakeLlamaModule):
+    abort_callback = None
+    abort_context = None
+
+    @staticmethod
+    def ggml_abort_callback(callback):
+        return callback
+
+    @classmethod
+    def llama_set_abort_callback(cls, context, callback, _data):
+        cls.abort_context = context
+        cls.abort_callback = callback
+
+
 class FakeLoadedLlama:
     instances: list["FakeLoadedLlama"] = []
 
@@ -157,9 +171,23 @@ class FakeRawCompletionLlama(FakeLoadedLlama):
         }
 
 
+class FakeNativeAbortRawCompletionLlama(FakeRawCompletionLlama):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.ctx = object()
+
+    def create_completion(self, **kwargs):
+        self.text_completion_kwargs = kwargs
+        if FakeAbortLlamaModule.abort_callback(None):
+            raise RuntimeError("llama_decode returned 2")
+        return super().create_completion(**kwargs)
+
+
 class LlamaBackendTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeLoadedLlama.instances.clear()
+        FakeAbortLlamaModule.abort_callback = None
+        FakeAbortLlamaModule.abort_context = None
 
     def _load(self, backend, path: Path, **overrides):
         settings = {
@@ -384,6 +412,44 @@ class LlamaBackendTests(unittest.TestCase):
                     interrupt_callback=interrupt,
                 )
             self.assertIsNone(loaded.text_completion_kwargs)
+
+    def test_native_abort_rethrows_the_python_interrupt_exception(self) -> None:
+        checks = 0
+
+        def interrupt() -> bool:
+            nonlocal checks
+            checks += 1
+            if checks >= 2:
+                raise errors.InferenceStallError("test inference stalled")
+            return False
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "qwen3-model.gguf"
+            path.write_bytes(b"x")
+            backend = backend_module.LlamaBackend(
+                llama_module=FakeAbortLlamaModule,
+                llama_class=FakeNativeAbortRawCompletionLlama,
+            )
+            loaded = self._load(backend, path)
+
+            with self.assertRaisesRegex(
+                errors.InferenceStallError, "test inference stalled"
+            ):
+                backend.complete_chat(
+                    messages=[{"role": "user", "content": "translate"}],
+                    max_tokens=32,
+                    temperature=0.1,
+                    top_p=0.9,
+                    repeat_penalty=1.05,
+                    seed=1,
+                    progress_callback=lambda _value: None,
+                    interrupt_callback=interrupt,
+                )
+
+            self.assertIs(FakeAbortLlamaModule.abort_context, loaded.ctx)
+            self.assertGreaterEqual(checks, 2)
+            self.assertIsNotNone(backend._native_abort_bridge)
+            self.assertFalse(backend._native_abort_bridge.enabled)
 
     def test_streaming_completion_reports_progress_and_rebuilds_response(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

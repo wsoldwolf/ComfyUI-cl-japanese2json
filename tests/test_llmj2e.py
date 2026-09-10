@@ -142,18 +142,28 @@ class LLMJ2ETests(unittest.TestCase):
         stream = llmj2e._build_translation_stream(document.records)
         self.assertEqual(stream.prefix, "CLJT1")
 
-    def test_text_outside_record_boundaries_is_rejected(self) -> None:
+    def test_text_before_first_record_boundary_is_ignored(self) -> None:
         def add_outside_text(kwargs):
             translated = default_stream_translation(kwargs["messages"])
             return "unexpected text " + translated
 
-        with self.assertRaises(errors.TranslationError):
-            llmj2e.translate_markdown(
+        llm = FakeLLM([add_outside_text])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(
                 "# シーン\n## ショット\n* 動作。",
-                FakeLLM([add_outside_text, add_outside_text]),
+                llm,
                 "sys",
                 max_tokens=64,
             )
+        self.assertIn("* The action occurs .", output)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(
+            any(
+                "Ignored model-added text before the first structural "
+                "placeholder" in line
+                for line in captured.output
+            )
+        )
 
     def test_only_failed_records_are_retried(self) -> None:
         def one_missing(kwargs):
@@ -257,17 +267,17 @@ class LLMJ2ETests(unittest.TestCase):
         def replace_subject_marker(kwargs):
             records = request_records(kwargs["messages"])
             translated = default_stream_translation(kwargs["messages"])
-            first_non_subject = next(
-                record for record in records if record["section"] != "Subjects"
-            )
-            suffix_start = translated.index(first_non_subject["marker_token"])
             subject = next(
                 record for record in records if record["section"] == "Subjects"
             )
-            return (
-                f"<Subject 1> refers to {default_translation(subject)}\n"
-                + translated[suffix_start:]
-            )
+            wrapper = f"<Subject 1> refers to {default_translation(subject)}"
+            non_subjects = [
+                record for record in records if record["section"] != "Subjects"
+            ]
+            if not non_subjects:
+                return wrapper
+            suffix_start = translated.index(non_subjects[0]["marker_token"])
+            return wrapper + "\n" + translated[suffix_start:]
 
         llm = FakeLLM([replace_subject_marker, replace_subject_marker])
         with self.assertRaises(errors.TranslationError):
@@ -880,6 +890,71 @@ class LLMJ2ETests(unittest.TestCase):
             )
         )
 
+    def test_model_added_preamble_is_ignored_without_retry(self) -> None:
+        def response_with_preamble(kwargs):
+            return (
+                "Here is the translated stream as requested.\n"
+                + default_stream_translation(kwargs["messages"])
+            )
+
+        source = "# シーン\n## ショット\n* 一。\n* 二。\n* 三。"
+        llm = FakeLLM([response_with_preamble])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(
+                source, llm, "sys", max_tokens=128, retry_max=1
+            )
+
+        self.assertEqual(output.count("* The action occurs ."), 3)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(
+            any(
+                "Ignored model-added text before the first structural "
+                "placeholder" in line
+                for line in captured.output
+            )
+        )
+
+    def test_model_added_preamble_does_not_force_valid_records_to_retry(self) -> None:
+        retried_record_ids = []
+
+        def first_response(kwargs):
+            records = request_records(kwargs["messages"])
+
+            def transform(record):
+                translated = default_translation(record)
+                if record["id"] == records[1]["id"]:
+                    return translated.replace(
+                        record["protected_placeholders"][0], ""
+                    )
+                return translated
+
+            return (
+                "Translation follows.\n"
+                + default_stream_translation(
+                    kwargs["messages"], transform=transform
+                )
+            )
+
+        def retry(kwargs):
+            retried_record_ids.extend(
+                record["id"] for record in request_records(kwargs["messages"])
+            )
+            return default_stream_translation(kwargs["messages"])
+
+        source = (
+            "# シーン\n## ショット\n"
+            "* <Subject 1>が動く。\n"
+            "* <Subject 2>が止まる。\n"
+            "* <Subject 3>が振り返る。"
+        )
+        llm = FakeLLM([first_response, retry])
+        output = llmj2e.translate_markdown(
+            source, llm, "sys", max_tokens=128, retry_max=1
+        )
+
+        self.assertEqual(output.count("* The action occurs <Subject"), 3)
+        self.assertEqual(retried_record_ids, ["R000002"])
+
     def test_duplicate_marker_retries_only_ambiguous_neighbor_records(self) -> None:
         def duplicate_second_marker(kwargs):
             records = request_records(kwargs["messages"])
@@ -1111,32 +1186,32 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertGreater(len(llm.calls), 1)
 
     def test_whole_document_uses_one_inference_when_context_fits(self) -> None:
-        source = "# シーン\n## ショット\n" + "\n".join("* 動作。" for _ in range(25))
+        source = "# シーン\n## ショット\n" + "\n".join("* 動作。" for _ in range(15))
         llm = FakeLLM()
         output = llmj2e.translate_markdown(source, llm, "sys", max_tokens=4096)
-        self.assertEqual(output.count("* "), 25)
+        self.assertEqual(output.count("* "), 15)
         self.assertEqual(len(llm.calls), 1)
         transported = request_records(llm.calls[0]["messages"])
-        self.assertEqual(len(transported), 25)
+        self.assertEqual(len(transported), 15)
         self.assertEqual(
             [record["id"] for record in transported],
-            [f"R{index:06d}" for index in range(1, 26)],
+            [f"R{index:06d}" for index in range(1, 16)],
         )
 
-    def test_large_document_is_bounded_to_thirty_two_records_per_inference(self) -> None:
+    def test_large_document_is_bounded_to_sixteen_records_per_inference(self) -> None:
         source = "# シーン\n## ショット\n" + "\n".join(
-            f"* 動作{index}。" for index in range(65)
+            f"* 動作{index}。" for index in range(33)
         )
         llm = FakeLLM(n_ctx=65536)
         output = llmj2e.translate_markdown(
             source, llm, "sys", max_tokens=128
         )
 
-        self.assertEqual(output.count("* "), 65)
+        self.assertEqual(output.count("* "), 33)
         self.assertEqual(len(llm.calls), 3)
         self.assertEqual(
             [len(request_records(call["messages"])) for call in llm.calls],
-            [32, 32, 1],
+            [16, 16, 1],
         )
 
     def test_single_record_context_overflow_is_explicit(self) -> None:
@@ -1172,6 +1247,40 @@ class LLMJ2ETests(unittest.TestCase):
         self.assertEqual(
             [call["seed"] for call in llm.calls],
             [17, 1_000_020, 2_000_023, 3_000_026],
+        )
+
+    def test_stalled_inference_retries_in_smaller_groups(self) -> None:
+        def stall(_kwargs):
+            raise errors.InferenceStallError("test inference stalled")
+
+        source = "# シーン\n## ショット\n" + "\n".join(
+            f"* 動作{index}。" for index in range(4)
+        )
+        llm = FakeLLM([stall])
+        with self.assertLogs("cl_japanese2json", level="INFO") as captured:
+            output = llmj2e.translate_markdown(
+                source,
+                llm,
+                "sys",
+                max_tokens=128,
+                seed=17,
+                retry_max=2,
+            )
+
+        self.assertEqual(output.count("* "), 4)
+        self.assertEqual(
+            [len(request_records(call["messages"])) for call in llm.calls],
+            [4, 2, 2],
+        )
+        self.assertEqual(
+            [call["seed"] for call in llm.calls],
+            [17, 1_000_020, 1_000_020],
+        )
+        self.assertTrue(
+            any("smaller groups: 4 -> 2" in line for line in captured.output)
+        )
+        self.assertTrue(
+            any("Continuing adaptive split" in line for line in captured.output)
         )
 
     def test_retry_max_zero_disables_retries(self) -> None:
