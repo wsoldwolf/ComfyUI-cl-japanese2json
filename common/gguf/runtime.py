@@ -15,7 +15,6 @@ from typing import Any, Callable
 from ..errors import ModelLoadError
 
 
-LOGGER = logging.getLogger("cl_japanese2json")
 QWEN3_NON_THINKING_PREFILL = "<think>\n\n</think>\n\n"
 
 try:
@@ -91,6 +90,7 @@ def model_signature(
     flash_attn: bool,
     kv_cache_type: str,
     op_offload: bool,
+    chat_format: str | None = "qwen",
 ) -> tuple[Any, ...]:
     resolved = model_path.resolve(strict=True)
     stat = resolved.stat()
@@ -104,6 +104,7 @@ def model_signature(
         bool(flash_attn),
         str(kv_cache_type),
         bool(op_offload),
+        chat_format,
     )
 
 
@@ -113,12 +114,15 @@ class LlamaBackend:
         *,
         llama_module: Any = _DEFAULT,
         llama_class: Callable[..., Any] | None | object = _DEFAULT,
+        log_name: str = "cl_japanese2json",
     ) -> None:
         self.llama_module = _llama_cpp if llama_module is _DEFAULT else llama_module
         self.llama_class = _Llama if llama_class is _DEFAULT else llama_class
         self.llm: Any | None = None
         self.current_model_signature: tuple[Any, ...] | None = None
         self.current_model_path: Path | None = None
+        self.log_name = log_name
+        self.logger = logging.getLogger(log_name)
         # llama.cpp retains the C callback pointer.  Keep both Python objects
         # alive until the context is closed or a replacement is installed.
         self._native_abort_bridge: _NativeAbortBridge | None = None
@@ -151,6 +155,7 @@ class LlamaBackend:
         flash_attn: bool,
         kv_cache_type: str,
         op_offload: bool,
+        chat_format: str | None = "qwen",
     ) -> Any:
         try:
             signature = model_signature(
@@ -161,6 +166,7 @@ class LlamaBackend:
                 flash_attn=flash_attn,
                 kv_cache_type=kv_cache_type,
                 op_offload=op_offload,
+                chat_format=chat_format,
             )
         except OSError as exc:
             raise ModelLoadError(f"GGUF model cannot be read: {model_path}") from exc
@@ -185,12 +191,14 @@ class LlamaBackend:
             "type_v": kv_type,
             "offload_kqv": True,
             "op_offload": op_offload,
-            "chat_format": "qwen",
             "verbose": False,
         }
-        LOGGER.info("[cl_japanese2json] Loading model: %s", model_path.name)
-        LOGGER.info(
-            "[cl_japanese2json] n_ctx=%d gpu_layers=%d n_batch=%d flash_attn=%s kv_cache=%s op_offload=%s",
+        if chat_format is not None:
+            kwargs["chat_format"] = chat_format
+        self.logger.info("[%s] Loading model: %s", self.log_name, model_path.name)
+        self.logger.info(
+            "[%s] n_ctx=%d gpu_layers=%d n_batch=%d flash_attn=%s kv_cache=%s op_offload=%s",
+            self.log_name,
             n_ctx,
             gpu_layers,
             n_batch,
@@ -202,8 +210,9 @@ class LlamaBackend:
             loaded = self.llama_class(**kwargs)
         except Exception as exc:
             self.clear_model()
+            format_label = "auto" if chat_format is None else repr(chat_format)
             raise ModelLoadError(
-                f"Failed to load {model_path.name!r} with chat_format='qwen' "
+                f"Failed to load {model_path.name!r} with chat_format={format_label} "
                 f"(n_ctx={n_ctx}, n_batch={n_batch}, gpu_layers={gpu_layers})"
             ) from exc
         self.llm = loaded
@@ -217,7 +226,7 @@ class LlamaBackend:
         self.current_model_signature = None
         self.current_model_path = None
         if old is not None:
-            LOGGER.info("[cl_japanese2json] Unloading model")
+            self.logger.info("[%s] Unloading model", self.log_name)
             try:
                 close = getattr(old, "close", None)
                 if callable(close):
@@ -227,7 +236,9 @@ class LlamaBackend:
                     if callable(finalizer):
                         finalizer()
             except Exception as exc:
-                LOGGER.warning("[cl_japanese2json] Model close raised an error: %s", exc)
+                self.logger.warning(
+                    "[%s] Model close raised an error: %s", self.log_name, exc
+                )
         self._native_abort_bridge = None
         self._native_abort_callback = None
         gc.collect()
@@ -274,9 +285,10 @@ class LlamaBackend:
         try:
             setter(context, native_callback, None)
         except (TypeError, ValueError, RuntimeError, OSError) as exc:
-            LOGGER.warning(
-                "[cl_japanese2json] Could not install llama.cpp native abort "
+            self.logger.warning(
+                "[%s] Could not install llama.cpp native abort "
                 "callback; token-boundary interruption remains active: %s",
+                self.log_name,
                 exc,
             )
             return None
@@ -494,8 +506,9 @@ class LlamaBackend:
         if progress_callback is not None:
             call_kwargs["stream"] = True
 
-        LOGGER.info(
-            "[cl_japanese2json] Using strict Qwen3 non-thinking assistant prefill"
+        self.logger.info(
+            "[%s] Using strict Qwen3 non-thinking assistant prefill",
+            self.log_name,
         )
         response = completion(**call_kwargs)
         if progress_callback is not None and not isinstance(response, dict):

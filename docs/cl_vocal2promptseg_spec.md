@@ -87,7 +87,7 @@ requiredは次の順序とする。
 | `whisper_model` | COMBO | 最初の検出モデル | ローカル`.pt`モデルID | OpenAI Whisperチェックポイント |
 | `language` | COMBO | `ja` | `ja`, `en`, `auto` | Whisper認識言語。`en`は米国英語を含む英語、`auto`はWhisperの言語検出を使用 |
 | `device` | COMBO | `auto` | `auto`, `cuda`, `cpu` | Whisper推論デバイス |
-| `keep_whisper_loaded` | BOOLEAN | True | True/False | 同一モデルとデバイスのWhisperインスタンスを再利用する |
+| `keep_whisper_loaded` | BOOLEAN | False | True/False | 同一モデルとデバイスのWhisperインスタンスを再利用する。H3実行前のVRAM解放を既定とする |
 | `max_scene_seconds` | INT | 10 | 1～60、step 1 | 生成する1 Sceneの最大整数秒 |
 | `silence_threshold_dbfs` | FLOAT | -45.0 | -100.0～0.0、step 0.5 | RMSがこの値以上の解析フレームを有声候補にする |
 | `analysis_window_ms` | INT | 20 | 5～200、step 1 | RMS解析窓の長さ |
@@ -199,7 +199,7 @@ ComfyUI/models/whisper/
 `lyrics_text`は改行をLFへ正規化し、物理行順に処理する。
 
 - 前後空白を除去した空行は無視する。
-- 前後空白を除去した行全体が正規表現`^\[[^\]\r\n]+\]$`に一致する場合、`[Intro]`、`[Verse 1]`、`[Chorus]`等のSunoセクション見出しとして無視する。
+- 前後空白を除去した行全体が正規表現`^\[[^\]\r\n]+\]$`に一致する場合、`[Intro]`、`[Verse 1]`、`[Chorus]`等のSunoセクション見出しとして認識する。見出し自体は歌詞本文及びSRTから除外するが、次の見出しまでの各歌詞行へ`section_label`と正規化した`section_kind`を付与する。未知の見出しは`custom`として原文を保持する。
 - それ以外の非空行を1歌詞行とする。
 - 出力本文には前後空白を除去したLyricsの原文を使用し、Whisper書き起こしへ置換しない。
 - 同じ歌詞行が繰り返されても統合又は重複除去しない。
@@ -408,6 +408,7 @@ Lyrics整列による有声昇格後、隣接する同一状態の範囲を再�
 // シーン 2
 # シーン 10秒 継続
 // 検出状態: voiced。ソース範囲 00:10.000-00:20.000。
+// 楽曲セクション: [Pre-Chorus]
 // 歌詞: 赤い林檎を　ひとつ頬張り
 // 歌詞: おまえの勘定を　笑ってやろう
 ## ショット
@@ -421,9 +422,9 @@ Lyrics整列による有声昇格後、隣接する同一状態の範囲を再�
 
 `// シーン N`は1件目を`// シーン 1`として、後続Sceneを欠番なく採番する。1件目の場合だけ`継続`を省略する。Scene秒数及びコメント内の範囲は実際のScene計画へ置換する。
 
-`include_lyrics_comments=True`の場合、解決済み歌詞行は、その`start_ms`を含む有声Sceneの検出状態コメント直後へ、Lyrics順で固定プレフィクス`// 歌詞: `と原文を連結して1回だけ出力する。プレフィクスにより、人又はテンプレートを読む外部ツールが通常の案内コメントと歌詞を区別できるようにする。歌詞がScene境界をまたいでも、開始Sceneだけへコメントする。未解決Lyrics及びWhisperだけが認識した文はコメントへ出力しない。Scene割当前に、解決済み歌詞区間と重なるVAD-silent Sceneを自動的に有声へ昇格する。昇格後も解決済みLyricsが無音Sceneへ割り当てられた場合は内部矛盾としてエラーとし、歌詞コメントを無音Sceneへ出力してはならない。
+`include_lyrics_comments=True`の場合、解決済み歌詞行は、その`start_ms`を含む有声Sceneの検出状態コメント直後へ、Lyrics順で固定プレフィクス`// 歌詞: `と原文を連結して1回だけ出力する。Scene内の最初の歌詞及びセクションが変わる歌詞の前には`// 楽曲セクション: [元見出し]`を出力する。プレフィクスにより、人又はテンプレートを読む外部ツールが通常の案内コメント、楽曲構造及び歌詞を区別できるようにする。歌詞がScene境界をまたいでも、開始Sceneだけへコメントする。未解決Lyrics及びWhisperだけが認識した文はコメントへ出力しない。Scene割当前に、解決済み歌詞区間と重なるVAD-silent Sceneを自動的に有声へ昇格する。昇格後も解決済みLyricsが無音Sceneへ割り当てられた場合は内部矛盾としてエラーとし、歌詞コメントを無音Sceneへ出力してはならない。
 
-`include_lyrics_comments=False`の場合、歌詞コメントだけを全て省略する。検出状態、Source範囲及び編集案内コメントは維持し、SRT、Whisper整列、Scene状態又は`segments_json.lyrics`を変更しない。Cスタイルコメントは後段の`cl_japanese2json`が翻訳前に除去するため、どちらの設定でも歌詞コメントを翻訳LLM又は最終JSONへ渡してはならない。
+`include_lyrics_comments=False`の場合、歌詞コメントと楽曲セクションコメントを全て省略する。検出状態、Source範囲及び編集案内コメントは維持し、SRT、Whisper整列、Scene状態又は`segments_json.lyrics`を変更しない。Cスタイルコメントは後段の`cl_japanese2json`が翻訳前に除去するため、どちらの設定でも歌詞コメントを翻訳LLM又は最終JSONへ渡してはならない。
 
 `リップシンク`行はScene内に1個だけ置く。Source Vocalの実際の有声区間、無音区間、音素、持続音及びフレーズ境界を正本とし、追加の歌声又は台詞を生成する許可として扱わない。
 
@@ -469,7 +470,7 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
 - 改行はLFとし、各エントリの後へ空行を1個置く。非空SRTはLF2個で終わる。
 - 字幕番号は解決済み行だけで欠番のない1始まり連番とする。
 - 1歌詞行を1字幕エントリとし、歌詞行を結合又は再改行しない。
-- Sunoセクション見出し、未解決Lyrics行及びWhisperだけが認識した文を出力しない。
+- Sunoセクション見出しはSRT本文へ出力しない。未解決Lyrics行及びWhisperだけが認識した文も出力しない。
 - 解決済み行が0件の場合は空文字列を返し、WARNINGを出す。
 - SRT時刻はボーカルステム先頭を`00:00:00,000`とする絶対時刻であり、各Scene先頭からの相対時刻ではない。
 - 各解決済み行のWhisper実測`start_ms`及び`end_ms`へ`srt_time_offset`を加算してからSRT時刻へ変換する。正数は全字幕を後ろへ、負数は全字幕を前へ移動する。
@@ -482,7 +483,7 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "sample_rate": 48000,
   "total_samples": 12470400,
   "audio_duration_seconds": 259.8,
@@ -526,6 +527,8 @@ Scene本文へ歌唱開始秒又は終了秒を通常文として重複記載し
       "lyrics_index": 1,
       "source_line": 5,
       "text": "赤い林檎を　ひとつ頬張り",
+      "section_label": "[Pre-Chorus]",
+      "section_kind": "pre_chorus",
       "status": "resolved",
       "match_score": 0.82,
       "match_method": "primary",
@@ -603,7 +606,7 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 - 有声区間長と無音区間長それぞれの最小・最大・平均
 - 採用、無効及びVAD区間外として除外したWhisper word数
 - 全Lyricsと解決済みLyricsそれぞれの類似度の最小・最大・平均、primary・neighbor・resync・targeted・未解決数及び解決率
-- 入力Lyrics本文列と出力SRT本文列が同じ件数、順序及び文字列で完全一致した場合、ANSIシアン色で`self test passed`をINFO出力する。
+- 入力Lyrics本文列と出力SRT本文列が同じ件数、順序及び文字列で完全一致した場合、共通の成功ログ色と同じANSIシアン色で`self test passed`をINFO出力する。
 - 1行でも省略、追加、順序差又は文字列差がある場合、ANSI赤色で`self test failed`をERROR出力する。ただし診断を目的とする非致命エラーであり、生成済み4出力は返す。歌詞本文自体は通常ログへ出さず、総数、一致数、出力数及び最初の不一致番号だけを示す。
 
 ## 14. エラーと警告
@@ -670,11 +673,11 @@ CLVocalToPromptSegments.srt_text ─────> Preview/Save Text or subtitle 
 
 - full mixとvocal stemは同一開始時刻、同一速度及び同一楽曲長で書き出す。
 - vocal stemの先頭無音を削除しない。
-- Lyricsの`[Intro]`等は維持したまま入力できるが、見出し自体は歌詞及びSRTへ出力しない。
+- Lyricsの`[Intro]`等は維持したまま入力でき、見出し自体は歌詞及びSRTへ出力しない。`include_lyrics_comments=True`では、該当Sceneへ`// 楽曲セクション: [Intro]`として出力しMVプランナーへ渡す。
 - full mixとvocal stemの長い方を時間軸の基準にし、短い方だけを`CLAudioPadPair`の`pad_position=end`で補完する。
 - `trailing_padding_seconds`が0より大きい場合は、少なくともその端数を両トラックの末尾へ確保する。
 - 2本の音声を単一の`CLAudioPadPair`へ接続し、入力尺に応じた配線変更や循環接続を行わない。
-- Plan依存のパディング済みvocalをGeneration Profileへ戻して循環依存を作らない。
+- Audio Padのパディング済みvocalをGeneration Profile又は本ノードへ戻さず、元のvocal stemを直接接続して循環依存を作らない。
 - 最終音声はsource timelineを使用し、Source Vocalを重ねて二重ボーカルにしない。
 
 ## 17. 単体テスト要件
@@ -692,7 +695,7 @@ CLVocalToPromptSegments.srt_text ─────> Preview/Save Text or subtitle 
 - 端数尺を`ceil`し、正確な`trailing_padding_seconds`を報告する。
 - 長い範囲をScene上限内で均等に分割する。
 - 全無音、全有声、先頭だけ有声、末尾だけ有声及び交互区間を処理する。
-- Suno見出しと空行を除外し、Lyrics原文と元行番号を維持する。
+- Suno見出しと空行を歌詞本文から除外し、Lyrics原文、元行番号、セクション原文及び正規化種別を維持する。
 - NFKC、case folding、カタカナ・ひらがな及び空白・句読点の照合正規化を検証する。
 - fake Whisper結果からword timestampを抽出し、不正wordを除外する。
 - Lyricsを上から順に単調整列し、繰り返し歌詞を過去の出現へ戻して割り当てない。

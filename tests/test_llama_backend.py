@@ -237,6 +237,17 @@ class LlamaBackendTests(unittest.TestCase):
             self.assertEqual(first.close_count, 1)
             self.assertEqual(second.kwargs["type_k"], "F16")
 
+    def test_auto_chat_format_uses_gguf_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "model.gguf"
+            path.write_bytes(b"gguf")
+            backend = backend_module.LlamaBackend(
+                llama_module=FakeLlamaModule,
+                llama_class=FakeLoadedLlama,
+            )
+            loaded = self._load(backend, path, chat_format=None)
+            self.assertNotIn("chat_format", loaded.kwargs)
+
     def test_file_change_changes_signature(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "model.gguf"

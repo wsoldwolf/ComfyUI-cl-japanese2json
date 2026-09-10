@@ -108,6 +108,7 @@ class VocalPromptNodeTests(unittest.TestCase):
             ],
         )
         self.assertTrue(required["lyrics_text"][1]["forceInput"])
+        self.assertFalse(required["keep_whisper_loaded"][1]["default"])
         self.assertEqual(required["max_scene_seconds"][1]["default"], 10)
         self.assertEqual(required["language"][0], ["ja", "en", "auto"])
         self.assertTrue(
@@ -136,6 +137,40 @@ class VocalPromptNodeTests(unittest.TestCase):
             ["赤い林檎を　ひとつ頬張り", "風よ　まだ答えを告げるな"],
         )
         self.assertEqual([line.source_line for line in lines], [2, 5])
+
+    def test_suno_sections_are_classified_and_emitted_for_planner(self) -> None:
+        lines = vocal.parse_suno_lyrics(
+            "[Verse 1]\nfirst line\n[Pre-Chorus 2]\nsecond line\n"
+            "[Odd Movement]\nthird line\n"
+        )
+        self.assertEqual(
+            [(line.section_label, line.section_kind) for line in lines],
+            [
+                ("[Verse 1]", "verse"),
+                ("[Pre-Chorus 2]", "pre_chorus"),
+                ("[Odd Movement]", "custom"),
+            ],
+        )
+        scenes = [
+            {
+                "index": 1,
+                "state": "voiced",
+                "start_seconds": 0,
+                "end_seconds": 5,
+                "duration_seconds": 5,
+                "lyrics_indices": [1, 2, 3],
+            }
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                line, "resolved", 1.0, line.text, 0, 1000, 1
+            )
+            for line in lines
+        ]
+        prompt = vocal.build_prompt_text(scenes, alignments)
+        self.assertIn("// 楽曲セクション: [Verse 1]", prompt)
+        self.assertIn("// 楽曲セクション: [Pre-Chorus 2]", prompt)
+        self.assertIn("// 楽曲セクション: [Odd Movement]", prompt)
 
     def test_normalization_handles_width_case_kana_spaces_and_punctuation(self) -> None:
         self.assertEqual(
@@ -886,7 +921,7 @@ class VocalPromptNodeTests(unittest.TestCase):
                 scenes=scenes,
             )
         )
-        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["schema_version"], 4)
         self.assertEqual(payload["lyrics"][1]["status"], "unresolved")
         self.assertIn("candidate_whisper_text", payload["lyrics"][1])
         self.assertEqual(payload["trailing_padding_seconds"], 0.5)

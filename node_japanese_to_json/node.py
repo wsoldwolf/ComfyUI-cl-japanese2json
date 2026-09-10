@@ -23,6 +23,7 @@ from .debug_output import save_debug_bundle
 from .compiler.system_prompt import load_system_prompt, system_prompt_fingerprint
 from ..common.gguf.discovery import discover_model_names, resolve_model_name
 from ..common.gguf.runtime import LlamaBackend
+from ..common.logging import log_node_success
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
@@ -116,7 +117,7 @@ class CLJapaneseToJSONGGUF:
                 "flash_attn": ("BOOLEAN", {"default": True}),
                 "kv_cache_type": (["q8_0", "f16"], {"default": "q8_0"}),
                 "op_offload": ("BOOLEAN", {"default": True}),
-                "keep_model_loaded": ("BOOLEAN", {"default": True}),
+                "keep_model_loaded": ("BOOLEAN", {"default": False}),
                 "seed": (
                     "INT",
                     {"default": 1, "min": 1, "max": 4294967295},
@@ -317,7 +318,11 @@ class CLJapaneseToJSONGGUF:
     ) -> tuple[str]:
         with self._lock:
             if keep_last_prompt and self.last_json_text is not None:
-                LOGGER.info("[cl_japanese2json] Returning cached last JSON")
+                log_node_success(
+                    LOGGER,
+                    "cl_japanese2json",
+                    "returned cached last JSON",
+                )
                 return (self.last_json_text,)
 
             debug_events: list[dict[str, Any]] = []
@@ -448,8 +453,11 @@ class CLJapaneseToJSONGGUF:
                 )
                 validate_final_json(json_text)
                 self.last_json_text = json_text
-                LOGGER.info(
-                    "[cl_japanese2json] Generated %d scene(s)", len(emd.scenes)
+                log_node_success(
+                    LOGGER,
+                    "cl_japanese2json",
+                    "generated %d scene(s)",
+                    len(emd.scenes),
                 )
                 if save_debug_output is True:
                     self._save_debug_output(

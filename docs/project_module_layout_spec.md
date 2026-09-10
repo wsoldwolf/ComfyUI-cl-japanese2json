@@ -20,6 +20,8 @@
 ```text
 common/
   errors.py
+  logging.py
+  suno.py
   gguf/
     discovery.py
     runtime.py
@@ -42,6 +44,21 @@ node_vocal_to_prompt_segments/
   errors.py
   whisper_discovery.py
   whisper_runtime.py
+node_mv_prompt_planner/
+  node.py
+  debug_output.py
+  brief_parser.py
+  timeline_parser.py
+  placeholders.py
+  structures.py
+  planning.py
+  validation.py
+  renderer.py
+  prompt_loader.py
+  prompts/
+node_scene_limiter/
+  node.py
+  errors.py
 node_audio_pad/
   node.py
 node_text_file/
@@ -61,6 +78,8 @@ Pythonファイルの旧パスは内部実装であり互換対象にしない�
 - `CLAudioPad`
 - `CLAudioPadPair`
 - `CLLoadTextFile`
+- `CLMVPromptPlannerGGUF`
+- `CLSceneLimiter`
 
 ディレクトリ変更だけを理由にワークフローJSONへPythonモジュールパスを書き込まない。ワークフローは上記型名と入出力契約によって読み込まれる。
 
@@ -72,3 +91,5 @@ Pythonファイルの旧パスは内部実装であり互換対象にしない�
 2. `python -m unittest discover -v`で全回帰テストが通過する。
 3. `tests/test_workflows.py`が全同梱ワークフローを読み取り、現行入力名、縮小Markdown構文及びPlan JSON生成を検証する。
 4. ルート登録から既存の全ノード型名を取得できる。
+
+`common/logging.py`は、正常終了したCLノードをComfyUIコンソール上で識別するANSIシアン色の成功ログを共有する。各`node_*`は出力を返す直前だけこのヘルパーを呼び、途中経過を成功として表示してはならない。

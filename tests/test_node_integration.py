@@ -80,6 +80,7 @@ class NodeIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(required["model_name"][1]["default"], "model.gguf")
         self.assertEqual(required["op_offload"][0], "BOOLEAN")
+        self.assertFalse(required["keep_model_loaded"][1]["default"])
         self.assertEqual(required["steps"][1]["default"], 8)
         self.assertEqual(required["retry_max"][1]["default"], 10)
         self.assertEqual(required["retry_max"][1]["min"], -1)
@@ -102,7 +103,7 @@ class NodeIntegrationTests(unittest.TestCase):
             node._backend = backend
             with patch.object(nodes, "resolve_model_name", return_value=model), patch.object(
                 nodes, "load_system_prompt", return_value="system"
-            ):
+            ), self.assertLogs("cl_japanese2json", level="INFO") as captured:
                 result = node.compile_json(**arguments())
             self.assertIsInstance(result, tuple)
             self.assertEqual(len(result), 1)
@@ -111,6 +112,11 @@ class NodeIntegrationTests(unittest.TestCase):
             self.assertEqual(parsed["defaults"]["steps"], 8)
             self.assertEqual(len(backend.calls), 1)
             self.assertIs(backend.llm, backend)
+            output = "\n".join(captured.output)
+            self.assertIn("\x1b[96m", output)
+            self.assertIn(
+                "[cl_japanese2json] success: generated 1 scene(s)", output
+            )
 
     def test_compile_updates_comfyui_progress_during_translation(self) -> None:
         class FakeProgressBar:
@@ -235,17 +241,23 @@ class NodeIntegrationTests(unittest.TestCase):
         backend = FakeBackend()
         node._backend = backend
         node.last_json_text = '{"cached":true}\n'
-        result = node.compile_json(
-            **arguments(
-                plain_text="",
-                model_name="missing",
-                max_tokens=-1,
-                keep_last_prompt=True,
+        with self.assertLogs("cl_japanese2json", level="INFO") as captured:
+            result = node.compile_json(
+                **arguments(
+                    plain_text="",
+                    model_name="missing",
+                    max_tokens=-1,
+                    keep_last_prompt=True,
+                )
             )
-        )
         self.assertEqual(result, ('{"cached":true}\n',))
         self.assertEqual(backend.ensure_calls, [])
         self.assertEqual(backend.calls, [])
+        output = "\n".join(captured.output)
+        self.assertIn("\x1b[96m", output)
+        self.assertIn(
+            "[cl_japanese2json] success: returned cached last JSON", output
+        )
 
     def test_keep_last_without_history_runs_normally_and_saves(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

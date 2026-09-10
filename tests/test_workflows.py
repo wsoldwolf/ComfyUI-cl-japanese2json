@@ -30,6 +30,11 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     for node in workflow["nodes"]
                     if node.get("type") == "CLJapaneseToJSONGGUF"
                 ]
+                planner_nodes = [
+                    node
+                    for node in workflow["nodes"]
+                    if node.get("type") == "CLMVPromptPlannerGGUF"
+                ]
                 vocal_nodes = [
                     node
                     for node in workflow["nodes"]
@@ -54,6 +59,9 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     self.assertTrue(
                         vocal["widgets_values_named"]["include_lyrics_comments"]
                     )
+                    self.assertFalse(
+                        vocal["widgets_values_named"]["keep_whisper_loaded"]
+                    )
                     self.assertEqual(
                         vocal["widgets_values_named"]["lyrics_match_threshold"],
                         0.55,
@@ -70,6 +78,9 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 self.assertEqual(compiler["widgets_values_named"]["steps"], 8)
                 self.assertEqual(
                     compiler["widgets_values_named"]["retry_max"], 10
+                )
+                self.assertFalse(
+                    compiler["widgets_values_named"]["keep_model_loaded"]
                 )
                 retry_index = list(compiler["widgets_values_named"]).index(
                     "retry_max"
@@ -91,7 +102,11 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 self.assertEqual(len(prompt_nodes), 1)
                 source = prompt_nodes[0]["widgets_values"][0]
                 self.assertIn("# 共通プロンプト", source)
-                self.assertIn("## ショット", source)
+                if planner_nodes:
+                    self.assertEqual(len(planner_nodes), 1)
+                    self.assertIn("# 保持分析", source)
+                else:
+                    self.assertIn("## ショット", source)
                 self.assertNotRegex(source, r"\(S[1-9][0-9]*\)")
                 for line in source.splitlines():
                     if "「" in line:
@@ -100,29 +115,30 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                             r"<Subject [1-9][0-9]*>.*「",
                         )
 
-                canonical = llmj2e.translate_markdown(
-                    source,
-                    FakeLLM(n_ctx=1_000_000),
-                    "system",
-                    max_tokens=16_384,
-                )
-                emd = mdparse.parse_markdown(canonical)
-                self.assertTrue(emd.common_prompt)
-                plan = jsongen.validate_final_json(jsongen.generate_json(emd))
-                self.assertEqual(
-                    [
-                        section.split(":", 1)[0]
-                        for section in plan["shots"][0]["prompt"]
-                    ],
-                    [
-                        "subject_definitions",
-                        "summary",
-                        "retention_analysis",
-                        "detailed_description",
-                        "overall_soundscape",
-                        "non_diegetic_music",
-                    ],
-                )
+                if not planner_nodes:
+                    canonical = llmj2e.translate_markdown(
+                        source,
+                        FakeLLM(n_ctx=1_000_000),
+                        "system",
+                        max_tokens=16_384,
+                    )
+                    emd = mdparse.parse_markdown(canonical)
+                    self.assertTrue(emd.common_prompt)
+                    plan = jsongen.validate_final_json(jsongen.generate_json(emd))
+                    self.assertEqual(
+                        [
+                            section.split(":", 1)[0]
+                            for section in plan["shots"][0]["prompt"]
+                        ],
+                        [
+                            "subject_definitions",
+                            "summary",
+                            "retention_analysis",
+                            "detailed_description",
+                            "overall_soundscape",
+                            "non_diegetic_music",
+                        ],
+                    )
 
                 for node in workflow["nodes"]:
                     for value in node.get("widgets_values", []):
@@ -154,11 +170,25 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 "target_duration_seconds": 0.0,
                 "extra_padding_seconds": 0.0,
                 "pad_position": "end",
+                "h3_frame_mode": "auto_safe",
+                "h3_target_frames": 0,
             },
+        )
+        self.assertEqual(
+            [item["name"] for item in audio_pair["inputs"]],
+            [
+                "audio_a",
+                "audio_b",
+                "target_duration_seconds",
+                "extra_padding_seconds",
+                "pad_position",
+                "h3_frame_mode",
+                "h3_target_frames",
+            ],
         )
         self.assertEqual(links[3760][1:5], [2022, 0, 2023, 0])
         self.assertEqual(links[3571][1:5], [2008, 0, 2023, 1])
-        self.assertEqual(links[3761][1:5], [1700, 0, 2023, 2])
+        self.assertNotIn(3761, links)
         self.assertNotIn(3779, links)
         self.assertNotIn(3790, links)
         self.assertEqual(links[3763][1:5], [2023, 0, 2024, 0])

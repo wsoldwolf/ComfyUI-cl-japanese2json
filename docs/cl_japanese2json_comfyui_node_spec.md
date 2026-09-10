@@ -2,15 +2,15 @@
 
 ## 1. 目的
 
-本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能及びボーカルステムからScene/SRTを生成する補助機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、ボーカル補助ノードの詳細な正本は`docs/cl_vocal2promptseg_spec.md`である。
+本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/cl_audio_pad_spec.md`、`docs/cl_text_file_spec.md`、`docs/cl_vocal2promptseg_spec.md`、`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_mv_prompt_planner_song_bible_spec.md`及び`docs/cl_scene_limiter_spec.md`である。
 
 本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、`prompt_prefix`へ格納するCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
 - パッケージ名: `ComfyUI-cl-japanese2json`
-- ノードクラス: `CLJapaneseToJSONGGUF`, `CLAudioPad`, `CLAudioPadPair`, `CLVocalToPromptSegments`, `CLLoadTextFile`
-- 表示名: `CL Japanese to JSON (GGUF)`, `CL Audio Pad (PCM Silence)`, `CL Audio Pad Pair (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`
+- ノードクラス: `CLJapaneseToJSONGGUF`, `CLMVPromptPlannerGGUF`, `CLSceneLimiter`, `CLAudioPad`, `CLAudioPadPair`, `CLVocalToPromptSegments`, `CLLoadTextFile`
+- 表示名: `CL Japanese to JSON (GGUF)`, `CL MV Prompt Planner (GGUF)`, `CL Scene Limiter (Reduced Markdown)`, `CL Audio Pad (PCM Silence)`, `CL Audio Pad Pair (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`
 - カテゴリ: `MiniMax H3/Prompt Tools`, `MiniMax H3/Audio Tools`
 - 出力ノードではない。
 - ComfyUI本体及び他の`custom_nodes`を変更しない。
@@ -20,9 +20,11 @@
 
 `llama-cpp-python`又は`openai-whisper`が存在しない環境でも、カスタムノードのimportと登録は成功させる。それぞれを必要とするノードの実行時にだけ手動導入を案内する`ModelLoadError`又は`WhisperLoadError`を発生させる。パッケージ又はモデルを自動インストール、更新若しくはダウンロードしてはならない。
 
-`CLAudioPad`は`llama-cpp-python`を使用せず、ComfyUI標準`AUDIO`テンソルのAPIだけで動作させる。Contex-Loopがなくてもノード登録を成功させ、任意の`H3_CHAIN_PLAN`入力を接続した場合だけその辞書を参照する。
+`CLAudioPad`は`llama-cpp-python`を使用せず、ComfyUI標準`AUDIO`テンソルのAPIだけで動作させる。Contex-Loopがなくてもノード登録を成功させ、`H3_CHAIN_PLAN`入力を持たない。H3向け目標尺は固定24fpsのUIパラメータだけから決定し、Plan生成経路との循環依存を構造的に避ける。
 
 `CLLoadTextFile`はバックエンドからユーザー指定パスを開かない。ComfyUIブラウザ拡張が任意のローカル場所から選択又はD&Dされたファイルを読み、シリアライズ対象の非表示入力へ内容を格納する。`ComfyUI/input`へのコピー、アップロード及び本文プレビューを行わない。
+
+登録済み各ノードは、全検証を終えて出力tupleを返す直前だけ、`common/logging.py`を介してANSIシアン色の`[cl_*] success: ...`完了ログを記録する。LLM推論開始、部分Scene確定、ファイル復号前、音声検証前等の中間状態を成功としてはならない。例外終了では成功ログを出さない。`CL Vocal to Prompt Segments`はLyricsとSRTの完全一致を表す既存のシアン色`self test passed`をこの成功表示として維持し、不一致時の赤色`self test failed`をシアンで上書きしない。
 
 ## 3. ノード登録
 
@@ -31,6 +33,8 @@
 ```python
 NODE_CLASS_MAPPINGS = {
     "CLJapaneseToJSONGGUF": CLJapaneseToJSONGGUF,
+    "CLMVPromptPlannerGGUF": CLMVPromptPlannerGGUF,
+    "CLSceneLimiter": CLSceneLimiter,
     "CLAudioPad": CLAudioPad,
     "CLAudioPadPair": CLAudioPadPair,
     "CLVocalToPromptSegments": CLVocalToPromptSegments,
@@ -39,6 +43,8 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLJapaneseToJSONGGUF": "CL Japanese to JSON (GGUF)",
+    "CLMVPromptPlannerGGUF": "CL MV Prompt Planner (GGUF)",
+    "CLSceneLimiter": "CL Scene Limiter (Reduced Markdown)",
     "CLAudioPad": "CL Audio Pad (PCM Silence)",
     "CLAudioPadPair": "CL Audio Pad Pair (PCM Silence)",
     "CLVocalToPromptSegments": "CL Vocal to Prompt Segments",
@@ -61,6 +67,10 @@ OUTPUT_NODE = False
 `compile_json()`は1要素tuple`(json_text,)`を返す。
 
 `CLVocalToPromptSegments`のクラスメタデータ、4出力、入力順序、Whisper探索、PCM解析、Lyrics整列、SRT及びテンプレート生成規則は`docs/cl_vocal2promptseg_spec.md`に従う。
+
+`CLMVPromptPlannerGGUF`及び`CLSceneLimiter`の契約は、それぞれ`docs/cl_mv_prompt_planner_comfyui_node_spec.md`及び`docs/cl_scene_limiter_spec.md`に従う。MVプランナーのSong Bible v2と構造化入力、直前Scene状態、重複排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`に従う。
+
+`CLAudioPad`及び`CLAudioPadPair`の詳細契約は`docs/cl_audio_pad_spec.md`、`CLLoadTextFile`の詳細契約は`docs/cl_text_file_spec.md`に従う。本書の4.2、4.2.1及び4.3は共通仕様から参照するための概要であり、相違する場合は各詳細仕様を優先する。
 
 `CLLoadTextFile`のクラスメタデータは次である。
 
@@ -92,7 +102,7 @@ requiredの順序は次のとおりである。
 | `flash_attn` | BOOLEAN | True | True/False |
 | `kv_cache_type` | COMBO | `q8_0` | `q8_0`, `f16` |
 | `op_offload` | BOOLEAN | True | True/False |
-| `keep_model_loaded` | BOOLEAN | True | True/False |
+| `keep_model_loaded` | BOOLEAN | False | True/False |
 | `seed` | INT | 1 | 1～4294967295 |
 | `keep_last_prompt` | BOOLEAN | False | True/False |
 | `steps` | INT | 8 | 1～10000 |
@@ -135,12 +145,13 @@ requiredは次のとおりである。
 | `target_duration_seconds` | FLOAT | 0.0 | 0～86400、step 0.001。0はUI目標を無効化 |
 | `extra_padding_seconds` | FLOAT | 0.0 | 0～3600、step 0.001 |
 | `pad_position` | COMBO | `end` | `end`, `start`, `both` |
+| `h3_frame_mode` | COMBO | `auto_safe` | `auto_safe`, `exact_frames`, `disabled` |
+| `h3_target_frames` | INT | 0 | 0～2,073,600。`exact_frames`時だけ使用 |
 
 optionalは次である。
 
 | 名前 | 型 | 用途 |
 | --- | --- | --- |
-| `plan` | H3_CHAIN_PLAN | Contex-Loopの完成フレーム数とfpsから必要な音声長を自動計算 |
 | `match_audio` | AUDIO | 基準トラックの継続時間を最小目標に追加し、短い整列済みトラックの末尾を無音補完 |
 
 入力波形は`[batch, channels, samples]`でなければならない。サンプルレート、波形dtype、デバイス、バッチ数及びチャンネル数を維持し、新規領域をPCM値`0.0`で埋める。入力音声を切り詰めたり、リサンプルしたり、音量を変更してはならない。
@@ -149,16 +160,17 @@ optionalは次である。
 
 ```text
 ui_target_samples = round(target_duration_seconds * sample_rate)
-plan_target_samples = round(total_delivered_frames / fps * sample_rate)
 match_target_samples = round(match_audio_samples / match_audio_sample_rate * sample_rate)
-base_target_samples = max(original_samples, ui_target_samples, plan_target_samples, match_target_samples)
+preliminary_target_samples = max(original_samples, ui_target_samples, match_target_samples)
+h3_target_samples = resolve_h3_frame_mode(preliminary_target_samples, 24fps)
+base_target_samples = max(preliminary_target_samples, h3_target_samples)
 output_samples = base_target_samples + round(extra_padding_seconds * sample_rate)
 padding_samples = output_samples - original_samples
 ```
 
-`plan`がない場合の`plan_target_samples`、`match_audio`がない場合の`match_target_samples`はそれぞれ0である。Planにfpsがない場合は24fpsを既定とする。`match_audio`は波形を混合、連結又は出力せず、その継続時間だけを入力音声のサンプルレートへ換算して最小目標に使用する。基準より入力音声が長い場合も入力を切り詰めてはならない。`target_duration_seconds=0`、Planなし、`match_audio`なし、`extra_padding_seconds=0`なら入力AUDIOを同一オブジェクトのまま返す。
+`auto_safe`は基準尺を整数秒へ切り上げ、24fps換算値へ16フレームを加える。これはVocalノードの整数秒Sceneタイムラインと、コンパイラが保証する0～16フレームの格子補償を覆う。`exact_frames`は`h3_target_frames`を絶対目標とし、`disabled`はH3目標を0とする。`match_audio`は波形を混合、連結又は出力せず、その継続時間だけを入力音声のサンプルレートへ換算して最小目標に使用する。基準より入力音声が長い場合も入力を切り詰めてはならない。
 
-MiniMax H3 Audio Tracksへfull mixとvocal stemを渡す場合は、後述の`CLAudioPadPair`を使用する。Planへ戻るGeneration Profileを構成するLip-Sync OptionsにはPlan依存のパディング済みAUDIOを接続せず、元のvocal stemを接続してComfyUIの循環依存を避ける。
+MiniMax H3 Audio Tracksへfull mixとvocal stemを渡す場合は、後述の`CLAudioPadPair`を使用する。Lip-Sync Options及びVocal解析にはパディング済みAUDIOを戻さず、元のvocal stemを接続する。
 
 `end`は原音の開始位置を維持して末尾へ全量を追加する。`start`は先頭、`both`は前後へほぼ等分し、奇数サンプルの余りを末尾へ置く。リップシンク用source trackでは`end`を既定かつ推奨とし、`start`と`both`は原音の時刻を移動させることをtooltipで明示する。
 
@@ -168,13 +180,13 @@ Python logger名及びユーザー可視ログ接頭辞は`cl_audiopad`とし、
 
 ### 4.2.1 CL Audio Pad Pair (PCM Silence)
 
-requiredは`audio_a`, `audio_b`, `target_duration_seconds`, `extra_padding_seconds`, `pad_position`、optionalは`plan: H3_CHAIN_PLAN`とする。2本のAUDIOは同じ開始時刻と速度を持つ整列済みトラックでなければならない。
+requiredは`audio_a`, `audio_b`, `target_duration_seconds`, `extra_padding_seconds`, `pad_position`, `h3_frame_mode`, `h3_target_frames`とし、optional入力を持たない。2本のAUDIOは同じ開始時刻と速度を持つ整列済みトラックでなければならない。
 
-各入力の元尺、UI目標尺及びPlan完成尺の最大値を共通基準尺とし、`extra_padding_seconds`を一度加えた後、各入力のサンプルレートへ換算する。短い入力だけへPCM値`0.0`を追加し、長い入力を切り詰めてはならない。入力ごとのdtype、デバイス、バッチ、チャンネル及びサンプルレートを維持する。
+各入力の元尺、UI目標尺及びH3フレーム目標の最大値を共通基準尺とし、`extra_padding_seconds`を一度加えた後、各入力のサンプルレートへ換算する。短い入力だけへPCM値`0.0`を追加し、長い入力を切り詰めてはならない。入力ごとのdtype、デバイス、バッチ、チャンネル及びサンプルレートを維持する。
 
 出力は`padded_audio_a`, `padded_audio_b`, `original_duration_a`, `original_duration_b`, `aligned_duration`, `padding_added_a`, `padding_added_b`, `status`の順とする。同一サンプルレートの入力では2出力のサンプル数を完全一致させる。異なるサンプルレートでは同じ時間尺へ個別換算し、リサンプルは行わない。
 
-推奨接続は、`audio_a=full mix`、`audio_b=vocal stem`、両出力を同じ順序で`MiniMax H3 Audio Tracks`へ渡す構成とする。どちらが長いかによって配線を変更してはならない。Lip-Sync OptionsにはPlan依存の出力ではなく元のvocal stemを接続する。
+推奨接続は、`audio_a=full mix`、`audio_b=vocal stem`、両出力を同じ順序で`MiniMax H3 Audio Tracks`へ渡す構成とする。どちらが長いかによって配線を変更してはならない。Lip-Sync Options及びVocal解析には元のvocal stemを接続する。
 
 ### 4.3 CL Load Text File (Drag & Drop)
 
@@ -865,6 +877,8 @@ set "FORCE_CMAKE=1"
 - workflows内の新構文
 - `CLAudioPad`の登録、UI既定値及び出力メタデータ
 - `CLVocalToPromptSegments`の登録、4出力、UI既定値及び任意依存の遅延import
+- `CLMVPromptPlannerGGUF`の登録、固定タイムライン入力、モデル可変GGUF計画及び部分再試行
+- `CLSceneLimiter`の登録、先頭N Scene抽出、番号コメント境界及び入力文字列保持
 - `CLLoadTextFile`の登録、`WEB_DIRECTORY`、1出力及び非表示transport入力
 - テキストファイルのUTF-8/BOM復号、LF正規化、空ファイル、Base64/NUL/容量エラー及び内容依存キャッシュ指紋
 - フロントエンドがFile APIとD&Dを使用し、upload API又は本文プレビューを持たないこと
@@ -902,6 +916,7 @@ READMEは少なくとも次を含む。
 - 全UI入力
 - PCM無音パディングノードのPlan自動計算、基準音声尺、UI目標、追加マージン及び接続例
 - ボーカルステム補助ノードのWhisper手動導入、ローカルモデル配置、各入力・出力、精度上の制約及びSource Timeline接続例
+- MVプランナーノード及びScene制限ノードの接続、各入力・出力、安全な境界規則
 - 任意パスD&Dテキストノードの接続、UTF-8・容量制約、ワークフロー埋め込み、非自動再読込及び機密性注意
 - デバッグ出力と機密性注意
 - テスト手順
@@ -924,5 +939,7 @@ READMEは少なくとも次を含む。
 - `llama-cpp-python`を自動変更しない。
 - H3 Plan、基準音声又はUI秒数に対する不足音声を`CLAudioPad`がサンプル単位で自動計算し、原音を切らずPCM値0.0で補完する。
 - `CLVocalToPromptSegments`がWhisperとモデルを自動取得せず、ボーカルステムとSuno Lyricsから有声・無音Scene、コメント、SRT及び検証JSONを生成する。
+- `CLMVPromptPlannerGGUF`が固定タイムラインを変更せず、歌詞とユーザー設定からH3向けショットを生成する。
+- `CLSceneLimiter`が日本語縮小Markdownの先頭N Sceneと確実に所属するコメントを原文のまま保持し、他のトップレベルディレクティブを削除しない。
 - `CLLoadTextFile`が任意のローカル場所からブラウザで選択したUTF-8本文を`ComfyUI/input`へコピーせずSTRINGとして返し、外部パスをバックエンドで開かない。
 - 全自動テストが成功する。

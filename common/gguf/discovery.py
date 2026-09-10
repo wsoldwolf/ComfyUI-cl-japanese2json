@@ -11,7 +11,6 @@ from typing import Any
 from ..errors import ModelDiscoveryError
 
 
-LOGGER = logging.getLogger("cl_japanese2json")
 NO_MODELS_PLACEHOLDER = "(no GGUF models found)"
 
 
@@ -31,7 +30,12 @@ def _folder_paths_module(folder_paths_module: Any | None = None) -> Any | None:
     return folder_paths
 
 
-def model_roots(folder_paths_module: Any | None = None) -> list[ModelRoot]:
+def model_roots(
+    folder_paths_module: Any | None = None,
+    *,
+    log_name: str = "cl_japanese2json",
+) -> list[ModelRoot]:
+    logger = logging.getLogger(log_name)
     folder_paths = _folder_paths_module(folder_paths_module)
     if folder_paths is None:
         return []
@@ -46,8 +50,9 @@ def model_roots(folder_paths_module: Any | None = None) -> list[ModelRoot]:
         try:
             llm_paths = folder_paths.get_folder_paths("LLM")
         except Exception as exc:
-            LOGGER.warning(
-                "[cl_japanese2json] Could not read additional ComfyUI LLM model paths: %s",
+            logger.warning(
+                "[%s] Could not read additional ComfyUI LLM model paths: %s",
+                log_name,
                 exc,
             )
             llm_paths = []
@@ -70,7 +75,9 @@ def model_roots(folder_paths_module: Any | None = None) -> list[ModelRoot]:
     return unique
 
 
-def _safe_files(root: ModelRoot) -> list[tuple[ModelRoot, Path, str]]:
+def _safe_files(
+    root: ModelRoot, *, log_name: str = "cl_japanese2json"
+) -> list[tuple[ModelRoot, Path, str]]:
     if not root.path.is_dir():
         return []
     results: list[tuple[ModelRoot, Path, str]] = []
@@ -90,17 +97,21 @@ def _safe_files(root: ModelRoot) -> list[tuple[ModelRoot, Path, str]]:
             except (OSError, RuntimeError, ValueError):
                 continue
     except OSError as exc:
-        LOGGER.warning(
-            "[cl_japanese2json] Could not scan GGUF root %s: %s", root.path, exc
+        logging.getLogger(log_name).warning(
+            "[%s] Could not scan GGUF root %s: %s", log_name, root.path, exc
         )
     return results
 
 
-def discover_model_map(folder_paths_module: Any | None = None) -> dict[str, Path]:
+def discover_model_map(
+    folder_paths_module: Any | None = None,
+    *,
+    log_name: str = "cl_japanese2json",
+) -> dict[str, Path]:
     discovered: list[tuple[ModelRoot, Path, str]] = []
     seen_paths: set[str] = set()
-    for root in model_roots(folder_paths_module):
-        for entry in _safe_files(root):
+    for root in model_roots(folder_paths_module, log_name=log_name):
+        for entry in _safe_files(root, log_name=log_name):
             real_key = os.path.normcase(str(entry[1]))
             if real_key in seen_paths:
                 continue
@@ -122,32 +133,48 @@ def discover_model_map(folder_paths_module: Any | None = None) -> dict[str, Path
             display_id = f"[{root.identifier}] {relative}"
         model_map[display_id] = path
 
-    LOGGER.info("[cl_japanese2json] Discovered %d GGUF model(s)", len(model_map))
+    logging.getLogger(log_name).info(
+        "[%s] Discovered %d GGUF model(s)", log_name, len(model_map)
+    )
     return model_map
 
 
-def discover_model_names(folder_paths_module: Any | None = None) -> list[str]:
-    names = list(discover_model_map(folder_paths_module))
+def discover_model_names(
+    folder_paths_module: Any | None = None,
+    *,
+    log_name: str = "cl_japanese2json",
+) -> list[str]:
+    names = list(discover_model_map(folder_paths_module, log_name=log_name))
     return names or [NO_MODELS_PLACEHOLDER]
 
 
-def search_locations(folder_paths_module: Any | None = None) -> str:
-    roots = model_roots(folder_paths_module)
+def search_locations(
+    folder_paths_module: Any | None = None,
+    *,
+    log_name: str = "cl_japanese2json",
+) -> str:
+    roots = model_roots(folder_paths_module, log_name=log_name)
     if not roots:
         return "ComfyUI/models/LLM/GGUF (folder_paths is unavailable)"
     return ", ".join(str(root.path) for root in roots)
 
 
-def resolve_model_name(model_name: str, folder_paths_module: Any | None = None) -> Path:
+def resolve_model_name(
+    model_name: str,
+    folder_paths_module: Any | None = None,
+    *,
+    log_name: str = "cl_japanese2json",
+) -> Path:
     if model_name == NO_MODELS_PLACEHOLDER:
         raise ModelDiscoveryError(
-            f"No GGUF models were found. Place a text GGUF below: {search_locations(folder_paths_module)}"
+            "No GGUF models were found. Place a text GGUF below: "
+            f"{search_locations(folder_paths_module, log_name=log_name)}"
         )
-    model_map = discover_model_map(folder_paths_module)
+    model_map = discover_model_map(folder_paths_module, log_name=log_name)
     path = model_map.get(model_name)
     if path is None:
         raise ModelDiscoveryError(
             f"Selected GGUF model {model_name!r} is no longer available below: "
-            f"{search_locations(folder_paths_module)}"
+            f"{search_locations(folder_paths_module, log_name=log_name)}"
         )
     return path

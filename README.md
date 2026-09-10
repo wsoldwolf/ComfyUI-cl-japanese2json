@@ -1,6 +1,6 @@
 # ComfyUI-cl-japanese2json
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をH3 Plan又は最長入力へ無音補完します。
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownの先頭Nシーンだけをコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -13,6 +13,7 @@ LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻�
 ```text
 common/
   errors.py
+  logging.py
   gguf/
     discovery.py
     runtime.py
@@ -34,6 +35,17 @@ node_vocal_to_prompt_segments/
   errors.py
   whisper_discovery.py
   whisper_runtime.py
+node_mv_prompt_planner/
+  node.py
+  brief_parser.py
+  timeline_parser.py
+  planning.py
+  validation.py
+  renderer.py
+  prompts/
+node_scene_limiter/
+  node.py
+  errors.py
 node_audio_pad/
   node.py
 node_text_file/
@@ -93,9 +105,11 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。サブディレクトリも再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。ファイル名に`mmproj`を含むGGUFは除外します。
 3. 使用環境向けの`llama-cpp-python`がComfyUIのPythonからimportできることを確認します。
 4. Vocal区間・SRT生成を使用する場合は、OpenAI WhisperをComfyUIのPython環境へユーザー自身で導入し、任意の公式`.pt`チェックポイントを`ComfyUI/models/whisper/`以下へ配置します。モデル名指定による暗黙ダウンロードは使用しません。
-5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Vocal to Prompt Segments`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
+5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Vocal to Prompt Segments`、`CL MV Prompt Planner (GGUF)`、`CL Scene Limiter (Reduced Markdown)`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
 
 モデルの自動ダウンロードは行いません。
+
+正常に出力を返したノードは、ComfyUIコンソールへ`[cl_*] success: ...`形式の完了メッセージをANSIシアン色で出力します。途中経過のINFO、注意が必要なWARNING及び停止するERRORとは別のため、長いワークフローでも各CLノードの完了を判別できます。`CL Vocal to Prompt Segments`は入力Lyricsと出力SRTが完全一致した場合、従来どおりシアン色の`self test passed`を成功判定として出力します。
 
 ## 任意パスのテキストファイルを読み込む
 
@@ -106,7 +120,9 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 - UTF-8及びUTF-8 BOMに対応し、改行をLFへ正規化します。
 - 最大サイズは16 MiBです。UTF-8でないファイル、NULを含むバイナリ又は破損した埋め込みデータはエラーにします。
 - 本文はBase64としてワークフローJSONへ保存されます。ワークフロー単体で再実行できますが、機密テキストを含むワークフローを共有しないでください。
-- 実行ログは`[cl_textfile]`接頭辞で、ファイル名、バイト数及び文字数だけを出します。本文や絶対パスは出しません。
+- 実行ログはシアン色の`[cl_textfile] success:`接頭辞で、ファイル名、バイト数及び文字数だけを出します。本文や絶対パスは出しません。
+
+詳細な入力契約、ブラウザとバックエンドの信頼境界、キャッシュ及びエラー条件は[CL Load Text File仕様書](docs/cl_text_file_spec.md)を参照してください。
 
 ## 入力Markdown
 
@@ -458,7 +474,7 @@ Contex-Loopを`anchor_mode=head`で使うと、継続Sceneのraw先頭からcont
 | `flash_attn` | Flash Attentionを切り替えます。 |
 | `kv_cache_type` | K/Vキャッシュ型。`q8_0`又は`f16`。 |
 | `op_offload` | ホスト側テンソル演算のデバイスオフロード。 |
-| `keep_model_loaded` | 成功後に同じ設定のモデルを再利用します。 |
+| `keep_model_loaded` | 成功後に同じ設定のモデルを再利用します。既定`False`ではH3生成前にllama.cppモデルとCUDAキャッシュを解放します。 |
 | `seed` | 翻訳seed。再試行ごとに決定論的に変更します。 |
 | `keep_last_prompt` | 最後に検証成功したJSONがあれば現在の入力を無視して返します。 |
 | `steps` | JSONの`defaults.steps`。既定値8、範囲1～10000。翻訳には影響しません。 |
@@ -491,7 +507,7 @@ system promptは`node_japanese_to_json/compiler/prompts/llmj2e_qwen3_8b_system_p
 
 ## ボーカルステムからScene・SRTを生成
 
-`CL Vocal to Prompt Segments`へ、フルミックスと同じ開始時刻・同じ全長で書き出したボーカルステムと、Suno Lyrics形式のテキストを接続します。`[Intro]`、`[Verse]`、`[Chorus]`等の行は見出しとして無視され、それ以外の歌詞行をWhisperの単語時刻へ上から順に対応付けます。
+`CL Vocal to Prompt Segments`へ、フルミックスと同じ開始時刻・同じ全長で書き出したボーカルステムと、Suno Lyrics形式のテキストを接続します。`[Intro]`、`[Verse]`、`[Chorus]`等の行は歌詞本文とSRTから除外しますが、後続歌詞の楽曲セクションとして保持します。それ以外の歌詞行をWhisperの単語時刻へ上から順に対応付けます。
 
 ```text
 Load Audio (vocal stem) ──> CL Vocal to Prompt Segments.vocal_audio
@@ -510,8 +526,8 @@ CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
 | `device` | `auto`、`cuda`、`cpu`。明示`cuda`が利用不能ならエラーです。 |
 | `condition_on_previous_text` | Whisper内部窓間で直前の認識文脈を維持します。既定TrueはWhisper CLIと同じで、長尺・グロウル歌唱の連続認識を優先します。反復幻覚が増える音源だけFalseを試します。 |
 | `srt_time_offset` | 生成SRTの全開始・終了時刻をミリ秒単位で一律移動します。既定0、正数は遅延、負数は前進です。字幕が0ms未満又は入力音声の終端を超える値はエラーで停止します。 |
-| `include_lyrics_comments` | 既定True。有効時は解決済みLyricsを対応する有声Sceneへ`// 歌詞: ...`として記録します。Falseでは歌詞コメントだけを省略します。 |
-| `keep_whisper_loaded` | 同じモデルとdeviceを次回も再利用します。 |
+| `include_lyrics_comments` | 既定True。有効時は解決済みLyricsを対応する有声Sceneへ`// 歌詞: ...`、Suno見出しを`// 楽曲セクション: [...]`として記録します。Falseでは両コメントを省略します。 |
+| `keep_whisper_loaded` | 同じモデルとdeviceを次回も再利用します。既定`False`ではH3生成前にWhisperモデルとCUDAキャッシュを解放します。 |
 | `max_scene_seconds` | 1 Sceneの最大整数秒。既定10秒です。 |
 | `silence_threshold_dbfs` | 解析窓を有声候補とみなすRMS閾値。分離残留音が多い場合は0へ、弱い歌声を取りこぼす場合は-100へ近づけます。 |
 | `analysis_window_ms` | PCM有声判定の解析窓。 |
@@ -529,7 +545,7 @@ CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
 - `segments_json`: サンプル精度の検出区間、照合スコア、整数秒Scene及び末尾パディング量を含む検証用JSON。
 - `status`: 解決数、Scene数、入力尺及び必要パディング量の1行要約。
 
-Scene番号コメントは`// シーン 1`から出力順に連番となり、コンパイラの`Scene N`エラーと入力箇所を照合するために使用できます。歌詞コメントには固定プレフィクス`// 歌詞: `が付くため、通常の編集案内と区別できます。これらのコメントは編集用テンプレートだけに存在し、`cl_japanese2json`が翻訳前に除去するため、翻訳LLM及び最終JSONには渡りません。
+Scene番号コメントは`// シーン 1`から出力順に連番となり、コンパイラの`Scene N`エラーと入力箇所を照合するために使用できます。歌詞コメントには固定プレフィクス`// 歌詞: `、対応するSuno見出しには`// 楽曲セクション: [Chorus]`の形式が付くため、通常の編集案内と区別できます。これらのコメントはMVプランナーの構造入力として利用でき、`cl_japanese2json`へ直接渡した場合は翻訳前に除去されるため最終JSONには入りません。
 
 冒頭歌詞の認識脱落を減らすため、セクション見出しを除く先頭Lyricsを最大12行・160文字だけWhisperの最初の復号ヒントに使用します。全文を渡したり後続窓へ初期ヒントを反復したりはしません。最初の歌詞アンカーまでは60秒探索でき、解決後はコード側の20秒上限内で最大類似度の候補を確定します。このため、現在位置のグロウル誤認識を越えて約50秒後の反復Chorusへ飛ぶ問題を抑えつつ、長いイントロを探索できます。同じ歌詞が20秒内で反復する場合は直後のLyricsも一致する候補を選び、現在候補が次行へ明らかに強く一致する場合は次行用に残すため、Chorus中間の連鎖的欠落を防ぎます。20秒内で整列を再開できない場合は、入力中で一意な8文字以上の歌詞が0.8以上で一致し、後続歌詞の順序も確認できた場合だけ広域再同期します。通常閾値で未解決になった行は、前後の歌詞が確定して検索範囲を安全に限定できる場合だけ`lyrics_neighbor_threshold`で再照合します。それでも前後アンカーに挟まれた連続未解決区間が残る場合は、そのPCM範囲だけを最大12秒・2秒重複の短い窓へ分割してWhisperへ再送します。各窓の`initial_prompt`には、Whisperが現在歌詞を既出と誤解しないよう、その窓より前の歌詞だけを直前文脈として与えます。重複窓のwordを時刻で統合してから単調整列するため、グロウルを約30秒の一つの発話へ結合する現象を抑えます。全尺を再推論せず、回収できた実word timestampだけを`targeted`として採用します。整列方法を問わず、解決済みLyricsの実時刻と重なるVAD-silent Sceneは有声へ昇格します。これにより、Whisper wordの中点は有声区間内でも歌詞開始時刻だけが整数秒Scene境界の直前になる場合に、解決済み歌詞が無声Sceneへ割り当てられることを防ぎます。
 
@@ -541,6 +557,52 @@ Lyrics整列によって短いVAD-silent区間が有声へ昇格した場合は�
 
 テンプレートの`ソースボーカル`は`<Audio 1>`ではなく、Contex-LoopのSource Vocal入力です。ボーカルステムを最終音声へ重ねず、ロック済みフルミックスをSource Timelineとして維持します。入力末尾が整数秒でない場合は、フルミックスとボーカルステムを`CL Audio Pad Pair`へ接続し、`pad_position=end`で長い入力と同じ計画尺まで補完してください。
 
+## 歌詞からMVショットを計画
+
+`CL MV Prompt Planner (GGUF)`はVocalノードの`prompt_text`を受け取り、Scene順、秒数、ソース範囲、Sunoセクション、歌詞、リップシンク及び音響を固定したまま、ショットの構図、人物動作、環境とカメラ運動だけを計画します。
+
+歌詞を映像へ反映する場合は、上流の`include_lyrics_comments=True`を使用します。Falseでは時間固定の計画はできますが、プランナーへSunoセクションと歌詞は渡りません。
+
+```text
+CL Vocal to Prompt Segments.prompt_text
+  └─> CL MV Prompt Planner (GGUF).prompt_segments
+
+Planning Markdown STRING
+  └─> CL MV Prompt Planner (GGUF).planning_markdown
+
+CL MV Prompt Planner (GGUF).planned_markdown
+  └─> CL Japanese to JSON (GGUF).plain_text
+```
+
+Planning Markdownには既存文法の`# サブジェクト`、任意の`# 保持分析`及び任意の`# 共通プロンプト`だけを書きます。Scene、Shot及び音響はVocalノード出力から固定されるため重ねて記述しません。`chat_format=auto`はGGUF内のchat templateを使用し、Qwen系とGemma系をモデル名から切り替える通常設定です。メタデータが不完全なGGUFに限り`qwen`又は`gemma`を明示します。
+
+プランナーは最初に楽曲全体のsong bibleを作り、その後`scenes_per_batch`件ずつSceneを計画します。LLMへJSONを生成させず、固定フィールドの行指向プロトコルだけを返させます。検証に失敗しても正常Sceneを保持し、欠落又は不正なSceneだけを、前回のエラー内容と正確な要求Scene IDを添えて新しいseedで再送します。連続動作は`ACTION 1`からの連番で受け取り、Pythonが順序を維持した別バレットへ変換し、`最初に、`、`次に、`、`最後に、`を付けてH3へ時間順を明示します。最終出力は既存コンパイラで再検証される日本語縮小Markdownです。
+
+プランナーはv0.2.0から、Planning MarkdownをPythonで`hard_requirements`配列へ、Sunoセクションと歌詞を`section_sources`及びScene別`lyric_groups`へ構造化してLLMへ渡します。Song Bibleは創作ガイドだけを生成し、固定条件を言い換えません。各Sceneには該当セクションのモチーフと、直前に検証済みのSceneの最終構図・動作・環境・カメラだけを渡します。完全一致する重複Sceneは後のSceneだけを再試行します。重複後は未解決Sceneを一件ずつ時間順に再送し、直前Sceneを即座に継承します。禁止例本文は模倣を誘発するため再掲せず、既知の重複元と直前Sceneをcompact fingerprintとして渡します。Pythonが未使用のShot/ACTION件数を`duplicate_repair`で強制し、低temperatureでseedを変えても同じ応答になる連鎖を避けます。
+
+batch内の全Sceneが不正な場合も、以降は一件ずつ再送します。8BモデルがCAMERA書式の説明語`type`、`amplitude`、`speed`を値として出した場合は、Pythonが有効な具体値を`camera_protocol_repair`として付け、Scene固有の診断だけで修復します。
+
+任意入力`camera_guard`の既定`warn`は、高確度のcamera typeと説明の矛盾を黄色のWARNINGとして報告しますが、生成文を黙って変更しません。`strict`では該当Sceneだけを再試行します。人物が物を「押す」「引く」等の一般動作はカメラ判定に使用しません。
+
+任意入力`vocal_guard`の既定`warn`は、Timelineと矛盾する発声cueを黄色のWARNINGとして報告し、Sceneを保持します。`strict`では該当Sceneだけを再試行します。有声Sceneの「歌う」「歌い」「歌唱」「口パク」は、固定済みSource Vocalへの視覚同期として常に許可されます。無声Sceneの歌唱や、固定音響にない叫び、囁き、うめき、語り等がguard対象です。
+
+`save_debug_output=True`にすると、各独立チャットのsystem prompt、送信要求JSON、行指向の生応答、解析済みデータ、検証結果、カメラ警告、重複元Sceneと、回収済み・未解決Sceneを含む最終部分状態を`ComfyUI/output/cl_mv_prompt_planner_debug/`へ保存します。失敗時にも保存されるため、同じScene IDをモデルが繰り返したのか、固定フィールドが欠落したのか、個別Scene検証で除外されたのかを区別できます。入力と歌詞を含むため共有前に確認してください。詳細は[MV Prompt Plannerコア仕様](docs/cl_mv_prompt_planner_spec.md)、[ComfyUIノード仕様](docs/cl_mv_prompt_planner_comfyui_node_spec.md)及び[Song Bible仕様](docs/cl_mv_prompt_planner_song_bible_spec.md)を参照してください。
+
+## テスト生成用にScene数を制限
+
+`CL Scene Limiter (Reduced Markdown)`は、日本語縮小Markdownの先頭から`scene_limit_count`個のSceneだけを残します。LLMや翻訳を使わず、保持するSceneと、`# サブジェクト`、`# 保持分析`、`# 共通プロンプト`を元の文字列のまま出力します。
+
+```text
+縮小Markdown ──> CL Scene Limiter (Reduced Markdown).reduced_markdown
+
+CL Scene Limiter (Reduced Markdown).limited_markdown
+  └─> CL Japanese to JSON (GGUF).plain_text
+```
+
+`// シーン N`が対応する`# シーン`の直前にある場合は番号コメントもScene境界として扱うため、除外したSceneの番号だけが残ることはありません。保持Scene内の`// 検出状態`、`// 楽曲セクション`、`// 歌詞`及びブロックコメントは変更しません。明示的な番号コメントがない入力では、関連先を確定できない`# シーン`直前のコメントを安全のため残します。
+
+`scene_limit_count`は現行コンパイラの上限に合わせて1～128です。実際のScene数以上を指定した場合は、改行コードと末尾改行を含め入力を完全にそのまま返します。`disable=True`にするとScene検出とMarkdown検証をバイパスし、入力STRINGをそのまま出力します。通常動作では、入力にSceneがない場合又は既存の日本語縮小Markdown文法として不正な場合は停止エラーになります。詳細は`docs/cl_scene_limiter_spec.md`を参照してください。
+
 ## PCM無音パディング
 
 `CL Audio Pad (PCM Silence)`は、汎用の`Load Audio`とH3又はContex-Loopの間へ挿入します。Python側で必要サンプル数を求め、元波形と同じdtype、デバイス、バッチ、チャンネル及びサンプルレートのままPCM値`0.0`を追加します。元音声は切断、リサンプル又は音量変更しません。
@@ -548,31 +610,29 @@ Lyrics整列によって短いVAD-silent区間が有声へ昇格した場合は�
 推奨接続は次のとおりです。
 
 ```text
-Load Audio ── audio ───────────────┐
-                                   v
-Contex-Loop Plan ── plan ──> CL Audio Pad ── padded_audio ──┬─> Loop Start.source_audio
-                                                            ├─> Current.source_audio
-                                                            └─> Assemble.source_audio
+Load Audio ── audio ──> CL Audio Pad ── padded_audio ──┬─> Loop Start.source_audio
+                                                       ├─> Current.source_audio
+                                                       └─> Assemble.source_audio
 ```
 
-Contex-Loop Planを接続すると、`total_delivered_frames / fps`から必要な音声サンプル数を自動計算します。Math、Empty Audio、Concatenate Audioノードは不要です。Loop Start、Current及びAssembleには必ず同じ`padded_audio`を渡してください。別々の音声を渡すと、音声ハッシュ不一致又は長さ不足になります。
+`h3_frame_mode=auto_safe`は、最長入力又はUI目標を整数秒へ切り上げ、24fpsへ換算した値に16フレームを加えます。これはVocalノードの整数秒Sceneタイムラインと、コンパイラが保証する最大16フレームのH3格子補償を覆うPlan非依存の安全尺です。Math、Empty Audio、Concatenate Audio及びPlanからAudio Padへ戻る接続は不要です。Loop Start、Current及びAssembleには必ず同じ`padded_audio`を渡してください。
 
 | 名前 | 意味 |
 | --- | --- |
-| `target_duration_seconds` | Planを接続しない場合の最小出力尺。`0`は無効です。Planと併用した場合は長い方を採用します。 |
-| `extra_padding_seconds` | 必要尺を満たした後へ加える安全マージン。PlanもUI目標もない場合は固定パディング秒数になります。 |
+| `target_duration_seconds` | H3処理前の最小ソースタイムライン尺。`0`では入力尺を使用します。手書きScene合計が入力音声の整数秒切り上げより長い場合に指定します。 |
+| `extra_padding_seconds` | 必要尺を満たした後へ加える任意の追加マージン。 |
 | `pad_position` | `end`（既定）、`start`、`both`。リップシンクでは原音開始を動かさない`end`を使用します。 |
-| `plan` | 任意の`H3_CHAIN_PLAN`。接続時は完成フレーム数に自動追従します。 |
+| `h3_frame_mode` | `auto_safe`（既定）、`exact_frames`、`disabled`。通常は循環しない`auto_safe`を使用します。 |
+| `h3_target_frames` | `exact_frames`の場合だけ使う24fpsの絶対目標フレーム数。 |
 | `match_audio` | 任意の基準AUDIO。その継続時間を最小出力尺に追加します。波形は混合せず、短い入力だけを無音補完します。 |
 
 出力にはパディング済みAUDIOのほか、元尺、出力尺、追加秒数及び状態文字列があります。音源が既に十分長く、追加マージンも0なら入力をそのまま返します。最終Assembleで`audio_source: source`を使うと、Planを超える安全マージンだけが動画尺で切られ、元音源部分は維持されます。
 
-フルミックスとボーカルステムを`MiniMax H3 Audio Tracks`へ渡す場合は、2本を`CL Audio Pad Pair (PCM Silence)`へ直接接続します。フルミックスとボーカルのどちらが長い場合でも、短い側だけが最長入力、Plan及びUI目標の最大尺までPCM値`0.0`で延長されます。
+フルミックスとボーカルステムを`MiniMax H3 Audio Tracks`へ渡す場合は、2本を`CL Audio Pad Pair (PCM Silence)`へ直接接続します。フルミックスとボーカルのどちらが長い場合でも、短い側だけが最長入力、H3安全フレーム目標及びUI目標の最大尺までPCM値`0.0`で延長されます。
 
 ```text
 Full Mix Load Audio ──> CL Audio Pad Pair.audio_a
 Vocal Load Audio ─────> CL Audio Pad Pair.audio_b
-Contex-Loop Plan ─────> CL Audio Pad Pair.plan
 
 CL Audio Pad Pair.padded_audio_a ──> MiniMax H3 Audio Tracks.full_mix
 CL Audio Pad Pair.padded_audio_b ──> MiniMax H3 Audio Tracks.vocals
@@ -580,9 +640,11 @@ CL Audio Pad Pair.padded_audio_b ──> MiniMax H3 Audio Tracks.vocals
 Vocal Load Audio ──────────────────> MiniMax H3 Lip-Sync Options.voice
 ```
 
-`pad_position=end`、`extra_padding_seconds=0`を基本とします。どちらの入力も切り詰めず、同じ共通尺へ出力するため、長い側の事前判定や配線変更は不要です。Plan依存のパディング済みボーカルをLip-Sync Options経由でGeneration Profileへ戻すと循環するため、Lip-Sync Optionsには元のボーカルを直接接続します。
+`h3_frame_mode=auto_safe`、`pad_position=end`、`extra_padding_seconds=0`を基本とします。どちらの入力も切り詰めず、同じ共通尺へ出力するため、長い側の事前判定や配線変更は不要です。Lip-Sync Options及びVocal解析には元のボーカルを直接接続し、パディング済み音声はH3 Source Timeline側だけへ渡します。
 
 パディング処理のログは翻訳処理と区別できるよう、`[cl_audiopad]`接頭辞で出力されます。
+
+単体ノードとPairノードの厳密なサンプル数計算、入出力、エラー条件及び循環依存を避ける接続規則は[CL Audio Pad仕様書](docs/cl_audio_pad_spec.md)を参照してください。
 
 ## 主なエラー
 

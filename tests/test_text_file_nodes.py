@@ -16,6 +16,19 @@ def encoded(raw: bytes) -> str:
 
 
 class TextFileNodeTests(unittest.TestCase):
+    def test_dedicated_spec_tracks_browser_and_backend_contract(self) -> None:
+        spec = (ROOT / "docs" / "cl_text_file_spec.md").read_text(encoding="utf-8")
+        for marker in (
+            "CLLoadTextFile",
+            "file_name",
+            "file_base64",
+            "file_signature",
+            "File.arrayBuffer()",
+            "IS_CHANGED()",
+            "16 MiB",
+        ):
+            self.assertIn(marker, spec)
+
     def test_registration_metadata_and_frontend_directory(self) -> None:
         cls = PKG.NODE_CLASS_MAPPINGS["CLLoadTextFile"]
         self.assertIs(cls, text_nodes.CLLoadTextFile)
@@ -56,7 +69,9 @@ class TextFileNodeTests(unittest.TestCase):
                 r"C:\outside\lyrics.txt", payload, "signature"
             )
         self.assertEqual(result, ("任意パスから選択",))
-        self.assertIn("[cl_textfile] Loaded lyrics.txt", captured.output[0])
+        output = "\n".join(captured.output)
+        self.assertIn("\x1b[96m", output)
+        self.assertIn("[cl_textfile] success: loaded lyrics.txt", output)
 
     def test_invalid_selection_payload_encoding_and_binary_text_are_rejected(self) -> None:
         with self.assertRaisesRegex(errors.TextFileLoadError, "No text file"):

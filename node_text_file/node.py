@@ -8,6 +8,7 @@ import hashlib
 import logging
 from typing import Any
 
+from ..common.logging import log_node_success
 from .errors import TextFileLoadError
 
 
@@ -124,8 +125,10 @@ class CLLoadTextFile:
             raise TextFileLoadError("The selected text file metadata is invalid")
         text = decode_text_file(file_name, file_base64)
         byte_count = len(base64.b64decode(file_base64, validate=True))
-        LOGGER.info(
-            "[cl_textfile] Loaded %s: %d byte(s), %d character(s)",
+        log_node_success(
+            LOGGER,
+            "cl_textfile",
+            "loaded %s: %d byte(s), %d character(s)",
             _display_name(file_name),
             byte_count,
             len(text),

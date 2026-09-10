@@ -15,6 +15,8 @@ import time
 import unicodedata
 from typing import Any, Iterable
 
+from ..common.logging import ANSI_RESET, log_cyan
+from ..common.suno import SECTION_HEADING_RE, classify_suno_section
 from .errors import VocalPromptError
 from ..node_japanese_to_json.compiler.llmj2e import lex_japanese_markdown
 from .whisper_runtime import WhisperBackend
@@ -25,7 +27,6 @@ from .whisper_discovery import (
 
 
 LOGGER = logging.getLogger("cl_vocal2promptseg")
-_SECTION_HEADING_RE = re.compile(r"^\[[^\]\r\n]+\]$")
 _VALID_STATES = {"silent", "voiced"}
 _WHISPER_SAMPLE_RATE = 16_000
 _VAD_CHUNK_WINDOWS = 2_048
@@ -44,9 +45,7 @@ _TARGETED_RETRY_DUPLICATE_CENTER_SECONDS = 0.35
 _MIN_CHAINABLE_SCENE_SECONDS = 2
 _SRT_TIME_OFFSET_MIN = -(2**31)
 _SRT_TIME_OFFSET_MAX = 2**31 - 1
-_ANSI_CYAN = "\x1b[96m"
 _ANSI_RED = "\x1b[91m"
-_ANSI_RESET = "\x1b[0m"
 
 try:  # Available only when loaded by ComfyUI.
     from comfy.utils import ProgressBar as _ComfyProgressBar  # type: ignore
@@ -60,6 +59,8 @@ class LyricLine:
     source_line: int
     text: str
     normalized: str
+    section_label: str | None = None
+    section_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,9 +198,18 @@ def parse_suno_lyrics(lyrics_text: str) -> list[LyricLine]:
         raise VocalPromptError("lyrics_text must contain Suno Lyrics text")
     normalized_newlines = lyrics_text.replace("\r\n", "\n").replace("\r", "\n")
     result: list[LyricLine] = []
+    section_label: str | None = None
+    section_kind: str | None = None
     for source_line, raw_line in enumerate(normalized_newlines.split("\n"), start=1):
         text = raw_line.strip()
-        if not text or _SECTION_HEADING_RE.fullmatch(text):
+        if not text:
+            continue
+        if SECTION_HEADING_RE.fullmatch(text):
+            section_label = text
+            try:
+                section_kind = classify_suno_section(text)
+            except ValueError as exc:  # defensive: regex already matched
+                raise VocalPromptError(str(exc)) from exc
             continue
         normalized = normalize_match_text(text)
         if not normalized:
@@ -212,6 +222,8 @@ def parse_suno_lyrics(lyrics_text: str) -> list[LyricLine]:
                 source_line=source_line,
                 text=text,
                 normalized=normalized,
+                section_label=section_label,
+                section_kind=section_kind,
             )
         )
     if not result:
@@ -1595,7 +1607,7 @@ def build_prompt_text(
     include_lyrics_comments: bool = True,
 ) -> str:
     _validate_bool(include_lyrics_comments, "include_lyrics_comments")
-    lyrics_by_scene: dict[int, list[str]] = {}
+    lyrics_by_scene: dict[int, list[LyricLine]] = {}
     scene_states = {
         int(scene["index"]): str(scene["state"]) for scene in scenes
     }
@@ -1609,7 +1621,7 @@ def build_prompt_text(
             )
         if include_lyrics_comments:
             lyrics_by_scene.setdefault(alignment.scene_index, []).append(
-                alignment.line.text
+                alignment.line
             )
 
     lines = [
@@ -1633,8 +1645,12 @@ def build_prompt_text(
         lines.append(
             f"// 検出状態: {scene['state']}。ソース範囲 {source_start}-{source_end}。"
         )
+        previous_section: str | None = None
         for lyric in lyrics_by_scene.get(scene["index"], []):
-            lines.append(f"// 歌詞: {lyric}")
+            if lyric.section_label and lyric.section_label != previous_section:
+                lines.append(f"// 楽曲セクション: {lyric.section_label}")
+                previous_section = lyric.section_label
+            lines.append(f"// 歌詞: {lyric.text}")
         lines.extend(
             [
                 "## ショット",
@@ -1920,13 +1936,12 @@ def log_quality_diagnostics(
 
     result = lyrics_srt_self_test(lyrics, srt_text)
     if result["passed"]:
-        LOGGER.info(
-            "%s[cl_vocal2promptseg] self test passed: input Lyrics and output "
-            "SRT lyrics match exactly (%d/%d)%s",
-            _ANSI_CYAN,
+        log_cyan(
+            LOGGER,
+            "[cl_vocal2promptseg] self test passed: input Lyrics and output "
+            "SRT lyrics match exactly (%d/%d)",
             result["actual_count"],
             result["expected_count"],
-            _ANSI_RESET,
         )
     else:
         LOGGER.error(
@@ -1937,7 +1952,7 @@ def log_quality_diagnostics(
             result["expected_count"],
             result["actual_count"],
             result["first_mismatch"],
-            _ANSI_RESET,
+            ANSI_RESET,
         )
     return result
 
@@ -1960,6 +1975,8 @@ def _alignment_json(alignment: LyricAlignment) -> dict[str, Any]:
         "lyrics_index": alignment.line.lyrics_index,
         "source_line": alignment.line.source_line,
         "text": alignment.line.text,
+        "section_label": alignment.line.section_label,
+        "section_kind": alignment.line.section_kind,
         "status": alignment.status,
         "match_score": alignment.match_score,
         "match_method": alignment.match_method,
@@ -1989,7 +2006,7 @@ def build_segments_json(
     scenes: list[dict[str, Any]],
 ) -> str:
     payload = {
-        "schema_version": 3,
+        "schema_version": 4,
         "sample_rate": sample_rate,
         "total_samples": total_samples,
         "audio_duration_seconds": round(total_samples / sample_rate, 6),
@@ -2074,7 +2091,7 @@ class CLVocalToPromptSegments:
                     "STRING",
                     {
                         "forceInput": True,
-                        "tooltip": "Suno Lyrics text supplied by a STRING output. [Section] headings are ignored.",
+                        "tooltip": "Suno Lyrics text supplied by a STRING output. [Section] headings become MV-planning metadata and are excluded from SRT text.",
                     },
                 ),
                 "whisper_model": (
@@ -2095,7 +2112,7 @@ class CLVocalToPromptSegments:
                     },
                 ),
                 "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
-                "keep_whisper_loaded": ("BOOLEAN", {"default": True}),
+                "keep_whisper_loaded": ("BOOLEAN", {"default": False}),
                 "max_scene_seconds": (
                     "INT",
                     {"default": 10, "min": 1, "max": 60, "step": 1},

@@ -6,10 +6,15 @@ import logging
 import math
 from typing import Any
 
+from ..common.logging import log_node_success
+
 
 LOGGER = logging.getLogger("cl_audiopad")
-_DEFAULT_PLAN_FPS = 24.0
 _PAD_POSITIONS = ("end", "start", "both")
+_H3_FPS = 24.0
+_H3_SAFE_TAIL_FRAMES = 16
+_H3_FRAME_MODES = ("auto_safe", "exact_frames", "disabled")
+_MAX_TIMELINE_FRAMES = 2_073_600  # 24 hours at H3's fixed 24 fps.
 
 
 def _non_negative_seconds(value: Any, name: str, maximum: float) -> float:
@@ -23,31 +28,46 @@ def _non_negative_seconds(value: Any, name: str, maximum: float) -> float:
     return float(value)
 
 
-def _plan_target_samples(plan: Any, sample_rate: int) -> tuple[int, str] | None:
-    if plan is None:
-        return None
-    if not isinstance(plan, dict):
-        raise ValueError("plan must be an H3_CHAIN_PLAN object")
+def _timeline_frame_target_samples(
+    base_duration_seconds: float,
+    sample_rate: int,
+    h3_frame_mode: str,
+    h3_target_frames: int,
+) -> tuple[int, str | None]:
+    """Resolve a Plan-independent H3 timeline target at fixed 24 fps."""
 
-    frames = plan.get("total_delivered_frames")
-    if not isinstance(frames, int) or isinstance(frames, bool) or frames < 1:
-        raise ValueError("plan.total_delivered_frames must be a positive integer")
-
-    compatibility = plan.get("compatibility")
-    if compatibility is not None and not isinstance(compatibility, dict):
-        raise ValueError("plan.compatibility must be an object")
-    compatibility = compatibility or {}
-    fps = compatibility.get("fps", plan.get("fps", _DEFAULT_PLAN_FPS))
+    if h3_frame_mode not in _H3_FRAME_MODES:
+        raise ValueError(f"h3_frame_mode must be one of {_H3_FRAME_MODES}")
     if (
-        not isinstance(fps, (int, float))
-        or isinstance(fps, bool)
-        or not math.isfinite(float(fps))
-        or float(fps) <= 0.0
+        not isinstance(h3_target_frames, int)
+        or isinstance(h3_target_frames, bool)
+        or not 0 <= h3_target_frames <= _MAX_TIMELINE_FRAMES
     ):
-        raise ValueError("plan fps must be a finite positive number")
+        raise ValueError(
+            f"h3_target_frames must be an integer between 0 and {_MAX_TIMELINE_FRAMES}"
+        )
 
-    target = int(round(frames / float(fps) * sample_rate))
-    return target, f"plan={frames} frames at {float(fps):g} fps"
+    if h3_frame_mode == "disabled":
+        return 0, None
+    if h3_frame_mode == "exact_frames":
+        if h3_target_frames < 1:
+            raise ValueError(
+                "h3_target_frames must be positive when h3_frame_mode=exact_frames"
+            )
+        target_frames = h3_target_frames
+        description = f"exact H3 target={target_frames} frames at 24 fps"
+    else:
+        # CL Vocal to Prompt Segments emits an integer-second Scene timeline.
+        # The compiler guarantees that H3 lattice compensation is 0..16 frames.
+        whole_seconds = int(math.ceil(base_duration_seconds - 1e-9))
+        requested_frames = whole_seconds * int(_H3_FPS)
+        target_frames = requested_frames + _H3_SAFE_TAIL_FRAMES
+        description = (
+            f"automatic H3-safe target={target_frames} frames at 24 fps "
+            f"({whole_seconds}s timeline + {_H3_SAFE_TAIL_FRAMES} safety frames)"
+        )
+
+    return int(round(target_frames / _H3_FPS * sample_rate)), description
 
 
 def _pad_audio_to_samples(
@@ -114,7 +134,7 @@ class CLAudioPad:
                         "min": 0.0,
                         "max": 86400.0,
                         "step": 0.001,
-                        "tooltip": "Minimum total duration when no longer target is supplied by an optional H3 plan. 0 disables this target.",
+                        "tooltip": "Minimum source-timeline duration before H3 frame handling. 0 uses the input duration.",
                     },
                 ),
                 "extra_padding_seconds": (
@@ -124,7 +144,7 @@ class CLAudioPad:
                         "min": 0.0,
                         "max": 3600.0,
                         "step": 0.001,
-                        "tooltip": "Additional zero-valued PCM added after satisfying the audio, UI target, and optional H3 plan target. With no target, this is a fixed padding amount.",
+                        "tooltip": "Additional zero-valued PCM added after satisfying the audio, UI target, and H3 frame target.",
                     },
                 ),
                 "pad_position": (
@@ -134,14 +154,25 @@ class CLAudioPad:
                         "tooltip": "Where silence is inserted. Use end for source-track lip sync; start and both shift the source timeline.",
                     },
                 ),
-            },
-            "optional": {
-                "plan": (
-                    "H3_CHAIN_PLAN",
+                "h3_frame_mode": (
+                    list(_H3_FRAME_MODES),
                     {
-                        "tooltip": "Optional MiniMax H3 Contex-Loop plan. Its delivered frame count and fps automatically set the minimum audio length.",
+                        "default": "auto_safe",
+                        "tooltip": "auto_safe rounds the source timeline up to a whole second and reserves the compiler's maximum 16-frame H3 lattice excess. exact_frames uses h3_target_frames. disabled performs no H3 frame calculation.",
                     },
                 ),
+                "h3_target_frames": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": _MAX_TIMELINE_FRAMES,
+                        "step": 1,
+                        "tooltip": "Absolute 24 fps minimum frame count used only with h3_frame_mode=exact_frames.",
+                    },
+                ),
+            },
+            "optional": {
                 "match_audio": (
                     "AUDIO",
                     {
@@ -181,7 +212,8 @@ class CLAudioPad:
         target_duration_seconds: float,
         extra_padding_seconds: float,
         pad_position: str,
-        plan: dict[str, Any] | None = None,
+        h3_frame_mode: str = "auto_safe",
+        h3_target_frames: int = 0,
         match_audio: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], float, float, float, str]:
         waveform, sample_rate, current_samples = cls._validate_audio(audio)
@@ -195,8 +227,6 @@ class CLAudioPad:
             raise ValueError(f"pad_position must be one of {_PAD_POSITIONS}")
 
         ui_target_samples = int(round(target_seconds * sample_rate))
-        plan_target = _plan_target_samples(plan, sample_rate)
-        plan_target_samples = 0 if plan_target is None else plan_target[0]
         match_target_samples = 0
         match_description = None
         if match_audio is not None:
@@ -207,12 +237,18 @@ class CLAudioPad:
                 f"match_audio={match_samples} samples at {match_sample_rate} Hz "
                 f"({match_duration:.6f}s)"
             )
-        base_target_samples = max(
+        preliminary_target_samples = max(
             current_samples,
             ui_target_samples,
-            plan_target_samples,
             match_target_samples,
         )
+        h3_target_samples, h3_description = _timeline_frame_target_samples(
+            preliminary_target_samples / float(sample_rate),
+            sample_rate,
+            h3_frame_mode,
+            h3_target_frames,
+        )
+        base_target_samples = max(preliminary_target_samples, h3_target_samples)
         extra_samples = int(round(extra_seconds * sample_rate))
         output_samples = base_target_samples + extra_samples
         padding_samples = output_samples - current_samples
@@ -223,8 +259,8 @@ class CLAudioPad:
         target_parts = []
         if target_seconds > 0.0:
             target_parts.append(f"UI target={target_seconds:.6f}s")
-        if plan_target is not None:
-            target_parts.append(plan_target[1])
+        if h3_description is not None:
+            target_parts.append(h3_description)
         if match_description is not None:
             target_parts.append(match_description)
         if extra_seconds > 0.0:
@@ -236,7 +272,7 @@ class CLAudioPad:
                 f"audio unchanged at {current_samples} samples "
                 f"({original_duration:.6f}s); {target_description}"
             )
-            LOGGER.info("[cl_audiopad] %s", status)
+            log_node_success(LOGGER, "cl_audiopad", "%s", status)
             return (audio, original_duration, original_duration, 0.0, status)
 
         padded_audio = _pad_audio_to_samples(
@@ -253,7 +289,7 @@ class CLAudioPad:
             f"{original_duration:.6f}s -> {padded_duration:.6f}s; "
             f"{target_description}"
         )
-        LOGGER.info("[cl_audiopad] %s", status)
+        log_node_success(LOGGER, "cl_audiopad", "%s", status)
         return (
             padded_audio,
             original_duration,
@@ -323,7 +359,7 @@ class CLAudioPadPair:
                         "min": 0.0,
                         "max": 3600.0,
                         "step": 0.001,
-                        "tooltip": "Additional silence appended after satisfying both inputs, the UI target, and the optional H3 plan.",
+                        "tooltip": "Additional silence appended after satisfying both inputs, the UI target, and the H3 frame target.",
                     },
                 ),
                 "pad_position": (
@@ -333,12 +369,21 @@ class CLAudioPadPair:
                         "tooltip": "Where silence is inserted into each shorter track. Use end to preserve source-timeline synchronization.",
                     },
                 ),
-            },
-            "optional": {
-                "plan": (
-                    "H3_CHAIN_PLAN",
+                "h3_frame_mode": (
+                    list(_H3_FRAME_MODES),
                     {
-                        "tooltip": "Optional MiniMax H3 Contex-Loop plan. Both tracks are padded to at least its delivered duration.",
+                        "default": "auto_safe",
+                        "tooltip": "auto_safe rounds the common source timeline up to a whole second and reserves the compiler's maximum 16-frame H3 lattice excess. exact_frames uses h3_target_frames. disabled only aligns the inputs/UI target.",
+                    },
+                ),
+                "h3_target_frames": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": _MAX_TIMELINE_FRAMES,
+                        "step": 1,
+                        "tooltip": "Absolute 24 fps minimum frame count used only with h3_frame_mode=exact_frames.",
                     },
                 ),
             },
@@ -352,7 +397,8 @@ class CLAudioPadPair:
         target_duration_seconds: float,
         extra_padding_seconds: float,
         pad_position: str,
-        plan: dict[str, Any] | None = None,
+        h3_frame_mode: str = "auto_safe",
+        h3_target_frames: int = 0,
     ) -> tuple[dict[str, Any], dict[str, Any], float, float, float, float, float, str]:
         waveform_a, sample_rate_a, samples_a = CLAudioPad._validate_audio(audio_a)
         waveform_b, sample_rate_b, samples_b = CLAudioPad._validate_audio(audio_b)
@@ -367,17 +413,24 @@ class CLAudioPadPair:
 
         duration_a = samples_a / float(sample_rate_a)
         duration_b = samples_b / float(sample_rate_b)
-        plan_target_a = _plan_target_samples(plan, sample_rate_a)
-        plan_target_b = _plan_target_samples(plan, sample_rate_b)
-        plan_seconds = (
-            0.0
-            if plan_target_a is None
-            else max(
-                plan_target_a[0] / float(sample_rate_a),
-                plan_target_b[0] / float(sample_rate_b),
-            )
+        preliminary_duration = max(duration_a, duration_b, target_seconds)
+        h3_target_a, h3_description = _timeline_frame_target_samples(
+            preliminary_duration,
+            sample_rate_a,
+            h3_frame_mode,
+            h3_target_frames,
         )
-        base_duration = max(duration_a, duration_b, target_seconds, plan_seconds)
+        h3_target_b, _ = _timeline_frame_target_samples(
+            preliminary_duration,
+            sample_rate_b,
+            h3_frame_mode,
+            h3_target_frames,
+        )
+        h3_duration = max(
+            h3_target_a / float(sample_rate_a),
+            h3_target_b / float(sample_rate_b),
+        )
+        base_duration = max(preliminary_duration, h3_duration)
         output_duration = base_duration + extra_seconds
 
         output_samples_a = max(samples_a, int(round(output_duration * sample_rate_a)))
@@ -410,8 +463,8 @@ class CLAudioPadPair:
         ]
         if target_seconds > 0.0:
             target_parts.append(f"UI target={target_seconds:.6f}s")
-        if plan_target_a is not None:
-            target_parts.append(plan_target_a[1])
+        if h3_description is not None:
+            target_parts.append(h3_description)
         if extra_seconds > 0.0:
             target_parts.append(f"extra={extra_seconds:.6f}s")
         status = (
@@ -420,7 +473,7 @@ class CLAudioPadPair:
             f"audio_b {duration_b:.6f}s + {padding_b:.6f}s; "
             + ", ".join(target_parts)
         )
-        LOGGER.info("[cl_audiopad] %s", status)
+        log_node_success(LOGGER, "cl_audiopad", "%s", status)
         return (
             padded_audio_a,
             padded_audio_b,

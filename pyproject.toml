@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-cl-japanese2json"
-version = "0.1.21"
+version = "0.2.0"
 description = "Deterministic Japanese reduced-Markdown compiler for MiniMax H3 Contex-Loop plans"
 readme = "README.md"
 requires-python = ">=3.11"

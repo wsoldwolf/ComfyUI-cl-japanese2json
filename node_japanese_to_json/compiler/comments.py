@@ -13,6 +13,7 @@ class CommentScanResult:
 
     text: str
     comment_only_lines: frozenset[int]
+    line_comment_lines: frozenset[int]
 
 
 def strip_c_comments(text: str) -> CommentScanResult:
@@ -34,6 +35,7 @@ def strip_c_comments(text: str) -> CommentScanResult:
     column_number = 1
     line_has_only_whitespace = True
     comment_lines: set[int] = set()
+    line_comment_lines: set[int] = set()
     content_lines: set[int] = set()
     block_start: tuple[int, int] | None = None
 
@@ -119,6 +121,7 @@ def strip_c_comments(text: str) -> CommentScanResult:
             state = "BLOCK_COMMENT"
             continue
         if text.startswith("//", index) and line_has_only_whitespace:
+            line_comment_lines.add(line_number)
             replace_character("/")
             replace_character("/")
             index += 2
@@ -147,4 +150,5 @@ def strip_c_comments(text: str) -> CommentScanResult:
     return CommentScanResult(
         "".join(output),
         frozenset(comment_lines - content_lines),
+        frozenset(line_comment_lines),
     )
