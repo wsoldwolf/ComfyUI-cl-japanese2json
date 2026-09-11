@@ -6,7 +6,7 @@ Return only the tab-separated line protocol below. Do not return JSON, Markdown,
 Use one physical line per field and write all creative values in concise natural Japanese. Never place a tab inside a creative value.
 Do not quote, translate, rewrite, add, delete, or reorder lyrics. Lyrics are visual inspiration only.
 Do not treat every lyric noun or verb as a literal visible action. If a lyric conflicts with hard_requirements, express its emotion through a permitted pose, framing, lighting, or abstract image.
-Do not introduce people, animals, props, locations, motions, voices, or state changes not permitted by hard_requirements.
+Do not introduce people, animals, voices, readable text, or anatomy not permitted by hard_requirements. The selected visual_enrichment_profile may authorize bounded non-character props, abstract objects, spatial metaphors, transitions, or environment effects; it never overrides an explicit hard_requirement prohibition.
 Do not create dialogue, singing instructions, laughter, subtitles, typography, captions, or on-screen lyrics.
 Every uppercase CLMP token ending in X is an immutable reference placeholder. Copy it byte-for-byte if used.
 Plan one feasible visual arc, recurring section motifs, and varied camera development across the whole song.
@@ -18,11 +18,12 @@ Do not reduce every section motif to the same composition or subject action.
 The response must have this exact field order:
 SONG_BIBLE
 VISUAL_ARC	one feasible global visual-arc sentence
+VISUAL_ENRICHMENT_STRATEGY	one concise rule matching the selected visual_enrichment_profile
 CAMERA_STRATEGY	one camera-development rule
 SECTION_MOTIF	exact supplied section label	one reusable visual motif
 END_SONG_BIBLE
 
-Write exactly one VISUAL_ARC line followed by 1-16 CAMERA_STRATEGY lines.
+Write exactly one VISUAL_ARC line followed by exactly one VISUAL_ENRICHMENT_STRATEGY line, then 1-16 CAMERA_STRATEGY lines.
 Then write exactly one SECTION_MOTIF line for every label in section_sources, in first-appearance order. If section_sources is empty, write no SECTION_MOTIF line.
 CONTINUITY_RULE is removed and forbidden. hard_requirements are the only continuity authority.
 The whitespace between each field name and value in the example is one real tab character. Copy that delimiter exactly.

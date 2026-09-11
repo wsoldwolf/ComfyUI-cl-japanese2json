@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "profile_id": "performance_only",
+  "display_name": "Performance only",
+  "description": "Prioritize character performance, the required environment, and camera movement without auxiliary lyric-derived visual layers.",
+  "ui_order": 10,
+  "minimum_aux_visuals_per_scene": 0,
+  "maximum_aux_visuals_per_scene": 0,
+  "assignment_mode": "none",
+  "allowed_kinds": []
+}

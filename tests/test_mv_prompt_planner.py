@@ -15,6 +15,7 @@ debug_output = module("node_mv_prompt_planner.debug_output")
 planning = module("node_mv_prompt_planner.planning")
 planner_node = module("node_mv_prompt_planner.node")
 prompt_loader = module("node_mv_prompt_planner.prompt_loader")
+visual_profiles = module("node_mv_prompt_planner.visual_profiles")
 renderer = module("node_mv_prompt_planner.renderer")
 structures = module("node_mv_prompt_planner.structures")
 timeline_parser = module("node_mv_prompt_planner.timeline_parser")
@@ -68,6 +69,7 @@ def song_bible() -> str:
         (
             "SONG_BIBLE",
             "VISUAL_ARC\t暗闇から光へ進む。",
+            "VISUAL_ENRICHMENT_STRATEGY\t選択プロファイルに従う。",
             "CAMERA_STRATEGY\t静止からアーク移動へ展開する。",
             "SECTION_MOTIF\t[Chorus]\t強い白光。",
             "END_SONG_BIBLE",
@@ -80,6 +82,7 @@ def scene_payload(
     *,
     valid: bool = True,
     actions: tuple[str, ...] | None = None,
+    auxiliary_visuals: tuple[tuple[str, str], ...] = (),
 ) -> str:
     if scene_id == 1:
         camera = ("static", "none", "none", "斜め後方の低い位置から輪郭を捉える。")
@@ -102,6 +105,10 @@ def scene_payload(
     lines.extend(
         f"ACTION\t{index}\t{value}"
         for index, value in enumerate(action_values, start=1)
+    )
+    lines.extend(
+        f"AUX_VISUAL\t{kind}\t{description}"
+        for kind, description in auxiliary_visuals
     )
     lines.extend(
         (
@@ -177,7 +184,7 @@ class MVPromptPlannerTests(unittest.TestCase):
             encoding="utf-8"
         )
         for marker in (
-            "clmv-song-bible-line-v2",
+            "clmv-song-bible-line-v3",
             '"hard_requirements"',
             '"lyric_groups"',
             '"active_section_motifs"',
@@ -220,6 +227,12 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertEqual(
             input_types["optional"]["vocal_guard"][1]["default"], "warn"
         )
+        self.assertEqual(
+            input_types["optional"]["visual_enrichment_profile"][1][
+                "default"
+            ],
+            "performance_only",
+        )
         self.assertFalse(
             input_types["optional"]["save_debug_output"][1]["default"]
         )
@@ -248,6 +261,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertIn("model-resolution-error", fingerprint)
         self.assertIn("song_bible_system_prompt.txt", fingerprint)
         self.assertIn("scene_plan_system_prompt.txt", fingerprint)
+        self.assertIn("performance_only/profile.json", fingerprint)
 
     def test_system_prompts_lock_line_protocol_timeline_and_h3_camera_contract(self) -> None:
         bible_prompt = prompt_loader.load_planner_prompt(
@@ -272,6 +286,187 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertIn("ACTION\t1\t", scene_prompt)
         with self.assertRaisesRegex(errors.MVPlannerError, "Invalid"):
             prompt_loader.load_planner_prompt("../outside.txt")
+
+    def test_visual_profiles_are_discovered_and_composed_from_directories(self) -> None:
+        self.assertEqual(
+            visual_profiles.discover_visual_profile_ids(),
+            [
+                "performance_only",
+                "lyric_visuals_light_8b",
+                "lyric_visuals_full",
+            ],
+        )
+        light = visual_profiles.load_visual_profile(
+            "lyric_visuals_light_8b"
+        )
+        self.assertEqual(light.minimum_aux_visuals_per_scene, 1)
+        self.assertEqual(light.maximum_aux_visuals_per_scene, 1)
+        self.assertEqual(
+            light.scene_contract(1)["required_kind"], "symbolic_object"
+        )
+        composed = prompt_loader.load_profiled_planner_prompt(
+            "scene_plan_system_prompt.txt", light
+        )
+        self.assertIn(
+            "VISUAL ENRICHMENT PROFILE: lyric_visuals_light_8b", composed
+        )
+        self.assertIn("exactly one AUX_VISUAL", composed)
+        with self.assertRaisesRegex(errors.MVPlannerError, "Unknown"):
+            visual_profiles.load_visual_profile("missing_profile")
+
+    def test_visual_profiles_validate_auxiliary_visual_contracts(self) -> None:
+        timeline = timeline_parser.parse_prompt_timeline(TIMELINE)
+        protector = module(
+            "node_mv_prompt_planner.placeholders"
+        ).ReferenceProtector()
+        protector.protect(BRIEF)
+        performance = visual_profiles.load_visual_profile(
+            "performance_only"
+        )
+        rejected, performance_errors = validation.parse_scene_response(
+            scene_payload(
+                1,
+                auxiliary_visuals=(
+                    ("symbolic_object", "黒い環が形成される。"),
+                ),
+            ),
+            {1: timeline.scenes[0]},
+            protector,
+            visual_profile=performance,
+        )
+        self.assertEqual(rejected, {})
+        self.assertIn("forbids AUX_VISUAL", performance_errors[1])
+
+        light = visual_profiles.load_visual_profile(
+            "lyric_visuals_light_8b"
+        )
+        light_payload = scene_payload(
+            1,
+            auxiliary_visuals=(
+                (
+                    "symbolic_object",
+                    "黒い石片が集まり、途切れた環を形成して砕ける。",
+                ),
+            ),
+        )
+        recovered, scene_errors = validation.parse_scene_response(
+            light_payload,
+            {1: timeline.scenes[0]},
+            protector,
+            visual_profile=light,
+        )
+        self.assertEqual(scene_errors, {})
+        self.assertEqual(
+            recovered[1].shots[0].auxiliary_visuals[0].kind,
+            "symbolic_object",
+        )
+
+        missing, missing_errors = validation.parse_scene_response(
+            scene_payload(1),
+            {1: timeline.scenes[0]},
+            protector,
+            visual_profile=light,
+        )
+        self.assertEqual(missing, {})
+        self.assertIn("requires 1-1 AUX_VISUAL", missing_errors[1])
+
+        wrong, wrong_errors = validation.parse_scene_response(
+            scene_payload(
+                1,
+                auxiliary_visuals=(("light_shadow", "白い光が脈動する。"),),
+            ),
+            {1: timeline.scenes[0]},
+            protector,
+            visual_profile=light,
+        )
+        self.assertEqual(wrong, {})
+        self.assertIn("requires AUX_VISUAL kind", wrong_errors[1])
+
+        full = visual_profiles.load_visual_profile("lyric_visuals_full")
+        full_payload = scene_payload(
+            1,
+            auxiliary_visuals=(
+                ("spatial_metaphor", "暗い道が奥へ伸びる。"),
+                ("impact_effect", "橙色の波紋が道を砕く。"),
+            ),
+        )
+        recovered, scene_errors = validation.parse_scene_response(
+            full_payload,
+            {1: timeline.scenes[0]},
+            protector,
+            visual_profile=full,
+        )
+        self.assertEqual(scene_errors, {})
+        self.assertEqual(len(recovered[1].shots[0].auxiliary_visuals), 2)
+
+        excessive, excessive_errors = validation.parse_scene_response(
+            scene_payload(
+                1,
+                auxiliary_visuals=(
+                    ("symbolic_object", "黒い環が形成される。"),
+                    ("spatial_metaphor", "白い道が奥へ伸びる。"),
+                    ("impact_effect", "橙色の波紋が道を砕く。"),
+                    ("light_shadow", "影が脈動する。"),
+                ),
+            ),
+            {1: timeline.scenes[0]},
+            protector,
+            visual_profile=full,
+        )
+        self.assertEqual(excessive, {})
+        self.assertIn("requires 1-3 AUX_VISUAL", excessive_errors[1])
+
+    def test_light_profile_is_sent_to_both_planning_stages_and_rendered(self) -> None:
+        backend = FakePlannerBackend(
+            [
+                song_bible(),
+                scene_payload(
+                    1,
+                    auxiliary_visuals=(
+                        ("symbolic_object", "黒い環が形成されて砕ける。"),
+                    ),
+                )
+                + "\n"
+                + scene_payload(
+                    2,
+                    auxiliary_visuals=(
+                        ("spatial_metaphor", "白い道が奥へ伸びる。"),
+                    ),
+                ),
+            ]
+        )
+        brief = brief_parser.parse_planning_brief(BRIEF)
+        timeline = timeline_parser.parse_prompt_timeline(TIMELINE)
+        plan = planning.generate_mv_plan(
+            brief,
+            timeline,
+            backend,
+            scenes_per_batch=2,
+            retry_max=1,
+            visual_enrichment_profile="lyric_visuals_light_8b",
+        )
+        self.assertEqual(
+            plan.metadata["visual_enrichment_profile"]["profile_id"],
+            "lyric_visuals_light_8b",
+        )
+        song_request = json.loads(backend.calls[0]["messages"][1]["content"])
+        scene_request = json.loads(backend.calls[1]["messages"][1]["content"])
+        self.assertEqual(
+            song_request["visual_enrichment_profile"]["assignment_mode"],
+            "cycle",
+        )
+        self.assertEqual(
+            scene_request["scenes"][0]["auxiliary_visual_contract"][
+                "required_kind"
+            ],
+            "symbolic_object",
+        )
+        self.assertIn(
+            "VISUAL ENRICHMENT PROFILE: lyric_visuals_light_8b",
+            backend.calls[0]["messages"][0]["content"],
+        )
+        rendered = renderer.render_planned_markdown(brief, timeline, plan)
+        self.assertIn("* 付加映像として、黒い環が形成されて砕ける。", rendered)
 
     def test_planning_brief_uses_existing_subset_only(self) -> None:
         brief = brief_parser.parse_planning_brief(BRIEF)
@@ -395,7 +590,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         )
         self.assertEqual([scene.scene_id for scene in plan.scenes], [1, 2])
         self.assertEqual(plan.metadata["request_count"], 3)
-        self.assertEqual(plan.metadata["response_protocol"], "clmv-line-v2")
+        self.assertEqual(plan.metadata["response_protocol"], "clmv-line-v3")
         song_input = json.loads(backend.calls[0]["messages"][1]["content"])
         self.assertNotIn("planning_brief", song_input)
         self.assertEqual(

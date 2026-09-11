@@ -68,7 +68,7 @@ OUTPUT_NODE = False
 
 `CLVocalToPromptSegments`のクラスメタデータ、4出力、入力順序、Whisper探索、PCM解析、Lyrics整列、SRT及びテンプレート生成規則は`docs/cl_vocal2promptseg_spec.md`に従う。
 
-`CLMVPromptPlannerGGUF`及び`CLSceneLimiter`の契約は、それぞれ`docs/cl_mv_prompt_planner_comfyui_node_spec.md`及び`docs/cl_scene_limiter_spec.md`に従う。MVプランナーのSong Bible v2と構造化入力、直前Scene状態、重複排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`に従う。
+`CLMVPromptPlannerGGUF`及び`CLSceneLimiter`の契約は、それぞれ`docs/cl_mv_prompt_planner_comfyui_node_spec.md`及び`docs/cl_scene_limiter_spec.md`に従う。MVプランナーのSong Bible v3と構造化入力、直前Scene状態、重複排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/cl_mv_prompt_visual_profiles_spec.md`に従う。
 
 `CLAudioPad`及び`CLAudioPadPair`の詳細契約は`docs/cl_audio_pad_spec.md`、`CLLoadTextFile`の詳細契約は`docs/cl_text_file_spec.md`に従う。本書の4.2、4.2.1及び4.3は共通仕様から参照するための概要であり、相違する場合は各詳細仕様を優先する。
 
@@ -311,6 +311,12 @@ Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追
 保持モデルがtokenizerを公開する場合は実トークン数を推定し、利用できない場合はUTF-8バイト長から保守的に見積もる。実効`n_ctx`に収まり、かつ1バッチ最大16区間となる範囲で翻訳区間をまとめる。長文を無制限な単一生成にせず、一方で一行単位推論にも戻さない。1区間が単独でも入らない場合は明示エラーとし、途中分割しない。
 
 推論が停滞した場合は、現在の未解決区間数を半分へ縮小して新しいseedで再試行する。縮小後に検証できた区間を保持し、未処理又は未解決の区間だけを同じ小グループ上限で続行する。停滞は検証失敗と同じ`retry_max`を消費するが、成功後に残りの小グループへ進むこと自体は消費しない。一般の`RuntimeError`等を自動再試行対象へ拡張してはならない。
+
+応答自体は完了していても、同じ未解決グループが2回連続で一件も減らない場合は、現在のグループ上限を半分へ縮小し、最終的に1レコード単位まで分離して再試行する。日本語残留エラーは残った文字列を最大8件示し、次の要求へ具体的な修正対象として渡す。検証済み区間及び縮小グループ内で新たに成功した区間を再送してはならない。
+
+固定プロンプト用語は、保護台詞をプレースホルダ化した後、外部CSV辞書によりLLM送信前に決定論的な英語へ正規化する。応答で`entire画面`等の混在表記が返った場合も、通常検証より前に同じ辞書で修復してWARNINGを記録する。この修復は保護台詞内部及び辞書にない日本語へ適用しない。
+
+同梱辞書`node_japanese_to_json/dictionaries/prompt_terms.csv`の後に、任意の`node_japanese_to_json/dictionaries/prompt_terms.user.csv`、`ComfyUI/user/cl_japanese2json/prompt_terms.csv`を順に重ね、後者の同一`source`を優先する。更新時刻又はサイズが変化した辞書はComfyUI再起動なしで次の実行時に再読込する。CSV検証、適用順及びエラー条件は`docs/cl_prompt_term_dictionary_spec.md`に従う。この機能のためにノード入力を追加せず、保存済みワークフローのウィジェット順を維持する。
 
 ## 7. システムプロンプト
 

@@ -14,6 +14,7 @@ LOGGER = logging.getLogger("cl_japanese2json")
 REFERENCE_RE = re.compile(r"<(Picture|Video|Audio|Subject) ([0-9]+)>")
 COMPACT_REFERENCE_RE = re.compile(r"<(Picture|Video|Audio|Subject)([0-9]+)>")
 JAPANESE_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
+JAPANESE_RUN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]+")
 
 REFERENCE_LIMITS = {
     "Picture": (1, 9),
@@ -195,3 +196,10 @@ def remove_direct_speech(text: str) -> str:
 
 def contains_unprotected_japanese(text: str) -> bool:
     return JAPANESE_RE.search(remove_direct_speech(text)) is not None
+
+
+def unprotected_japanese_fragments(text: str) -> tuple[str, ...]:
+    """Return unique Japanese runs outside protected direct speech."""
+
+    plain_text = remove_direct_speech(text)
+    return tuple(dict.fromkeys(JAPANESE_RUN_RE.findall(plain_text)))

@@ -25,3 +25,6 @@ output/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Optional developer-local prompt term overrides
+node_japanese_to_json/dictionaries/prompt_terms.user.csv

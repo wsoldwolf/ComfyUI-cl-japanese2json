@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .errors import MVPlannerError, PlannerResponseError
 from .placeholders import ReferenceProtector
-from .prompt_loader import load_planner_prompt
+from .prompt_loader import load_profiled_planner_prompt
 from .structures import (
     MVPlan,
     PlannedScene,
@@ -26,6 +26,11 @@ from .validation import (
     parse_song_bible_response,
     scene_signature,
     vocal_guard_issues,
+)
+from .visual_profiles import (
+    DEFAULT_VISUAL_PROFILE_ID,
+    VisualEnrichmentProfile,
+    load_visual_profile,
 )
 
 
@@ -263,11 +268,26 @@ def _previous_scene_tail(
         return None
     final_shot = scene.shots[-1]
     final_action = final_shot.subject_actions[-1]
+    last_visuals = next(
+        (
+            shot.auxiliary_visuals
+            for shot in reversed(scene.shots)
+            if shot.auxiliary_visuals
+        ),
+        (),
+    )
     return {
         "scene_id": scene.scene_id,
         "scene_intent": protector.protect(scene.scene_intent),
         "final_composition": protector.protect(final_shot.composition),
         "final_action": protector.protect(final_action),
+        "last_auxiliary_visuals": [
+            {
+                "kind": value.kind,
+                "description": protector.protect(value.description),
+            }
+            for value in last_visuals
+        ],
         "environment": protector.protect(final_shot.environment),
         "camera": {
             "type": final_shot.camera.type,
@@ -292,6 +312,11 @@ def _scene_duplicate_fingerprint(scene: PlannedScene) -> dict[str, Any]:
         "shot_count": len(scene.shots),
         "first_shot_action_count": len(scene.shots[0].subject_actions),
         "camera_types": [shot.camera.type for shot in scene.shots],
+        "auxiliary_visual_kinds": [
+            visual.kind
+            for shot in scene.shots
+            for visual in shot.auxiliary_visuals
+        ],
     }
 
 
@@ -362,6 +387,7 @@ def _scene_input(
     avoid_duplicate_plans: tuple[PlannedScene, ...] = (),
     duplicate_repair: dict[str, Any] | None = None,
     camera_protocol_repair: dict[str, Any] | None = None,
+    visual_profile: VisualEnrichmentProfile,
 ) -> dict[str, Any]:
     return {
         "scene_id": scene.scene_id,
@@ -380,6 +406,9 @@ def _scene_input(
         ],
         "duplicate_repair": duplicate_repair,
         "camera_protocol_repair": camera_protocol_repair,
+        "auxiliary_visual_contract": visual_profile.scene_contract(
+            scene.scene_id
+        ),
         "locked_lip_sync": [
             protector.protect(value) for value in scene.lip_sync_lines
         ],
@@ -396,7 +425,13 @@ def _build_protector(
     hard_requirements = _hard_requirements(brief, protector)
     section_sources = _section_sources(timeline, protector)
     for scene in timeline.scenes:
-        _scene_input(scene, protector)
+        # Protect every reference that can appear later in Scene payloads.
+        for lyric in scene.lyrics:
+            protector.protect(lyric.text)
+        for value in scene.lip_sync_lines:
+            protector.protect(value)
+        for value in scene.soundscape_lines:
+            protector.protect(value)
     return protector, hard_requirements, section_sources
 
 
@@ -414,10 +449,12 @@ def _plan_song_bible(
     interrupt_callback: Callable[[], Any] | None,
     debug_events: DebugEvents | None,
     debug_state: dict[str, Any] | None,
+    visual_profile: VisualEnrichmentProfile,
 ) -> tuple[SongBible, int, int]:
     section_labels = [str(source["label"]) for source in section_sources]
     payload = {
-        "protocol": "clmv-song-bible-line-v2",
+        "protocol": "clmv-song-bible-line-v3",
+        "visual_enrichment_profile": visual_profile.payload_summary(),
         "hard_requirements": hard_requirements,
         "reference_legend": protector.legend(),
         "timeline_scene_count": timeline_scene_count,
@@ -429,7 +466,9 @@ def _plan_song_bible(
         try:
             content, event = _call(
                 backend,
-                system=load_planner_prompt("song_bible_system_prompt.txt"),
+                system=load_profiled_planner_prompt(
+                    "song_bible_system_prompt.txt", visual_profile
+                ),
                 payload=payload,
                 seed=_seed(call_settings["seed"], request_index - 1),
                 label=f"song-bible attempt {attempt + 1}",
@@ -496,6 +535,7 @@ def generate_mv_plan(
     retry_max: int = 10,
     camera_guard: str = "warn",
     vocal_guard: str = "warn",
+    visual_enrichment_profile: str = DEFAULT_VISUAL_PROFILE_ID,
     progress_callback: ProgressCallback | None = None,
     interrupt_callback: Callable[[], Any] | None = None,
     debug_events: DebugEvents | None = None,
@@ -509,6 +549,7 @@ def generate_mv_plan(
         raise MVPlannerError("camera_guard must be warn or strict")
     if vocal_guard not in {"warn", "strict"}:
         raise MVPlannerError("vocal_guard must be warn or strict")
+    visual_profile = load_visual_profile(visual_enrichment_profile)
     protector, hard_requirements, section_sources = _build_protector(
         brief, timeline
     )
@@ -531,6 +572,7 @@ def generate_mv_plan(
                 "camera_warnings": [],
                 "vocal_guard": vocal_guard,
                 "vocal_warnings": [],
+                "visual_enrichment_profile": visual_profile.payload_summary(),
                 "duplicate_scene_diagnostics": [],
                 "last_error": None,
             }
@@ -555,6 +597,7 @@ def generate_mv_plan(
         interrupt_callback=interrupt_callback,
         debug_events=debug_events,
         debug_state=debug_state,
+        visual_profile=visual_profile,
     )
 
     planned: dict[int, PlannedScene] = {}
@@ -627,15 +670,20 @@ def generate_mv_plan(
                         avoid_duplicate_plans=avoided_scenes,
                         duplicate_repair=repair,
                         camera_protocol_repair=camera_repair,
+                        visual_profile=visual_profile,
                     )
                 )
             payload = {
-                "protocol": "clmv-scene-line-v1",
+                "protocol": "clmv-scene-line-v2",
                 "hard_requirements": hard_requirements,
                 "reference_legend": protector.legend(),
+                "visual_enrichment_profile": visual_profile.payload_summary(),
                 "song_bible": {
                     "visual_arc": bible.visual_arc,
                     "camera_strategy": list(bible.camera_strategy),
+                    "visual_enrichment_strategy": (
+                        bible.visual_enrichment_strategy
+                    ),
                 },
                 "requested_scene_ids": pending_before,
                 "requested_scene_count": len(pending_before),
@@ -677,7 +725,9 @@ def generate_mv_plan(
             try:
                 content, event = _call(
                     backend,
-                    system=load_planner_prompt("scene_plan_system_prompt.txt"),
+                    system=load_profiled_planner_prompt(
+                        "scene_plan_system_prompt.txt", visual_profile
+                    ),
                     payload=payload,
                     seed=_seed(seed, request_index - 1),
                     label=(
@@ -690,7 +740,10 @@ def generate_mv_plan(
                     **{key: value for key, value in call_settings.items() if key != "seed"},
                 )
                 recovered, errors = parse_scene_response(
-                    content, request_pending, protector
+                    content,
+                    request_pending,
+                    protector,
+                    visual_profile=visual_profile,
                 )
                 for scene_id, message in errors.items():
                     if any(
@@ -961,6 +1014,9 @@ def generate_mv_plan(
         camera_strategy=tuple(
             protector.restore(value) for value in bible.camera_strategy
         ),
+        visual_enrichment_strategy=protector.restore(
+            bible.visual_enrichment_strategy
+        ),
         section_motifs=tuple(
             type(item)(
                 section=item.section,
@@ -976,9 +1032,10 @@ def generate_mv_plan(
         metadata={
             "request_count": request_index,
             "scenes_per_batch": scenes_per_batch,
-            "response_protocol": "clmv-line-v2",
-            "song_bible_protocol": "clmv-song-bible-line-v2",
-            "scene_protocol": "clmv-scene-line-v1",
+            "response_protocol": "clmv-line-v3",
+            "song_bible_protocol": "clmv-song-bible-line-v3",
+            "scene_protocol": "clmv-scene-line-v2",
+            "visual_enrichment_profile": visual_profile.payload_summary(),
             "camera_guard": camera_guard,
             "camera_warnings": camera_warnings,
             "vocal_guard": vocal_guard,

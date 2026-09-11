@@ -1,6 +1,6 @@
 # CL MV Prompt Planner (GGUF) ComfyUIノード仕様
 
-本書はv0.2.0の`clmv-line-v2`ノード契約を記述する。Song Bible、構造化LLM入力、直前Scene最終状態、完全重複検出、`camera_guard`及び`vocal_guard`の詳細は`docs/cl_mv_prompt_planner_song_bible_spec.md`を正本とする。
+本書は`clmv-line-v3`ノード契約を記述する。Song Bible、構造化LLM入力、直前Scene最終状態、完全重複検出、`camera_guard`及び`vocal_guard`の詳細は`docs/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/cl_mv_prompt_visual_profiles_spec.md`を正本とする。
 
 ## 1. ノード契約
 
@@ -35,6 +35,7 @@
 | `save_debug_output` | BOOLEAN（optional） | false | plannerの全リクエスト、生応答、検証結果及び最終部分状態を保存 |
 | `camera_guard` | COMBO（optional） | `warn` | 高確度のカメラ意味矛盾を警告又はScene再試行にする。候補は`warn`/`strict` |
 | `vocal_guard` | COMBO（optional） | `warn` | Timelineと矛盾する発声cueを警告又はScene再試行にする。候補は`warn`/`strict` |
+| `visual_enrichment_profile` | COMBO（optional） | `performance_only` | 人物演技のみ、8B向け軽量歌詞映像又は大型モデル向け歌詞映像を選ぶ。候補はプロファイルディレクトリから発見する |
 
 `chat_format=auto`では`llama-cpp-python`へchat formatを明示せずGGUF metadata/templateへ委ねる。Qwen系、Gemma系及び将来の互換モデルを同じモデル選択欄で切り替えられる。明示値はメタデータ不備のGGUF用である。
 
@@ -56,15 +57,17 @@ GGUF実行に共通する`model_name`、`max_tokens`、`temperature`、`top_p`�
 
 Song bibleとScene計画は別リクエストにする。LLM応答はJSONではなく、タブ区切りの固定フィールドからなる行指向プロトコルとする。Scene計画は小バッチ化し、正常Sceneを保持して未解決Sceneだけを再送する。要求対象IDと件数を毎回明示し、再試行には前回の構文・検証エラーも含める。`retry_max=0`は再試行なし。各再試行のseedは`seed + attempt`を32-bit非ゼロ範囲へ正規化する。
 
-Scene応答は`SCENE`、`SCENE_INTENT`、`SHOT`、`COMPOSITION`、1～8個の連番`ACTION`、`ENVIRONMENT`、`CAMERA`、`END_SHOT`及び`END_SCENE`を固定順で持つ。各Sceneレコードを独立して厳密検証し、壊れたレコードは推測修復しない。複数ACTIONの番号順は実行時系列であり、Pythonが同じ順序の別バレットへ変換して時間接続語を付与する。
+Scene応答は`SCENE`、`SCENE_INTENT`、`SHOT`、`COMPOSITION`、1～8個の連番`ACTION`、選択プロファイルが許可する`AUX_VISUAL`、`ENVIRONMENT`、`CAMERA`、`END_SHOT`及び`END_SCENE`を固定順で持つ。各Sceneレコードを独立して厳密検証し、壊れたレコードは推測修復しない。複数ACTIONの番号順は実行時系列であり、Pythonが同じ順序の別バレットへ変換して時間接続語を付与する。
 
-ComfyUIのキャッシュ判定には、選択GGUFの実パス・サイズ・更新時刻と、2個のplanner system promptのサイズ・更新時刻・SHA-256を含める。モデル又はsystem promptを変更した場合は、入力値が同じでも再実行する。
+ComfyUIのキャッシュ判定には、選択GGUFの実パス・サイズ・更新時刻、2個のplanner system prompt及び全視覚拡張プロファイルファイルのサイズ・更新時刻・SHA-256を含める。モデル、system prompt又はプロファイルを変更した場合は、入力値が同じでも再実行する。
 
 `save_debug_output=True`では、実行ごとのディレクトリを`ComfyUI/output/cl_mv_prompt_planner_debug/`へ作る。入力`prompt_segments.md`と`planning_markdown.md`、設定manifest、各推論のsystem prompt、送信要求JSON、行指向の生LLM応答、Pythonが解析した検証済みデータ及び検証metadataを保存する。`final_state.json`には、最後に正常確定したSong BibleとScene、実行中batch/attempt、回収済みScene ID、未解決Scene ID及び最終エラーを保存する。成功時は`planned_markdown.md`と`planner.json`、失敗時は`error.txt`も保存する。入力や歌詞を含むため共有前に内容を確認する。
 
 Plannerは会話履歴を累積しない。Song Bibleと各Scene batchはそれぞれsystem promptとuser JSONから成る独立リクエストである。Scene間の必要情報はSong Bible、Scene別`active_section_motifs`及び、直前に検証済みのSceneから作る構造化`previous_scene_tail`として明示的に渡す。同一応答内の後続Sceneには直前レコードを継続情報として扱わせる。従ってdebug bundleの各eventが、その推論時点の完全なチャット入力と出力である。
 
-PythonからLLMへの入力だけを浅いJSONとし、`PlanningBrief`は`hard_requirements.subjects`、`retention`、`common`の配列へ分解する。歌詞はSong Bible用の`section_sources`とScene用の`lyric_groups`へ一意にまとめる。LLM出力はJSONではなく、Song Bible `clmv-song-bible-line-v2`及びScene `clmv-scene-line-v1`の行指向形式である。
+PythonからLLMへの入力だけを浅いJSONとし、`PlanningBrief`は`hard_requirements.subjects`、`retention`、`common`の配列へ分解する。歌詞はSong Bible用の`section_sources`とScene用の`lyric_groups`へ一意にまとめる。LLM出力はJSONではなく、Song Bible `clmv-song-bible-line-v3`及びScene `clmv-scene-line-v2`の行指向形式である。選択プロファイルとScene別`auxiliary_visual_contract`もJSON入力へ明示し、LLMに暗黙推定させない。
+
+`performance_only`は補助映像を禁止する。`lyric_visuals_light_8b`はPythonがScene番号から必須kindを循環決定し、各Sceneへ正確に一つだけ要求する。`lyric_visuals_full`は許可kindから一～三個をモデルに選択させる。個数又はkind違反は該当Sceneだけを部分再試行する。
 
 完全一致するScene計画は、Unicode NFKC、空白単一化及び前後空白除去後の構図、全ACTION、環境、カメラを署名化して検出する。先のSceneを保持し、後のSceneだけを部分再試行する。重複検出後は未解決Sceneを一件ずつ時間順に再送し、直前の確定Sceneを`previous_scene_tail`へ反映する。既知の重複元と直前Sceneは、本文ではなくSHA-256、Shot数、先頭ACTION数及びcamera typeのcompact fingerprintとして`avoid_duplicate_plans`へ渡す。`duplicate_repair`でfingerprint群にないShot/ACTION件数を推奨し、低temperatureで同一応答が続く場合は再試行ごとに推奨形状を変更する。推奨件数と異なるだけでは拒否せず、完全署名が重複元と異なれば受理する。意味的に似ているだけのSceneや一部フィールドの一致は除外しない。
 

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "profile_id": "lyric_visuals_full",
+  "display_name": "Lyric visuals full (14B+)",
+  "description": "Allow one to three coordinated lyric-inspired auxiliary animations, including abstract cutaways and environmental metaphors, for larger planning models.",
+  "ui_order": 30,
+  "minimum_aux_visuals_per_scene": 1,
+  "maximum_aux_visuals_per_scene": 3,
+  "assignment_mode": "model",
+  "allowed_kinds": [
+    "symbolic_object",
+    "spatial_metaphor",
+    "light_shadow",
+    "foreground_transition",
+    "environmental_effect",
+    "impact_effect",
+    "abstract_cutaway",
+    "ink_transformation"
+  ]
+}

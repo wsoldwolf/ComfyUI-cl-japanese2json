@@ -33,12 +33,15 @@ node_japanese_to_json/
     errors.py
     structures.py
     protected_text.py
+    term_dictionary.py
     llmj2e.py
     mdparse.py
     jsongen.py
     system_prompt.py
     prompts/
       llmj2e_qwen3_8b_system_prompt.txt
+  dictionaries/
+    prompt_terms.csv
 node_vocal_to_prompt_segments/
   node.py
   errors.py
@@ -55,7 +58,14 @@ node_mv_prompt_planner/
   validation.py
   renderer.py
   prompt_loader.py
+  visual_profiles.py
   prompts/
+    song_bible_system_prompt.txt
+    scene_plan_system_prompt.txt
+    profiles/
+      performance_only/
+      lyric_visuals_light_8b/
+      lyric_visuals_full/
 node_scene_limiter/
   node.py
   errors.py

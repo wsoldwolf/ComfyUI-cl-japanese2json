@@ -26,6 +26,7 @@ Pythonが決定するもの:
 - Scene別active motifの選択
 - 直前に検証済みのSceneから作る`previous_scene_tail`
 - 完全一致する重複Sceneの検出
+- 選択した視覚拡張プロファイルとScene別`AUX_VISUAL`契約
 
 LLMが計画するもの:
 
@@ -34,6 +35,7 @@ LLMが計画するもの:
 - 構図、人物動作、環境変化及び連続性
 - 公式H3カメラ種別、移動量、速度及び自然言語の運動説明
 - 歌詞を逐語表示せず映像へ変換する比喩表現
+- 選択プロファイルが許可した範囲内の付加映像
 
 LLMは固定タイムライン、歌詞、発声許可、参照番号又はディレクティブを追加、削除、移動、変更しない。
 
@@ -122,7 +124,7 @@ Suno形式の全行見出し`[... ]`は、次の歌詞行へ所属するセク�
 - セクション別の色、形、照明及び抽象モチーフ
 - カメラワークの展開方針
 
-固定条件はPythonが解析した`PlanningBrief`だけを正本とし、Song Bibleへ再生成させない。Song Bible v2、確定条件と創作情報の分離、構造化JSON入力、active motif、直前Sceneの最終状態、重複Scene排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`を正本とする。
+固定条件はPythonが解析した`PlanningBrief`だけを正本とし、Song Bibleへ再生成させない。Song Bible v3、確定条件と創作情報の分離、構造化JSON入力、active motif、直前Sceneの最終状態、重複Scene排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`を正本とする。視覚拡張プロファイル、`AUX_VISUAL`及び拡張方法は`docs/cl_mv_prompt_visual_profiles_spec.md`を正本とする。
 
 ### 5.2 Sceneバッチ
 
@@ -141,6 +143,7 @@ Song bibleは次の順序とする。`<TAB>`は実際のタブ文字を表す。
 ```text
 SONG_BIBLE
 VISUAL_ARC<TAB>全体の視覚的な弧
+VISUAL_ENRICHMENT_STRATEGY<TAB>選択プロファイルに従う付加映像方針
 CAMERA_STRATEGY<TAB>カメラ展開方針
 SECTION_MOTIF<TAB>[Chorus]<TAB>セクションモチーフ
 END_SONG_BIBLE
@@ -155,6 +158,7 @@ SHOT<TAB>0
 COMPOSITION<TAB>構図
 ACTION<TAB>1<TAB>最初の動作
 ACTION<TAB>2<TAB>次の動作
+AUX_VISUAL<TAB>symbolic_object<TAB>歌詞を映像化する具体的な補助アニメーション
 ENVIRONMENT<TAB>背景と照明
 CAMERA<TAB>arc<TAB>medium<TAB>moderate<TAB>被写体との関係を含むカメラ記述
 END_SHOT
@@ -166,6 +170,7 @@ END_SCENE
 - `start_ms`: Scene相対時刻。最初は0、以後は厳密に増加し、Scene長未満
 - `composition`: 画角、人物・物体の位置及び視線
 - 1～8個の`ACTION`: 1から始まる連番。実行時系列と優先順位の昇順に並べる
+- 選択プロファイルのScene契約を満たす`AUX_VISUAL`: 人物動作及びカメラとは独立した付加映像
 - `environment`: 背景、照明及び状態変化
 - `camera.type`: 公式カメラ種別
 - `camera.amplitude`: 移動時は`small`、`medium`又は`large`、`static`だけは`none`

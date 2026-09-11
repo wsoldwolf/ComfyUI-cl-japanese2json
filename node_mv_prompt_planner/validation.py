@@ -8,12 +8,18 @@ import unicodedata
 from .errors import PlannerResponseError
 from .placeholders import ReferenceProtector
 from .structures import (
+    AuxiliaryVisual,
     CameraPlan,
     PlannedScene,
     PlannedShot,
     SectionMotif,
     SongBible,
     TimelineScene,
+)
+from .visual_profiles import (
+    DEFAULT_VISUAL_PROFILE_ID,
+    VisualEnrichmentProfile,
+    load_visual_profile,
 )
 
 
@@ -188,10 +194,26 @@ def parse_song_bible_response(
         protector,
         maximum=2000,
     )
+    if len(body) < 2 or not body[1].startswith(
+        "VISUAL_ENRICHMENT_STRATEGY\t"
+    ):
+        raise PlannerResponseError(
+            "Song bible expected VISUAL_ENRICHMENT_STRATEGY after VISUAL_ARC"
+        )
+    visual_enrichment_strategy = _verified_reference_text(
+        _field(
+            body[1],
+            "VISUAL_ENRICHMENT_STRATEGY",
+            "song_bible.visual_enrichment_strategy",
+        ),
+        "song_bible.visual_enrichment_strategy",
+        protector,
+        maximum=2000,
+    )
     camera: list[str] = []
     motifs: list[SectionMotif] = []
     phase = "camera"
-    for line_number, line in enumerate(body[1:], start=3):
+    for line_number, line in enumerate(body[2:], start=4):
         if line.startswith("CONTINUITY_RULE\t"):
             raise PlannerResponseError(
                 f"Song bible line {line_number} uses removed CONTINUITY_RULE field"
@@ -240,6 +262,7 @@ def parse_song_bible_response(
     return SongBible(
         visual_arc=visual_arc,
         camera_strategy=tuple(camera),
+        visual_enrichment_strategy=visual_enrichment_strategy,
         section_motifs=tuple(motifs),
     )
 
@@ -354,6 +377,25 @@ def camera_guard_issues(scene: PlannedScene) -> list[dict[str, object]]:
                         ),
                     }
                 )
+        for visual_number, visual in enumerate(shot.auxiliary_visuals, start=1):
+            if _CAMERA_ACTION_RE.search(
+                unicodedata.normalize("NFKC", visual.description)
+            ):
+                issues.append(
+                    {
+                        "code": "camera_motion_in_auxiliary_visual",
+                        "scene_id": scene.scene_id,
+                        "shot_number": shot_number,
+                        "visual_number": visual_number,
+                        "camera_type": camera.type,
+                        "description": camera.description,
+                        "message": (
+                            f"Scene {scene.scene_id} Shot {shot_number} AUX_VISUAL "
+                            f"{visual_number} contains explicit camera motion while a "
+                            "separate CAMERA field is present"
+                        ),
+                    }
+                )
     return issues
 
 
@@ -369,6 +411,7 @@ def vocal_guard_issues(
             (
                 shot.composition,
                 *shot.subject_actions,
+                *(value.description for value in shot.auxiliary_visuals),
                 shot.environment,
                 shot.camera.description,
             )
@@ -411,6 +454,10 @@ def scene_signature(scene: PlannedScene) -> tuple[object, ...]:
                 shot.start_ms,
                 normalize(shot.composition),
                 tuple(normalize(value) for value in shot.subject_actions),
+                tuple(
+                    (value.kind, normalize(value.description))
+                    for value in shot.auxiliary_visuals
+                ),
                 normalize(shot.environment),
                 shot.camera.type,
                 shot.camera.amplitude,
@@ -425,6 +472,7 @@ def _parse_scene_record(
     lines: list[str],
     timeline: TimelineScene,
     protector: ReferenceProtector,
+    visual_profile: VisualEnrichmentProfile,
 ) -> PlannedScene:
     scene_id = timeline.scene_id
     context = f"Scene {scene_id}"
@@ -483,6 +531,37 @@ def _parse_scene_record(
             cursor += 1
         if not 1 <= len(actions) <= 8:
             raise PlannerResponseError(f"{shot_context} requires 1-8 ACTION lines")
+        auxiliary_visuals: list[AuxiliaryVisual] = []
+        while cursor < len(lines) - 1 and lines[cursor].startswith(
+            "AUX_VISUAL\t"
+        ):
+            parts = lines[cursor].split("\t", 2)
+            if len(parts) != 3:
+                raise PlannerResponseError(
+                    f"{shot_context} AUX_VISUAL requires kind and description"
+                )
+            if visual_profile.maximum_aux_visuals_per_scene == 0:
+                raise PlannerResponseError(
+                    f"{shot_context} profile {visual_profile.profile_id!r} forbids AUX_VISUAL"
+                )
+            kind = _text(
+                parts[1], f"{shot_context}.auxiliary_visual.kind", maximum=100
+            )
+            if kind not in visual_profile.allowed_kinds:
+                raise PlannerResponseError(
+                    f"{shot_context} AUX_VISUAL uses unknown kind {kind!r} for "
+                    f"profile {visual_profile.profile_id!r}"
+                )
+            description = protector.restore(
+                _text(
+                    parts[2],
+                    f"{shot_context}.auxiliary_visual.description",
+                )
+            )
+            auxiliary_visuals.append(
+                AuxiliaryVisual(kind=kind, description=description)
+            )
+            cursor += 1
         if cursor >= len(lines) - 1:
             raise PlannerResponseError(f"{shot_context} is incomplete")
         environment = protector.restore(
@@ -542,12 +621,34 @@ def _parse_scene_record(
                     speed=speed,
                     description=description,
                 ),
+                auxiliary_visuals=tuple(auxiliary_visuals),
             )
         )
         if len(shots) > 6:
             raise PlannerResponseError(f"{context} permits at most 6 Shots")
     if not shots:
         raise PlannerResponseError(f"{context} requires 1-6 Shots")
+    visual_contract = visual_profile.scene_contract(scene_id)
+    all_auxiliary_visuals = tuple(
+        visual for shot in shots for visual in shot.auxiliary_visuals
+    )
+    visual_count = len(all_auxiliary_visuals)
+    minimum = visual_profile.minimum_aux_visuals_per_scene
+    maximum = visual_profile.maximum_aux_visuals_per_scene
+    if not minimum <= visual_count <= maximum:
+        raise PlannerResponseError(
+            f"{context} profile {visual_profile.profile_id!r} requires "
+            f"{minimum}-{maximum} AUX_VISUAL line(s) across the Scene; got {visual_count}"
+        )
+    required_kind = visual_contract["required_kind"]
+    if required_kind is not None and (
+        visual_count != 1 or all_auxiliary_visuals[0].kind != required_kind
+    ):
+        actual_kinds = [value.kind for value in all_auxiliary_visuals]
+        raise PlannerResponseError(
+            f"{context} profile {visual_profile.profile_id!r} requires AUX_VISUAL "
+            f"kind {required_kind!r}; got {actual_kinds}"
+        )
     return PlannedScene(scene_id=scene_id, scene_intent=intent, shots=tuple(shots))
 
 
@@ -555,7 +656,11 @@ def parse_scene_response(
     content: str,
     pending: dict[int, TimelineScene],
     protector: ReferenceProtector,
+    *,
+    visual_profile: VisualEnrichmentProfile | None = None,
 ) -> tuple[dict[int, PlannedScene], dict[int, str]]:
+    if visual_profile is None:
+        visual_profile = load_visual_profile(DEFAULT_VISUAL_PROFILE_ID)
     lines = _lines(content, "Scene planning")
     starts = [index for index, line in enumerate(lines) if line.startswith("SCENE\t")]
     if not starts or starts[0] != 0:
@@ -584,7 +689,7 @@ def parse_scene_response(
         seen.add(scene_id)
         try:
             recovered[scene_id] = _parse_scene_record(
-                block, pending[scene_id], protector
+                block, pending[scene_id], protector, visual_profile
             )
         except PlannerResponseError as exc:
             errors[scene_id] = str(exc)

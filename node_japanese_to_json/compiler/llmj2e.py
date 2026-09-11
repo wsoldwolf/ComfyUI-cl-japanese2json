@@ -16,8 +16,10 @@ from .protected_text import (
     contains_unprotected_japanese,
     protect_text,
     restore_text,
+    unprotected_japanese_fragments,
     validate_protected_translation,
 )
+from .term_dictionary import normalize_prompt_terms
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
@@ -770,7 +772,8 @@ def _build_translation_stream(records: Iterable[TranslationRecord]) -> Translati
         code = SECTION_STREAM_CODES[record.section]
         number = int(record.record_id[1:])
         marker_token = f"{prefix}{code}{number}X"
-        parts.append(f"{marker_token} {record.payload.text}")
+        source_text, _ = normalize_prompt_terms(record.payload.text)
+        parts.append(f"{marker_token} {source_text}")
         stream_records.append(StreamRecord(record, marker_token))
         protected_tokens.extend(record.payload.tokens)
 
@@ -792,6 +795,9 @@ def _user_payload(
     requirement = (
         "Translate the Japanese prose inside the single protected stream below. Return only the "
         "translated raw stream, without JSON or quotes. "
+        "Translate every Japanese character sequence, including an isolated word inside "
+        "otherwise-English prose; no hiragana, katakana, or kanji may remain outside "
+        "protected direct speech. "
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
         "A SUB marker starts a singular noun phrase ending in an ASCII period; RET, COM, SCN, and SND "
         "markers start concise natural US English. RET translates only a retention explanation, "
@@ -1124,8 +1130,12 @@ def _validate_translation_text(record: TranslationRecord, translated: str) -> st
             f"Record {record.record_id} has invalid restored direct-speech tags"
         ) from exc
     if japanese_remains:
+        fragments = unprotected_japanese_fragments(restored)
+        fragment_summary = ", ".join(repr(value) for value in fragments[:8])
+        detail = f": {fragment_summary}" if fragment_summary else ""
         raise TranslationError(
-            f"Record {record.record_id} still contains Japanese outside protected direct speech"
+            f"Record {record.record_id} still contains Japanese outside protected "
+            f"direct speech{detail}"
         )
     return restored
 
@@ -1598,6 +1608,13 @@ def _validate_stream_record_text(
     all_protected_tokens: tuple[str, ...],
 ) -> str:
     translated = _restore_reference_aliases(stream_record, translated)
+    translated, normalized_terms = normalize_prompt_terms(translated)
+    if normalized_terms:
+        LOGGER.warning(
+            "[cl_japanese2json] Repaired prompt dictionary term(s) in %s: %s",
+            stream_record.record.record_id,
+            ", ".join(repr(value) for value in normalized_terms),
+        )
     own_tokens = set(stream_record.record.payload.tokens)
     foreign = [
         token
@@ -1820,6 +1837,7 @@ def _translate_batch(
     first_error: TranslationError | None = None
     last_error: TranslationError | None = None
     attempt_record_limit = len(records)
+    validation_no_progress_streak = 0
 
     while unresolved_indices:
         attempt_indices = unresolved_indices[:attempt_record_limit]
@@ -2050,6 +2068,31 @@ def _translate_batch(
         attempted_unresolved = [
             index for index in attempt_indices if validated[index] is None
         ]
+        if (
+            attempted_unresolved
+            and len(attempted_unresolved) == len(attempt_indices)
+        ):
+            validation_no_progress_streak += 1
+            retries_remain = retry_max == -1 or retry_number < retry_max
+            if (
+                retries_remain
+                and validation_no_progress_streak >= 2
+                and len(attempt_indices) > 1
+            ):
+                reduced_limit = max(1, len(attempt_indices) // 2)
+                if reduced_limit < attempt_record_limit:
+                    previous_limit = attempt_record_limit
+                    attempt_record_limit = reduced_limit
+                    validation_no_progress_streak = 0
+                    LOGGER.warning(
+                        "[cl_japanese2json] Validation made no progress twice; "
+                        "retrying unresolved translations in smaller groups: "
+                        "%d -> %d text segment(s)",
+                        min(previous_limit, len(attempt_indices)),
+                        attempt_record_limit,
+                    )
+        else:
+            validation_no_progress_streak = 0
         if not attempted_unresolved and attempt_error is None:
             LOGGER.info(
                 "[cl_japanese2json] Continuing adaptive split with %d "

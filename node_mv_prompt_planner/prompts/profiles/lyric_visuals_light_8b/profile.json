@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "profile_id": "lyric_visuals_light_8b",
+  "display_name": "Lyric visuals light (8B)",
+  "description": "Add exactly one bounded lyric-inspired auxiliary animation per Scene, with its kind assigned deterministically by Python for small-model reliability.",
+  "ui_order": 20,
+  "minimum_aux_visuals_per_scene": 1,
+  "maximum_aux_visuals_per_scene": 1,
+  "assignment_mode": "cycle",
+  "allowed_kinds": [
+    "symbolic_object",
+    "spatial_metaphor",
+    "light_shadow",
+    "foreground_transition",
+    "environmental_effect",
+    "impact_effect"
+  ]
+}

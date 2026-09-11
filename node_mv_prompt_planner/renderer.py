@@ -94,6 +94,10 @@ def render_planned_markdown(
                 lines.append(f"## ショット {_shot_seconds(shot.start_ms)}秒")
             lines.append(f"* {shot.composition}")
             lines.extend(f"* {action}" for action in _ordered_actions(shot.subject_actions))
+            lines.extend(
+                f"* 付加映像として、{visual.description}"
+                for visual in shot.auxiliary_visuals
+            )
             lines.append(f"* {shot.environment}")
             camera = shot.camera
             if camera.type == "static":

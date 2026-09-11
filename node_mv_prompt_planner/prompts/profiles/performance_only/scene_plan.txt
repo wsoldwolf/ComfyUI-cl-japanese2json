@@ -1,0 +1,1 @@
+Output no AUX_VISUAL line in any Scene. Use only COMPOSITION, ACTION, ENVIRONMENT, and CAMERA to develop the existing subject and world. Do not add a lyric-derived prop, symbolic object, abstract road, foreground transition, or environment transformation.

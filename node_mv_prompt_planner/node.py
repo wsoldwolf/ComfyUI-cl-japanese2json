@@ -19,6 +19,11 @@ from .planning import generate_mv_plan
 from .prompt_loader import planner_prompts_fingerprint
 from .renderer import render_planned_markdown
 from .timeline_parser import parse_prompt_timeline
+from .visual_profiles import (
+    DEFAULT_VISUAL_PROFILE_ID,
+    discover_visual_profile_ids,
+    load_visual_profile,
+)
 
 
 LOGGER = logging.getLogger("cl_mv_prompt_planner")
@@ -56,6 +61,7 @@ class CLMVPromptPlannerGGUF:
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         model_names = cls.discover_model_names()
+        visual_profile_ids = discover_visual_profile_ids()
         return {
             "required": {
                 "prompt_segments": (
@@ -156,6 +162,13 @@ class CLMVPromptPlannerGGUF:
                         "tooltip": "warn keeps the LLM plan and logs vocal cues that may conflict with the locked Timeline; strict retries only the affected Scene. Singing words in an already voiced Scene refer to the locked Source Vocal and are always allowed.",
                     },
                 ),
+                "visual_enrichment_profile": (
+                    visual_profile_ids,
+                    {
+                        "default": DEFAULT_VISUAL_PROFILE_ID,
+                        "tooltip": "Selects a bundled scalable system-prompt profile. performance_only preserves current conservative planning; lyric_visuals_light_8b requires one bounded auxiliary visual per Scene; lyric_visuals_full permits one to three for larger models.",
+                    },
+                ),
             },
         }
 
@@ -223,6 +236,7 @@ class CLMVPromptPlannerGGUF:
             raise MVPlannerError("camera_guard must be warn or strict")
         if values["vocal_guard"] not in {"warn", "strict"}:
             raise MVPlannerError("vocal_guard must be warn or strict")
+        load_visual_profile(values["visual_enrichment_profile"])
         for name in (
             "flash_attn",
             "op_offload",
@@ -258,6 +272,7 @@ class CLMVPromptPlannerGGUF:
         save_debug_output: bool = False,
         camera_guard: str = "warn",
         vocal_guard: str = "warn",
+        visual_enrichment_profile: str = DEFAULT_VISUAL_PROFILE_ID,
     ) -> tuple[str, str, str]:
         with self._lock:
             self._validate_parameters(
@@ -278,6 +293,7 @@ class CLMVPromptPlannerGGUF:
                 retry_max=retry_max,
                 camera_guard=camera_guard,
                 vocal_guard=vocal_guard,
+                visual_enrichment_profile=visual_enrichment_profile,
                 save_debug_output=save_debug_output,
             )
             brief = parse_planning_brief(planning_markdown)
@@ -303,6 +319,7 @@ class CLMVPromptPlannerGGUF:
                 "retry_max": retry_max,
                 "camera_guard": camera_guard,
                 "vocal_guard": vocal_guard,
+                "visual_enrichment_profile": visual_enrichment_profile,
                 "save_debug_output": save_debug_output,
             }
 
@@ -353,6 +370,7 @@ class CLMVPromptPlannerGGUF:
                     retry_max=retry_max,
                     camera_guard=camera_guard,
                     vocal_guard=vocal_guard,
+                    visual_enrichment_profile=visual_enrichment_profile,
                     progress_callback=progress,
                     interrupt_callback=_throw_if_interrupted,
                     debug_events=(debug_events if save_debug_output else None),
@@ -369,7 +387,8 @@ class CLMVPromptPlannerGGUF:
                     f"chat_format={chat_format}; camera_guard={camera_guard}; "
                     f"camera_warnings={len(plan.metadata.get('camera_warnings', []))}; "
                     f"vocal_guard={vocal_guard}; "
-                    f"vocal_warnings={len(plan.metadata.get('vocal_warnings', []))}"
+                    f"vocal_warnings={len(plan.metadata.get('vocal_warnings', []))}; "
+                    f"visual_enrichment_profile={visual_enrichment_profile}"
                 )
                 log_node_success(
                     LOGGER,

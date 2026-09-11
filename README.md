@@ -497,6 +497,10 @@ Qwen3ではユーザーメッセージ末尾の`/no_think`に加え、llama-cpp-
 
 応答では構造と保護プレースホルダの個数・順序・所有区間、コードフェンス、thinking、日本語残留などを検証します。正常に閉じた完全な`<think>...</think>` blockは位置にかかわらずQwenの制御出力として除去しますが、未閉鎖タグは推測して削除しません。応答全体の検証に失敗しても、余分な前置きや局所的な構造破損から独立して境界を確定できる正常区間を個別回収し、未解決区間だけを新しいseedで`retry_max`まで再送します。再送時は不透明な参照プレースホルダへ標準参照タグを一時注釈し、Qwenが`<Subject N>`等を代名詞として省略し続ける現象を抑えます。原文の文頭参照だけがなお省略された場合は、文境界が一意な場合に限って決定論的に復元します。
 
+同じ未解決グループが2回連続で一件も減らない場合は、グループを半分ずつ縮小し、必要なら1行単位で再試行します。英語文中に日本語が一語だけ残った場合も、残留語を検証エラーと次の再送要求へ明示します。
+
+意味が一意な固定プロンプト用語は、外部CSV辞書を使って保護台詞の外だけをPythonで決定論的に英語化します。同梱辞書には`画面`、`画面全体`、`画面外`、`画面中央`等を収録しています。モデルが`entire画面`のような混在語を再生成した場合も検証前に同じ辞書で修復します。ユーザーは`ComfyUI/user/cl_japanese2json/prompt_terms.csv`へ`source,target`列を持つUTF-8 CSVを置くことで、コードを変更せず語句の追加と標準定義の上書きができます。ファイル更新は次の実行で自動再読込され、ワークフローの入力構造は変わりません。詳細は[CLプロンプト用語辞書仕様](docs/cl_prompt_term_dictionary_spec.md)を参照してください。
+
 `save_debug_output=True`では、実行ごとのディレクトリを`ComfyUI/output/cl_japanese2json_debug/`へ作り、`source.md`、system prompt、保護要求、LLM生応答、検証メタデータ、成功時の`canonical.md`と`result.json`、失敗時の`error.txt`を保存します。入力内容を含むため共有前に確認してください。`ComfyUI/input`へは書きません。
 
 system promptは`node_japanese_to_json/compiler/prompts/llmj2e_qwen3_8b_system_prompt.txt`からUTF-8で読み込みます。変更はComfyUIキャッシュ指紋へ反映されます。
@@ -576,6 +580,8 @@ CL MV Prompt Planner (GGUF).planned_markdown
 
 Planning Markdownには既存文法の`# サブジェクト`、任意の`# 保持分析`及び任意の`# 共通プロンプト`だけを書きます。Scene、Shot及び音響はVocalノード出力から固定されるため重ねて記述しません。`chat_format=auto`はGGUF内のchat templateを使用し、Qwen系とGemma系をモデル名から切り替える通常設定です。メタデータが不完全なGGUFに限り`qwen`又は`gemma`を明示します。
 
+任意入力`visual_enrichment_profile`で、歌詞から生成する付加映像の密度を明示的に選べます。既定の`performance_only`は人物演技、既存環境、照明及びカメラだけを計画します。`lyric_visuals_light_8b`は8B向けにSceneごと一つの種類をPythonが循環指定し、象徴物、空間的比喩、光と影、前景トランジション又は環境エフェクトを簡潔に加えます。`lyric_visuals_full`は14B以上を推奨し、Sceneごと一～三個の抽象的な道、象徴物、環境変化、インク変形又は抽象カットを許可します。どの設定でもSubject、保持分析、Timeline、発声及び禁止事項が優先されます。
+
 プランナーは最初に楽曲全体のsong bibleを作り、その後`scenes_per_batch`件ずつSceneを計画します。LLMへJSONを生成させず、固定フィールドの行指向プロトコルだけを返させます。検証に失敗しても正常Sceneを保持し、欠落又は不正なSceneだけを、前回のエラー内容と正確な要求Scene IDを添えて新しいseedで再送します。連続動作は`ACTION 1`からの連番で受け取り、Pythonが順序を維持した別バレットへ変換し、`最初に、`、`次に、`、`最後に、`を付けてH3へ時間順を明示します。最終出力は既存コンパイラで再検証される日本語縮小Markdownです。
 
 プランナーはv0.2.0から、Planning MarkdownをPythonで`hard_requirements`配列へ、Sunoセクションと歌詞を`section_sources`及びScene別`lyric_groups`へ構造化してLLMへ渡します。Song Bibleは創作ガイドだけを生成し、固定条件を言い換えません。各Sceneには該当セクションのモチーフと、直前に検証済みのSceneの最終構図・動作・環境・カメラだけを渡します。完全一致する重複Sceneは後のSceneだけを再試行します。重複後は未解決Sceneを一件ずつ時間順に再送し、直前Sceneを即座に継承します。禁止例本文は模倣を誘発するため再掲せず、既知の重複元と直前Sceneをcompact fingerprintとして渡します。Pythonが未使用のShot/ACTION件数を`duplicate_repair`で強制し、低temperatureでseedを変えても同じ応答になる連鎖を避けます。
@@ -586,7 +592,7 @@ batch内の全Sceneが不正な場合も、以降は一件ずつ再送します�
 
 任意入力`vocal_guard`の既定`warn`は、Timelineと矛盾する発声cueを黄色のWARNINGとして報告し、Sceneを保持します。`strict`では該当Sceneだけを再試行します。有声Sceneの「歌う」「歌い」「歌唱」「口パク」は、固定済みSource Vocalへの視覚同期として常に許可されます。無声Sceneの歌唱や、固定音響にない叫び、囁き、うめき、語り等がguard対象です。
 
-`save_debug_output=True`にすると、各独立チャットのsystem prompt、送信要求JSON、行指向の生応答、解析済みデータ、検証結果、カメラ警告、重複元Sceneと、回収済み・未解決Sceneを含む最終部分状態を`ComfyUI/output/cl_mv_prompt_planner_debug/`へ保存します。失敗時にも保存されるため、同じScene IDをモデルが繰り返したのか、固定フィールドが欠落したのか、個別Scene検証で除外されたのかを区別できます。入力と歌詞を含むため共有前に確認してください。詳細は[MV Prompt Plannerコア仕様](docs/cl_mv_prompt_planner_spec.md)、[ComfyUIノード仕様](docs/cl_mv_prompt_planner_comfyui_node_spec.md)及び[Song Bible仕様](docs/cl_mv_prompt_planner_song_bible_spec.md)を参照してください。
+`save_debug_output=True`にすると、各独立チャットのsystem prompt、送信要求JSON、行指向の生応答、解析済みデータ、検証結果、カメラ警告、重複元Sceneと、回収済み・未解決Sceneを含む最終部分状態を`ComfyUI/output/cl_mv_prompt_planner_debug/`へ保存します。失敗時にも保存されるため、同じScene IDをモデルが繰り返したのか、固定フィールドが欠落したのか、個別Scene検証で除外されたのかを区別できます。入力と歌詞を含むため共有前に確認してください。詳細は[MV Prompt Plannerコア仕様](docs/cl_mv_prompt_planner_spec.md)、[ComfyUIノード仕様](docs/cl_mv_prompt_planner_comfyui_node_spec.md)、[Song Bible仕様](docs/cl_mv_prompt_planner_song_bible_spec.md)及び[視覚拡張プロファイル仕様](docs/cl_mv_prompt_visual_profiles_spec.md)を参照してください。
 
 ## テスト生成用にScene数を制限
 

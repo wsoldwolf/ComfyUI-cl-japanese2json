@@ -59,12 +59,19 @@ class CameraPlan:
 
 
 @dataclass(frozen=True)
+class AuxiliaryVisual:
+    kind: str
+    description: str
+
+
+@dataclass(frozen=True)
 class PlannedShot:
     start_ms: int
     composition: str
     subject_actions: tuple[str, ...]
     environment: str
     camera: CameraPlan
+    auxiliary_visuals: tuple[AuxiliaryVisual, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -84,6 +91,7 @@ class SectionMotif:
 class SongBible:
     visual_arc: str
     camera_strategy: tuple[str, ...]
+    visual_enrichment_strategy: str = ""
     section_motifs: tuple[SectionMotif, ...] = ()
 
 

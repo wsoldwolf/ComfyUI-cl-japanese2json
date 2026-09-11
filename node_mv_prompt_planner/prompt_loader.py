@@ -7,6 +7,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from .errors import MVPlannerError
+from .visual_profiles import (
+    VisualEnrichmentProfile,
+    compose_profiled_system_prompt,
+    visual_profiles_fingerprint,
+)
 
 
 _PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
@@ -35,7 +40,7 @@ def planner_prompts_fingerprint() -> tuple[object, ...]:
         values.extend(
             (name, stat.st_size, stat.st_mtime_ns, hashlib.sha256(data).hexdigest())
         )
-    return tuple(values)
+    return tuple(values) + visual_profiles_fingerprint()
 
 
 @lru_cache(maxsize=16)
@@ -60,3 +65,20 @@ def load_planner_prompt(name: str) -> str:
         raise MVPlannerError(f"Could not load planner prompt {name!r}: {exc}") from exc
     digest = hashlib.sha256(data).hexdigest()
     return _load_cached(name, stat.st_mtime_ns, stat.st_size, digest)
+
+
+def load_profiled_planner_prompt(
+    name: str,
+    profile: VisualEnrichmentProfile,
+) -> str:
+    stage_by_name = {
+        "song_bible_system_prompt.txt": "song_bible",
+        "scene_plan_system_prompt.txt": "scene_plan",
+    }
+    if name not in stage_by_name:
+        raise MVPlannerError("Invalid planner prompt filename")
+    return compose_profiled_system_prompt(
+        load_planner_prompt(name),
+        profile,
+        stage=stage_by_name[name],
+    )

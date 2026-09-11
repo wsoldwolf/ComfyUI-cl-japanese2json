@@ -2,7 +2,7 @@
 
 ## 1. 状態と目的
 
-本書は`CL MV Prompt Planner (GGUF)`が内部で使用するSong Bible v2の正本仕様である。Python実装及びsystem promptはv0.2.0で本仕様へ移行した。
+本書は`CL MV Prompt Planner (GGUF)`が内部で使用するSong Bible v3の正本仕様である。v3はv0.2.0の固定条件分離を維持し、選択式の視覚拡張方針を加える。
 
 Song BibleはMiniMax H3公式Full-Reference出力の一部ではない。本プロジェクト独自の全曲共通クリエイティブ計画であり、独立したSceneバッチへ次を一貫して渡すために使用する。
 
@@ -18,9 +18,10 @@ Song Bibleを最終縮小Markdown又はH3 Full-Reference 6セクションへ直�
 
 1. Pythonが保持する`PlanningBrief`のSubject、Retention及びCommon。
 2. Pythonが保持するTimelineのScene番号、秒数、ソース範囲、voiced/silent、歌詞、リップシンク及び音響。
-3. Song Bibleのクリエイティブ計画。
-4. 現在Sceneの歌詞から得る映像的着想。
-5. 直前Sceneの最終状態。
+3. Pythonが検証した視覚拡張プロファイル及びScene別補助映像契約。
+4. Song Bibleのクリエイティブ計画。
+5. 現在Sceneの歌詞から得る映像的着想。
+6. 直前Sceneの最終状態。
 
 上位の情報を下位の情報が変更、緩和、再解釈又は上書きしてはならない。
 
@@ -35,6 +36,7 @@ Song Bibleを最終縮小Markdown又はH3 Full-Reference 6セクションへ直�
 class SongBible:
     visual_arc: str
     camera_strategy: tuple[str, ...]
+    visual_enrichment_strategy: str = ""
     section_motifs: tuple[SectionMotif, ...] = ()
 ```
 
@@ -49,7 +51,7 @@ class SectionMotif:
     motif: str
 ```
 
-`visual_arc`、`camera_strategy`及び`section_motifs`は全てソフトなクリエイティブガイドであり、PlanningBrief又はTimelineと矛盾する場合は無効である。
+`visual_arc`、`camera_strategy`、`visual_enrichment_strategy`及び`section_motifs`は全てソフトなクリエイティブガイドであり、PlanningBrief、Timeline又は選択プロファイルと矛盾する場合は無効である。
 
 ## 4. LLM入力
 
@@ -121,11 +123,12 @@ Scene計画入力では、同一Scene内で連続する同じセクションを�
 
 ## 5. LLM出力プロトコル
 
-プロトコル名は`clmv-song-bible-line-v2`とする。
+プロトコル名は`clmv-song-bible-line-v3`とする。
 
 ```text
 SONG_BIBLE
 VISUAL_ARC<TAB>全体の視覚的な弧
+VISUAL_ENRICHMENT_STRATEGY<TAB>選択した視覚拡張プロファイルに従う全体方針
 CAMERA_STRATEGY<TAB>カメラ展開方針
 SECTION_MOTIF<TAB>[Chorus]<TAB>セクションモチーフ
 END_SONG_BIBLE
@@ -134,13 +137,14 @@ END_SONG_BIBLE
 規則は次のとおりである。
 
 - `VISUAL_ARC`は正確に1行。
+- `VISUAL_ENRICHMENT_STRATEGY`は正確に1行。
 - `CAMERA_STRATEGY`は1～16行。
 - `SECTION_MOTIF`は、Pythonが渡した一意なセクションラベルごとに正確に1行。
 - `SECTION_MOTIF`の順序はセクションラベルの初出順。
 - `CONTINUITY_RULE`は出力しない。
 - 値は簡潔で自然な日本語とし、タブ、改行、ディレクティブ、コメント又は引用符を含めない。
 - 歌詞を逐語表示、台詞、歌唱指示、字幕又は画面内文字へ変換しない。
-- PlanningBriefで許可されていない人物、動物、小道具、場所、動作、音声又は状態変化を追加しない。
+- PlanningBriefで許可されていない人物、動物、音声又は解剖を追加しない。選択プロファイルが明示的に許可した非人物の象徴物、抽象物、空間的比喩、トランジション又は環境エフェクトだけは、そのScene契約内で追加できる。
 - 歌詞中の名詞又は動詞を無条件に物理動作へ変換しない。確定条件と衝突する場合は、許可された表情、姿勢、照明、構図又は抽象表現へ置き換える。
 - 複数人物が許可されていない場合、「二人」「旅人たち」等を生成しない。
 
@@ -294,14 +298,16 @@ Lyrics are visual inspiration only. Do not treat every lyric noun or verb as a
 literal visible action. If a lyric conflicts with hard requirements, express its
 emotion through permitted pose, framing, lighting, or abstract imagery.
 
-Do not introduce people, animals, props, locations, motions, voices, or state
-changes not permitted by hard_requirements.
+Do not introduce people, animals, voices, readable text, or anatomy not permitted
+by hard_requirements. The selected visual_enrichment_profile may authorize bounded
+non-character auxiliary visuals; it never overrides hard requirements.
 Do not create dialogue, singing instructions, laughter, subtitles, typography,
 or on-screen lyrics.
 
 Return only this tab-separated protocol:
 SONG_BIBLE
 VISUAL_ARC<TAB>one feasible global visual arc
+VISUAL_ENRICHMENT_STRATEGY<TAB>one concise rule matching the selected profile
 CAMERA_STRATEGY<TAB>one camera-development rule
 SECTION_MOTIF<TAB>exact supplied section label<TAB>one reusable visual motif
 END_SONG_BIBLE
@@ -311,7 +317,7 @@ END_SONG_BIBLE
 
 - `VISUAL_ARC`は固定位置及び移動禁止条件を破らず実現可能であること。
 - `SECTION_MOTIF`は対応するセクションだけから着想し、別セクションの歌詞を使用しないこと。
-- 固定条件にない複数人物又は物体を暗黙に追加しないこと。
+- 固定条件にない複数人物を暗黙に追加しないこと。物体又は抽象映像は選択プロファイルが許可するScene契約内だけで追加すること。
 - Song Bible自身に具体的なScene番号、Shot番号又は秒数を生成しないこと。
 - 全モチーフを同じ構図又は同じ人物動作へ縮退させないこと。
 
@@ -323,9 +329,10 @@ Scene system promptは権限順位とフィールド分離を明示する。
 Authority order:
 1. hard_requirements
 2. locked Scene timing, vocal state, lip-sync, and soundscape
-3. active_section_motifs
-4. current Scene lyrics
-5. previous_scene_tail
+3. visual_enrichment_profile and each auxiliary_visual_contract
+4. active_section_motifs
+5. current Scene lyrics
+6. previous_scene_tail
 
 Use only active_section_motifs supplied for the current Scene.
 Never select or copy a motif from another section.
@@ -335,6 +342,7 @@ complete composition, action sequence, environment, and camera plan.
 
 COMPOSITION describes framing and subject placement.
 ACTION describes subject or object action only.
+AUX_VISUAL describes only a non-character animation layer authorized by its contract.
 CAMERA is the only field that describes camera movement.
 
 Continue naturally from previous_scene_tail without repeating its final action.
@@ -371,6 +379,7 @@ debug bundleには少なくとも次を保存する。
 - Scene別`camera_protocol_repair`と使用した具体的camera値。
 - `camera_guard`警告又はstrictエラー。
 - `vocal_guard`警告又はstrictエラー。
+- 選択した`visual_enrichment_profile`とScene別`auxiliary_visual_contract`。
 
 ## 13. テスト要件
 
@@ -388,6 +397,10 @@ debug bundleには少なくとも次を保存する。
 - `camera_guard=warn`で元計画を維持して警告する。
 - `camera_guard=strict`で該当Sceneだけを再試行する。
 - 一般ACTION中の「押す」「引く」をcamera type判定へ使用しない。
+- 同梱プロファイルを発見し、manifestとsystem prompt断片を検証する。
+- `performance_only`で`AUX_VISUAL`を拒否する。
+- `lyric_visuals_light_8b`でSceneごとの必須kindと正確に一個の`AUX_VISUAL`を検証する。
+- `lyric_visuals_full`で許可kindと一～三個の`AUX_VISUAL`を検証する。
 - 最終MarkdownのScene数、時間、歌詞、リップシンク及び音響が入力と完全一致する。
 
 ## 14. 実装済み移行項目
@@ -400,7 +413,8 @@ v0.2.0では次を実装した。
 4. `previous_scene_tail`の導入。
 5. 完全重複Scene署名と部分再試行。
 6. `camera_guard`のUI、警告、strict再試行及びdebug記録。
-7. system promptを`clmv-song-bible-line-v2`へ変更。
-8. 全体自動回帰テスト。Qwen 8B実モデルデバッグはローカル生成テストで実施する。
+7. system promptを`clmv-song-bible-line-v3`及び`clmv-scene-line-v2`へ変更。
+8. manifest駆動の視覚拡張プロファイルと`AUX_VISUAL`検証を追加。
+9. 全体自動回帰テスト。Qwen 8B実モデルデバッグはローカル生成テストで実施する。
 
 既存`planner_json`はPythonが生成する検証用出力なので維持する。LLMに最終JSONを生成させてはならない。

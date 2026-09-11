@@ -1283,6 +1283,72 @@ class LLMJ2ETests(unittest.TestCase):
             any("Continuing adaptive split" in line for line in captured.output)
         )
 
+    def test_validation_stall_retries_in_smaller_groups(self) -> None:
+        def leave_japanese_when_grouped(kwargs):
+            records = request_records(kwargs["messages"])
+            if len(records) > 1:
+                return default_stream_translation(
+                    kwargs["messages"],
+                    transform=lambda record: "The ink crosses the 日本語.",
+                )
+            return default_stream_translation(kwargs["messages"])
+
+        source = "# シーン\n## ショット\n" + "\n".join(
+            f"* インクが画面を横断する{index}。" for index in range(6)
+        )
+        llm = FakeLLM([leave_japanese_when_grouped] * 10)
+        with self.assertLogs("cl_japanese2json", level="INFO") as captured:
+            output = llmj2e.translate_markdown(
+                source,
+                llm,
+                "sys",
+                max_tokens=128,
+                seed=17,
+                retry_max=4,
+            )
+
+        self.assertEqual(output.count("* "), 6)
+        self.assertEqual(
+            [len(request_records(call["messages"])) for call in llm.calls],
+            [6, 6, 3, 3, 1, 1, 1, 1, 1, 1],
+        )
+        self.assertIn("'日本語'", llm.calls[1]["messages"][-1]["content"])
+        self.assertTrue(
+            any(
+                "Validation made no progress twice" in line
+                for line in captured.output
+            )
+        )
+
+    def test_fixed_screen_term_is_normalized_before_and_after_inference(self) -> None:
+        def return_mixed_screen_term(kwargs):
+            def transform(record):
+                protected_tokens = " ".join(record["protected_placeholders"])
+                return f"{protected_tokens} moves across the entire画面."
+
+            return default_stream_translation(
+                kwargs["messages"], transform=transform
+            )
+
+        source = (
+            "# シーン\n"
+            "## ショット\n"
+            "* <Subject 1>が画面全体で「画面」と言う。"
+        )
+        llm = FakeLLM([return_mixed_screen_term])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(
+                source, llm, "sys", max_tokens=128, retry_max=0
+            )
+
+        self.assertNotIn("画面全体", request_stream(llm.calls[0]["messages"]))
+        self.assertIn("the entire frame", request_stream(llm.calls[0]["messages"]))
+        self.assertIn("moves across the entire frame", output)
+        self.assertIn("<d>[Japanese]画面</d>", output)
+        self.assertTrue(
+            any("Repaired prompt dictionary term" in line for line in captured.output)
+        )
+
     def test_retry_max_zero_disables_retries(self) -> None:
         llm = FakeLLM(["invalid"])
         with self.assertRaisesRegex(errors.TranslationError, "retry_max=0"):

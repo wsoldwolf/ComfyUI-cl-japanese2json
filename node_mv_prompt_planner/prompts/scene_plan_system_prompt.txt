@@ -10,9 +10,10 @@ Every uppercase CLMP token ending in X is an immutable reference placeholder. Co
 Authority order:
 1. hard_requirements
 2. locked Scene timing, vocal state, lip-sync, and soundscape
-3. active_section_motifs
-4. current Scene lyric_groups
-5. previous_scene_tail
+3. visual_enrichment_profile and each auxiliary_visual_contract
+4. active_section_motifs
+5. current Scene lyric_groups
+6. previous_scene_tail
 
 Hard requirements override Song Bible, lyrics, and previous_scene_tail.
 Use only active_section_motifs supplied inside the current Scene object. Never select or copy a motif from another section.
@@ -24,6 +25,7 @@ If camera_protocol_repair is not null, every CAMERA line in that Scene must use 
 
 Use MiniMax H3 detailed-description semantics. Each Shot must explicitly describe composition and subject position, chronological subject actions, environment and lighting state, and one clear camera movement.
 COMPOSITION describes framing and subject placement. ACTION describes subject or object action only. CAMERA is the only field that describes camera movement.
+AUX_VISUAL describes a non-character animation layer authorized by the selected profile. It is not a camera instruction, vocal cue, subtitle, emotion label, or replacement for ACTION or ENVIRONMENT.
 ACTION order is a binding time sequence: ACTION 1 happens first, ACTION 2 happens after ACTION 1, and later ACTION lines continue in ascending order. Arrange ACTION lines by execution priority and actual chronology, never by importance or prose style.
 Use separate ACTION lines for sequential movements. If movements are simultaneous, describe them together in one ACTION line. Never place a reaction before its cause. Use anticipation, main action, reaction or follow-through, and final pose in that order when they are relevant.
 Do not write ordering words such as 最初に, 次に, 続いて, or 最後に inside ACTION values; Python adds explicit temporal connectors while rendering the Markdown bullets.
@@ -40,7 +42,7 @@ For silent Scenes, never use 歌う, 歌い, 歌唱, 口パク, 口ずさむ, �
 For silent Scenes, do not plan singing, lip movement, speech, shouts, breaths, groans, or any human vocalization.
 Never use a speech or vocalization instruction in COMPOSITION, ACTION, ENVIRONMENT, or CAMERA. The locked lip-sync and soundscape already express all permitted vocal behavior.
 
-For each requested Scene, output exactly this record:
+For each requested Scene, output this record structure. The base example omits AUX_VISUAL only because its count is profile-dependent; when auxiliary_visual_contract requires it, insert the exact required AUX_VISUAL line or lines after ACTION and before ENVIRONMENT:
 SCENE	requested integer scene_id
 SCENE_INTENT	one concise visual-intent sentence
 SHOT	integer start_ms
@@ -53,6 +55,7 @@ END_SHOT
 END_SCENE
 
 Use 1-8 consecutive ACTION lines beginning at 1. Use 1-6 SHOT blocks per Scene. Repeat the complete SHOT through END_SHOT block only when a later Shot is genuinely necessary. Repeat the complete SCENE through END_SCENE record for each requested Scene.
+Place every AUX_VISUAL line after the final ACTION line and before ENVIRONMENT in its Shot. Its exact form is AUX_VISUAL<TAB>kind<TAB>one concise Japanese visible-animation sentence. Across the complete Scene, its count and kind must exactly satisfy auxiliary_visual_contract. The selected profile appendix decides whether AUX_VISUAL is forbidden, required once, or permitted multiple times.
 The CAMERA line above is a concrete valid example, not a required camera choice unless camera_protocol_repair says so. Replace arc, medium, moderate, and the description with another valid combination when the Scene needs another movement. Never replace them with the words type, amplitude, or speed.
 The whitespace between protocol columns in the example is one real tab character. Copy that delimiter exactly.
 Do not add fields, headings, blank prose, list markers, quotes, braces, brackets, commas, colons, or other JSON punctuation around the records.
