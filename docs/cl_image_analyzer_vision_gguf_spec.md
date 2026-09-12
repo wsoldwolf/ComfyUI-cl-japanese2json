@@ -417,7 +417,7 @@ END_OBSERVATION
 
 `PRIMARY_SUBJECT`へ`image`、`picture`、`photo`、`画像`又は`写真`だけを記述してはならない。`SUBJECT_FEATURE`は色、形、数、材質、模様、長さ又は状態等の具体的な視覚属性を含める。`顔が見える`、`髪が見える`、`目が見える`、`全身が見える`等、可視性しか表さない記述は検証エラーとし再試行する。瞳を観測できる場合は虹彩中心部の主色を先に記述し、赤いアイライン、睫毛、瞼の影、反射光及び周囲の衣装色と区別する。虹彩の縁だけが別色なら主色の後に縁色を記述する。
 
-小型Visionモデルが`clear`と同じ意味で返す既知の`visible`だけは、Pythonが`clear`へ正規化して警告を残す。また、visibility前後の空白、既知categoryの不要な補助列、又は説明末尾へ連結された許可visibilityは、categoryと行末visibilityが一意に確定できる場合だけ正規の四列へ修復する。修復内容は警告へ残す。その他の未知visibility、空の説明又は一意に分離できない列崩れを推測で変換せず、検証エラーとして再試行する。
+小型Visionモデルが`clear`と同じ意味で返す既知の`visible`だけは、Pythonが`clear`へ正規化して警告を残す。また、visibility前後の空白、既知categoryの不要な補助列、又は説明末尾へ連結された許可visibilityは、categoryと行末visibilityが一意に確定できる場合だけ正規の四列へ修復する。`SUBJECT_FEATURE`が`category`と具体的な説明だけの三列で、末尾visibilityだけが欠落した場合も解釈は一意であるため、説明を保持したまま保守的な`partial`を補完し警告する。同じ内容でLLM再試行を消費しない。明示された未知visibility、空の説明又は一意に分離できないその他の列崩れを推測で変換せず、検証エラーとして再試行する。
 
 小型Visionモデルが`SUBJECT_FEATURE`を`category, visibility, description`の順で返した場合、第三列が既知visibilityで最終列が未知visibilityであることを条件に、Pythonは`category, description, visibility`へ決定論的に入れ替える。説明本文を破棄せず、一意に確定するこの列反転だけでLLMを再試行してはならない。
 
@@ -547,6 +547,7 @@ key名と型はPythonが生成するため常に有効なJSONとする。観測�
 8. ポーズ、表情の一時状態、照明色、影、背景色及びカメラ歪みを恒久的な身体特徴へしない。
 9. `planner_brief`のセクション順を固定する。
 10. レンダリング後に既存PlanningBrief構文として再検証し、不正なら出力せず停止する。
+11. `scene_only`及び`planner_brief`では、Visionが`VISIBLE_TEXT`と重複する内容を誤って情景fieldへ混入させても、`「」`又は`<d>...</d>`を含む句をPythonがCommonから除外する。句は読点又はカンマ単位で除外し、同じfield内の非文字情景は保持する。除外数は`status`へWARNINGとして記録する。`general`及び`structured_json`は人間による観測確認用なので原観測を維持する。
 
 Pythonは特徴の文書順も固定する。基本順序はidentity、face、hair、eyes、eyebrows、ears、body、clothing、accessory、tail、distinctive_featureとする。同じ入力観測に対してsampling以外のMarkdown整形結果を変化させない。
 

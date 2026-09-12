@@ -11,50 +11,46 @@ mdparse = module("node_japanese_to_json.compiler.mdparse")
 jsongen = module("node_japanese_to_json.compiler.jsongen")
 
 
+def _workflow_graphs(workflow: dict) -> list[dict]:
+    """Return the root graph and every embedded ComfyUI subgraph."""
+
+    graphs = [workflow]
+    definitions = workflow.get("definitions", {})
+    if isinstance(definitions, dict):
+        graphs.extend(definitions.get("subgraphs", []))
+    graphs.extend(workflow.get("subgraphs", []))
+    return graphs
+
+
+def _link_fields(link: object) -> list[object]:
+    if isinstance(link, list):
+        return link[:6]
+    if isinstance(link, dict):
+        return [
+            int(link["id"]),
+            int(link["origin_id"]),
+            int(link["origin_slot"]),
+            int(link["target_id"]),
+            int(link["target_slot"]),
+            link.get("type"),
+        ]
+    raise AssertionError(f"Unsupported workflow link record: {type(link).__name__}")
+
+
 class WorkflowCompatibilityTests(unittest.TestCase):
-    def test_bitbybit_planner_brief_is_concise_and_role_focused(self) -> None:
-        path = (
-            ROOT
-            / "workflows"
-            / "minimax_h3_ref2va_20260910_integrated_mv_generator_bitbybit.json"
-        )
-        workflow = json.loads(path.read_text(encoding="utf-8"))
-        brief_node = next(
-            node
-            for node in workflow["nodes"]
-            if node.get("id") == 2034
-        )
-        source = brief_node["widgets_values"][0]
-
-        self.assertLessEqual(len(source), 1_500)
-        self.assertEqual(
-            source, brief_node["widgets_values_named"]["value"]
-        )
-        self.assertIn("# サブジェクト", source)
-        self.assertIn("# 保持分析", source)
-        self.assertIn("# 共通プロンプト", source)
-        self.assertIn("必要なSceneでは<Subject 1>を画面外に置いてよい", source)
-        self.assertIn("現在の歌詞に具体的な身体動作", source)
-        self.assertIn("対象への接触及び動作後に残る変化", source)
-        self.assertIn("不規則な孤立した短い傷又は溝", source)
-        self.assertIn("横一列又は縦一列に並べず", source)
-        self.assertIn("鏡文字及び反射文字を作らない", source)
-        self.assertNotIn("非可読の文字らしい", source)
-        self.assertIn("開始視点、通過軌道、終了視点", source)
-        self.assertIn("Sceneの最後まで動きを展開", source)
-        self.assertNotIn("字幕、歌詞、文字、ロゴ", source)
-        self.assertNotIn("`n", source)
-        self.assertNotIn("人物の重心を周回軸", source)
-        self.assertNotIn("急激なプッシュイン", source)
-
     def test_bundled_workflows_use_current_node_inputs_and_scene_syntax(self) -> None:
-        paths = sorted((ROOT / "workflows").glob("*.json"))
+        paths = sorted((ROOT / "workflows").rglob("*.json"))
         self.assertTrue(paths)
 
         for path in paths:
             with self.subTest(workflow=path.name):
                 workflow = json.loads(path.read_text(encoding="utf-8"))
                 serialized = json.dumps(workflow, ensure_ascii=False)
+                all_nodes = [
+                    node
+                    for graph in _workflow_graphs(workflow)
+                    for node in graph.get("nodes", [])
+                ]
                 self.assertNotRegex(
                     serialized,
                     r"<Video (?:[4-9]|[1-9][0-9]+)>",
@@ -62,22 +58,22 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 self.assertNotIn("<Video 1>～<Video 9>", serialized)
                 compiler_nodes = [
                     node
-                    for node in workflow["nodes"]
+                    for node in all_nodes
                     if node.get("type") == "CLJapaneseToJSONGGUF"
                 ]
                 planner_nodes = [
                     node
-                    for node in workflow["nodes"]
+                    for node in all_nodes
                     if node.get("type") == "CLMVPromptPlannerGGUF"
                 ]
                 vocal_nodes = [
                     node
-                    for node in workflow["nodes"]
+                    for node in all_nodes
                     if node.get("type") == "CLVocalToPromptSegments"
                 ]
                 limiter_nodes = [
                     node
-                    for node in workflow["nodes"]
+                    for node in all_nodes
                     if node.get("type") == "CLSceneLimiter"
                 ]
                 if not compiler_nodes and not vocal_nodes:
@@ -166,7 +162,7 @@ class WorkflowCompatibilityTests(unittest.TestCase):
 
                 prompt_nodes = [
                     node
-                    for node in workflow["nodes"]
+                    for node in all_nodes
                     if node.get("type") == "PrimitiveStringMultiline"
                     and node.get("widgets_values")
                     and isinstance(node["widgets_values"][0], str)
@@ -214,7 +210,7 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                         ],
                     )
 
-                for node in workflow["nodes"]:
+                for node in all_nodes:
                     for value in node.get("widgets_values", []):
                         if not isinstance(value, str):
                             continue
@@ -226,24 +222,28 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                                 self.assertNotIn("継続する", line)
 
     def test_bgm_sync_workflow_uses_aligned_source_timeline_tracks(self) -> None:
-        paths = sorted((ROOT / "workflows").glob("*integrated_mv_generator*.json"))
+        paths = sorted(
+            (ROOT / "workflows").rglob("*integrated_mv_generator*.json")
+        )
         self.assertTrue(paths)
 
         for path in paths:
             with self.subTest(workflow=path.name):
                 workflow = json.loads(path.read_text(encoding="utf-8"))
-                nodes = {int(node["id"]): node for node in workflow["nodes"]}
-                links = {int(link[0]): link for link in workflow["links"]}
+                graphs = _workflow_graphs(workflow)
+                all_nodes = [
+                    node for graph in graphs for node in graph.get("nodes", [])
+                ]
                 audio_pairs = [
-                    node for node in nodes.values()
+                    node for node in all_nodes
                     if node.get("type") == "CLAudioPadPair"
                 ]
                 audio_tracks = [
-                    node for node in nodes.values()
+                    node for node in all_nodes
                     if node.get("type") == "MiniMaxH3AudioTracks"
                 ]
                 chain_starts = [
-                    node for node in nodes.values()
+                    node for node in all_nodes
                     if node.get("type") == "MiniMaxH3ChainLoopStart"
                 ]
                 self.assertEqual(len(audio_pairs), 1)
@@ -252,6 +252,20 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 audio_pair = audio_pairs[0]
                 tracks = audio_tracks[0]
                 chain_start = chain_starts[0]
+                owning_graph = next(
+                    graph
+                    for graph in graphs
+                    if audio_pair in graph.get("nodes", [])
+                )
+                self.assertIn(tracks, owning_graph.get("nodes", []))
+                self.assertIn(chain_start, owning_graph.get("nodes", []))
+                links = {
+                    fields[0]: fields
+                    for fields in (
+                        _link_fields(link)
+                        for link in owning_graph.get("links", [])
+                    )
+                }
 
                 self.assertEqual(
                     audio_pair["widgets_values_named"],

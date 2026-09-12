@@ -157,7 +157,18 @@ def parse_observation_response(
         raw_visibility = parts[-1]
         visibility = raw_visibility.strip()
         repaired = False
+        missing_visibility = False
         recognized = set(VISIBILITIES) | set(_VISIBILITY_ALIASES)
+        if visibility not in recognized and len(parts) == 3:
+            # Small VL models sometimes omit the final visibility field while
+            # still returning one concrete description. The three-field shape
+            # has only one safe interpretation, so preserve the description
+            # and downgrade its visibility to partial instead of repeating an
+            # identical inference that cannot repair the protocol.
+            description_parts = [visibility]
+            visibility = "partial"
+            repaired = True
+            missing_visibility = True
         if (
             visibility not in recognized
             and len(parts) >= 4
@@ -202,7 +213,12 @@ def parse_observation_response(
             )
         if len(parts) != 4 or raw_visibility != raw_visibility.strip():
             repaired = True
-        if repaired:
+        if missing_visibility:
+            warnings.append(
+                "Defaulted missing SUBJECT_FEATURE visibility to "
+                f"'partial' at line {cursor + 1}"
+            )
+        elif repaired:
             warnings.append(
                 f"Repaired SUBJECT_FEATURE columns at line {cursor + 1}"
             )

@@ -10,6 +10,8 @@
 
 ノードの任意入力`visual_enrichment_profile`は、インストール済みプロファイルIDをCOMBOとして表示する。既定値は`performance_only`であり、既存の保守的な計画を維持する。
 
+接続専用の任意`STRING`入力`visual_enrichment_profile_override`へ空でないプロファイルIDが渡された場合、その値をCOMBOより優先する。未接続又は空文字列の場合はCOMBOを使用する。overrideにも本書の発見済みプロファイルID検証を適用し、未知値を暗黙の既定値へ置換しない。
+
 同梱プロファイルは次の3個である。
 
 | ID | 対象 | Scene契約 | 用途 |

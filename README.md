@@ -1,6 +1,10 @@
 # ComfyUI-cl-japanese2json
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Image Analyzer (Vision GGUF)`はアップロード画像をローカルVision GGUFで観測し、検証済み観測から日本語概要、Subject、情景、PlannerBrief又はJSONをPythonで生成すると同時に、元画像をRef2V用`IMAGE`として返します。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownから開始番号以降の連続したScene範囲をコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
+[![千年鳥居 - MiniMax H3 MV Generator Demo (Qwen3 8B)](https://img.youtube.com/vi/WU7u8sk0n-U/maxresdefault.jpg)](https://www.youtube.com/watch?v=WU7u8sk0n-U)
+
+ボーカル音源と歌詞、参照画像から、歌詞に同期したシーン構成、人物動作、カメラワーク及びMiniMax H3用プロンプトを生成し、ミュージックビデオ制作を自動化できます。上の動画はQwen3 8Bを使用した自動MV生成のデモです。
+
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Image Analyzer (Vision GGUF)`はアップロード画像をローカルVision GGUFで観測し、検証済み観測から日本語概要、Subject、情景、PlannerBrief又はJSONをPythonで生成すると同時に、元画像をRef2V用`IMAGE`として返します。`CL Prompt Merger (Reduced Markdown)`は、二つのグローバル縮小Markdown断片をSubject及び保持規則ごとに機械的に統合し、追加Commonを先頭へ配置します。`CL String Combo`は、`|`区切りでユーザー定義した候補を動的コンボから選び、選択項目をSTRINGとして返します。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownから開始番号以降の連続したScene範囲をコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -46,6 +50,14 @@ node_mv_prompt_planner/
   prompts/
 node_scene_limiter/
   node.py
+  errors.py
+node_prompt_merger/
+  node.py
+  merger.py
+  errors.py
+node_string_combo/
+  node.py
+  parser.py
   errors.py
 node_audio_pad/
   node.py
@@ -116,7 +128,7 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。Visionモデルはモデル系列ごとのサブディレクトリを作り、本体GGUFと対応する`mmproj` GGUFを同じディレクトリへ配置します。サブディレクトリは再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。
 3. 使用環境向けの`llama-cpp-python`がComfyUIのPythonからimportできることを確認します。
 4. Vocal区間・SRT生成を使用する場合は、OpenAI WhisperをComfyUIのPython環境へユーザー自身で導入し、任意の公式`.pt`チェックポイントを`ComfyUI/models/whisper/`以下へ配置します。モデル名指定による暗黙ダウンロードは使用しません。
-5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Image Analyzer (Vision GGUF)`、`CL Vocal to Prompt Segments`、`CL MV Prompt Planner (GGUF)`、`CL Scene Limiter (Reduced Markdown)`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
+5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Image Analyzer (Vision GGUF)`、`CL Prompt Merger (Reduced Markdown)`、`CL String Combo`、`CL Vocal to Prompt Segments`、`CL MV Prompt Planner (GGUF)`、`CL Scene Limiter (Reduced Markdown)`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
 
 モデルの自動ダウンロードは行いません。
 
@@ -134,6 +146,12 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 - 実行ログはシアン色の`[cl_textfile] success:`接頭辞で、ファイル名、バイト数及び文字数だけを出します。本文や絶対パスは出しません。
 
 詳細な入力契約、ブラウザとバックエンドの信頼境界、キャッシュ及びエラー条件は[CL Load Text File仕様書](docs/cl_text_file_spec.md)を参照してください。
+
+## ユーザー定義の文字列コンボを使う
+
+`CL String Combo`を右クリックしてプロパティーパネルを開き、`string_list`へ`day|night|rain`のような候補一覧を入力します。ノード表面には一覧定義欄を置かず、`selected_value`の動的コンボだけを表示します。出力`selected_string`は通常のSTRING入力へ接続できます。
+
+項目内に`|`を含める場合は`||`と記述します。例えば`foo|bar||baz|qux`は`foo`、`bar|baz`、`qux`の3項目です。一覧を編集して現在の選択が残っていれば維持し、なくなった場合は先頭項目へ切り替えます。空項目、改行及び重複項目は停止エラーです。詳細は[CL String Combo仕様書](docs/cl_string_combo_spec.md)を参照してください。
 
 ## 画像をVision GGUFで観測する
 
@@ -621,6 +639,8 @@ Planning Markdownには既存文法の`# サブジェクト`、任意の`# 保�
 
 任意入力`visual_enrichment_profile`で、歌詞から生成する付加映像の密度を明示的に選べます。既定の`performance_only`は人物演技、既存環境、照明及びカメラだけを計画します。`lyric_visuals_light_8b`は8B向けにSceneごと一つの種類をPythonが循環指定し、象徴物、空間的比喩、光と影、前景トランジション又は環境エフェクトを簡潔に加えます。`lyric_visuals_full`は14B以上を推奨し、Sceneごと一～三個の象徴物、空間軌道、状態変化、前景遷移又は抽象カットを許可します。プロファイル自身はインク、道路、雪等の特定媒体を前提にしません。入力した画材・世界を描画方法として使い、現在の歌詞から方向、距離、収束、分岐、蓄積、侵食、圧力、解放等の可視変化を計画します。どの設定でもSubject、保持分析、Timeline、発声及び禁止事項が優先されます。
 
+`model_name_override`と`visual_enrichment_profile_override`は外部`STRING`入力です。`CL String Combo`等から空でない値を接続すると対応するPlanner内COMBOより優先し、未接続又は空文字列では従来のCOMBO選択へ戻ります。モデルは検出コンボに表示されるID、プロファイルはインストール済みIDとの完全一致が必要です。
+
 Plannerのsystem promptは、`node_mv_prompt_planner/prompts/core/`にある共通プロトコルと、選択した`prompts/profiles/<profile_id>/`の創作ポリシーへ分離されています。共通コアは行指向書式、固定Timeline、保持分析、参照、H3カメラ型及び音声ロックだけを扱います。歌詞の具現化、対象物・痕跡の扱い、人物演技、付加映像数及び長尺SceneのShot方針はプロファイル別の`song_bible.txt`と`scene_plan.txt`だけに置かれます。このため、8B向けの強い意味役割拘束を変更しても`lyric_visuals_full`や`performance_only`の創作方針へ波及しません。
 
 Plannerの`model_name`に独立した`8B`を検出し、同時に大型モデル向け`lyric_visuals_full`を選択している場合だけ、再試行上限に達して失敗する危険を上下を`#`で囲んだ3行の黄色い重大WARNINGで通知します。`lyric_visuals_light_8b`又は`performance_only`では警告しません。警告だけでモデルやプロファイルは自動変更されず、`18B`、`27B`、`80B`は8Bとして扱いません。
@@ -636,6 +656,20 @@ batch内の全Sceneが不正な場合も、以降は一件ずつ再送します�
 任意入力`vocal_guard`の既定`warn`は、Timelineと矛盾する発声cueを黄色のWARNINGとして報告し、Sceneを保持します。`strict`では該当Sceneだけを再試行します。有声Sceneの「歌う」「歌い」「歌唱」「口パク」は、固定済みSource Vocalへの視覚同期として常に許可されます。無声Sceneの歌唱や、固定音響にない叫び、囁き、うめき、語り等がguard対象です。
 
 `save_debug_output=True`にすると、各独立チャットのsystem prompt、送信要求JSON、行指向の生応答、解析済みデータ、検証結果、カメラ警告、重複元Sceneと、回収済み・未解決Sceneを含む最終部分状態を`ComfyUI/output/cl_mv_prompt_planner_debug/`へ保存します。失敗時にも保存されるため、同じScene IDをモデルが繰り返したのか、固定フィールドが欠落したのか、個別Scene検証で除外されたのかを区別できます。入力と歌詞を含むため共有前に確認してください。詳細は[MV Prompt Plannerコア仕様](docs/cl_mv_prompt_planner_spec.md)、[ComfyUIノード仕様](docs/cl_mv_prompt_planner_comfyui_node_spec.md)、[Song Bible仕様](docs/cl_mv_prompt_planner_song_bible_spec.md)及び[視覚拡張プロファイル仕様](docs/cl_mv_prompt_visual_profiles_spec.md)を参照してください。
+
+## グローバル縮小Markdownを機械的に統合
+
+`CL Prompt Merger (Reduced Markdown)`は、`# サブジェクト`、`# 保持分析`及び`# 共通プロンプト`だけを含む二つの断片をLLMなしで統合します。どのセクションも省略でき、`merge_markdown`が空なら検証後に`original_markdown`を改行や空白も含めてそのまま返します。Scene、Shot、音響又は未知ディレクティブが混入した入力は停止エラーです。
+
+Subjectは明示された単一の`<Subject N>`を優先し、なければコア仕様どおりバレット順で対応付けます。同じSubjectの保持分析は関係種別と属性転送先が一致するときだけ説明を連結し、競合時は自動選択しません。Commonはmerge側を先頭へ置き、その後へoriginal側を置きます。
+
+`common_omit_rules`へ`画風|作画|レンダリング`のようなリテラル語を指定すると、一致するoriginal側Commonバレットだけを除外します。merge側へは適用しないため、新しい画風を先頭へ追加しながら古い画風を削除できます。空ならomit無効です。意味的な重複除去と矛盾解決は行いません。詳細は[CL Prompt Merger仕様書](docs/cl_prompt_merger_spec.md)を参照してください。
+
+```text
+Original PlanningBrief ──> original_markdown ┐
+                                              ├─> CL Prompt Merger ──> merged_markdown
+Vision等の追加Brief ─────> merge_markdown ───┘
+```
 
 ## テスト生成用にScene数を制限
 

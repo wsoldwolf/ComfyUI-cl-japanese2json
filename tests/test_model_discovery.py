@@ -83,3 +83,24 @@ class ModelDiscoveryTests(unittest.TestCase):
             file_path.unlink()
             with self.assertRaises(errors.ModelDiscoveryError):
                 discovery.resolve_model_name("model.gguf", fake)
+
+    def test_external_string_path_format_is_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            models = Path(temp) / "models"
+            root = models / "LLM" / "GGUF"
+            nested = root / "Qwen3-8B-Abliterated"
+            nested.mkdir(parents=True)
+            file_path = nested / "model.gguf"
+            file_path.write_bytes(b"x")
+            fake = FakeFolderPaths(models)
+
+            for supplied in (
+                "/Qwen3-8B-Abliterated/model.gguf",
+                "\\Qwen3-8B-Abliterated\\model.gguf",
+                "  Qwen3-8B-Abliterated/model.gguf  ",
+            ):
+                with self.subTest(supplied=supplied):
+                    self.assertEqual(
+                        discovery.resolve_model_name(supplied, fake),
+                        file_path.resolve(),
+                    )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ..node_japanese_to_json.compiler.comments import strip_c_comments
 from .errors import PlanningBriefError
 from .structures import PlanningBrief
@@ -23,6 +25,7 @@ _DIRECTIVES = {
     "# 共通プロンプト": "common",
 }
 _ORDER = {name: index for index, name in enumerate(_DIRECTIVES.values())}
+_COMMON_DIRECT_SPEECH_RE = re.compile(r"<d>|</d>|「|」")
 
 
 def parse_planning_brief(text: str) -> PlanningBrief:
@@ -73,6 +76,11 @@ def parse_planning_brief(text: str) -> PlanningBrief:
         value = line[2:].strip()
         if not value:
             raise PlanningBriefError(f"Empty planning bullet at line {line_number}")
+        if current == "common" and _COMMON_DIRECT_SPEECH_RE.search(value):
+            raise PlanningBriefError(
+                "# 共通プロンプト cannot contain direct speech at line "
+                f"{line_number}"
+            )
         sections[current].append(value)
 
     if not sections["subjects"]:

@@ -144,6 +144,38 @@ class VisionAnalyzerTests(unittest.TestCase):
         self.assertNotIn("白い先端の狐尻尾", subject)
         self.assertNotIn("朱色の鳥居", subject)
 
+    def test_reduced_markdown_excludes_scene_clauses_with_visible_text(self):
+        response = VALID_RESPONSE.replace(
+            "SCENE_ELEMENT\t朱色の鳥居",
+            "SCENE_ELEMENT\t朱色の鳥居、上部に「天満宮」と書かれた額、石の柱",
+        )
+        observation, _ = validation.parse_observation_response(response)
+
+        for profile in ("scene_only", "planner_brief"):
+            with self.subTest(profile=profile):
+                result, warnings = renderer.render_observation(
+                    observation,
+                    profile=profile,
+                    subject_index=1,
+                    picture_index=1,
+                )
+                self.assertIn("朱色の鳥居", result)
+                self.assertIn("石の柱", result)
+                self.assertNotIn("天満宮", result)
+                self.assertNotIn("「", result)
+                self.assertTrue(
+                    any("containing direct-speech markup" in value for value in warnings)
+                )
+                validation.validate_rendered_result(profile, result)
+
+        general, _ = renderer.render_observation(
+            observation,
+            profile="general",
+            subject_index=1,
+            picture_index=None,
+        )
+        self.assertIn("「天満宮」", general)
+
     def test_protocol_rejects_tags_fences_and_unknown_order(self):
         with self.assertRaises(Exception):
             validation.parse_observation_response(VALID_RESPONSE.replace("成人の狐巫女", "<Subject 1>"))
@@ -201,6 +233,39 @@ class VisionAnalyzerTests(unittest.TestCase):
         )
         self.assertEqual(repaired.primary_subject.features[0].visibility, "clear")
         self.assertIn("Repaired SUBJECT_FEATURE columns", warnings[0])
+
+    def test_protocol_repairs_one_description_with_missing_visibility(self):
+        missing_visibility = VALID_RESPONSE.replace(
+            "SUBJECT_FEATURE\tface\t少し吊り目の顔\tclear",
+            "SUBJECT_FEATURE\tface\t顔は正面を向いており、目は黄色い虹彩を持つ",
+        )
+        repaired, warnings = validation.parse_observation_response(
+            missing_visibility
+        )
+        feature = repaired.primary_subject.features[0]
+        self.assertEqual(
+            feature.description,
+            "顔は正面を向いており、目は黄色い虹彩を持つ",
+        )
+        self.assertEqual(feature.visibility, "partial")
+        self.assertIn(
+            "Defaulted missing SUBJECT_FEATURE visibility",
+            warnings[0],
+        )
+        planned, _ = renderer.render_observation(
+            repaired,
+            profile="planner_brief",
+            subject_index=1,
+            picture_index=1,
+        )
+        self.assertIn("目は黄色い虹彩を持つ", planned)
+
+        explicit_unknown = VALID_RESPONSE.replace(
+            "SUBJECT_FEATURE\tface\t少し吊り目の顔\tclear",
+            "SUBJECT_FEATURE\tface\t少し吊り目の顔\topaque",
+        )
+        with self.assertRaisesRegex(Exception, "unknown visibility 'opaque'"):
+            validation.parse_observation_response(explicit_unknown)
 
     def test_legacy_upload_sentinel_is_not_used_as_subject_hint(self):
         normalized, warning = node_mod.normalize_subject_hint_compat("image")

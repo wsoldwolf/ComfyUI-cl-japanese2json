@@ -385,6 +385,14 @@ class MVPromptPlannerTests(unittest.TestCase):
             ],
             "performance_only",
         )
+        self.assertTrue(
+            input_types["optional"]["model_name_override"][1]["forceInput"]
+        )
+        self.assertTrue(
+            input_types["optional"]["visual_enrichment_profile_override"][1][
+                "forceInput"
+            ]
+        )
         self.assertFalse(
             input_types["optional"]["save_debug_output"][1]["default"]
         )
@@ -416,6 +424,43 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertIn("lyric_action_system_prompt.txt", fingerprint)
         self.assertIn("auxiliary_visual_repair_system_prompt.txt", fingerprint)
         self.assertIn("performance_only/profile.json", fingerprint)
+
+    def test_string_overrides_trim_non_empty_values_and_fall_back_on_empty(self) -> None:
+        self.assertEqual(
+            planner_node._select_string_override(
+                "widget.gguf",
+                "  external.gguf  ",
+                name="model_name",
+            ),
+            ("external.gguf", True),
+        )
+        self.assertEqual(
+            planner_node._select_string_override(
+                "widget.gguf",
+                "  ",
+                name="model_name",
+            ),
+            ("widget.gguf", False),
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            model_path = Path(temp) / "external.gguf"
+            model_path.write_bytes(b"gguf")
+            model_size = model_path.stat().st_size
+            with patch.object(
+                planner_node,
+                "resolve_model_name",
+                return_value=model_path,
+            ) as resolve:
+                fingerprint = planner_node.CLMVPromptPlannerGGUF.IS_CHANGED(
+                    "widget.gguf",
+                    model_name_override=" external.gguf ",
+                )
+        resolve.assert_called_once_with(
+            "external.gguf",
+            log_name="cl_mv_prompt_planner",
+        )
+        self.assertIn(model_size, fingerprint)
 
     def test_8b_model_warning_is_exactly_three_conspicuous_lines(self) -> None:
         with patch.object(planner_node.LOGGER, "warning") as warning:
@@ -919,6 +964,14 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertEqual(brief.to_markdown().strip(), BRIEF.strip())
         with self.assertRaisesRegex(errors.PlanningBriefError, "Unsupported"):
             brief_parser.parse_planning_brief(BRIEF + "\n# シーン 5秒\n* 不正。\n")
+
+        with self.assertRaisesRegex(
+            errors.PlanningBriefError,
+            r"# 共通プロンプト cannot contain direct speech at line 2",
+        ):
+            brief_parser.parse_planning_brief(
+                "# 共通プロンプト\n* 額に「天満宮」と表示する。\n"
+            )
 
     def test_pseudo_text_wording_in_planning_brief_is_preserved(self) -> None:
         source = BRIEF.replace(
@@ -2993,6 +3046,40 @@ class MVPromptPlannerTests(unittest.TestCase):
         )
         self.assertEqual([shot["id"] for shot in generated["shots"]], ["scene_1", "scene_2"])
         self.assertEqual(generated["shots"][1]["continuation_mode"], "guide")
+
+    def test_node_uses_external_model_and_visual_profile_string_overrides(self) -> None:
+        backend = FakePlannerNodeBackend(
+            [
+                song_bible(),
+                scene_payload(1) + "\n" + scene_payload(2),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            model_path = Path(temp) / "external.gguf"
+            model_path.write_bytes(b"gguf")
+            node = planner_node.CLMVPromptPlannerGGUF()
+            node._backend = backend
+            with patch.object(
+                planner_node,
+                "resolve_model_name",
+                return_value=model_path,
+            ) as resolve:
+                _, _, status = node.plan_mv_prompt(
+                    **node_arguments(
+                        model_name="widget.gguf",
+                        model_name_override=" external.gguf ",
+                        visual_enrichment_profile="unknown-widget-profile",
+                        visual_enrichment_profile_override=" performance_only ",
+                    )
+                )
+
+        resolve.assert_called_once_with(
+            "external.gguf",
+            log_name="cl_mv_prompt_planner",
+        )
+        self.assertEqual(backend.ensure_calls[0]["model_path"], model_path)
+        self.assertIn("model=external.gguf", status)
+        self.assertIn("visual_enrichment_profile=performance_only", status)
 
     def test_debug_bundle_preserves_raw_calls_and_final_partial_state(self) -> None:
         backend = FakePlannerBackend(

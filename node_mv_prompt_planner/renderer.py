@@ -127,7 +127,8 @@ def render_planned_markdown(
         lex_japanese_markdown(result)
     except Exception as exc:
         raise MVPlannerError(
-            "Rendered planner output failed reduced-Markdown validation"
+            "Rendered planner output failed reduced-Markdown validation: "
+            f"{exc}"
         ) from exc
     reparsed = parse_prompt_timeline(result)
     if reparsed != timeline:

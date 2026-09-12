@@ -36,6 +36,26 @@ _EIGHT_B_MODEL_RE = re.compile(
 _CRITICAL_WARNING_BORDER = "#" * 72
 
 
+def _select_string_override(
+    widget_value: str,
+    override_value: str | None,
+    *,
+    name: str,
+) -> tuple[str, bool]:
+    """Return the non-empty external STRING override or the widget value."""
+
+    if not isinstance(widget_value, str):
+        raise MVPlannerError(f"{name} widget value must be a string")
+    if override_value is None:
+        return widget_value, False
+    if not isinstance(override_value, str):
+        raise MVPlannerError(f"{name}_override must be a string")
+    normalized = override_value.strip()
+    if not normalized:
+        return widget_value, False
+    return normalized, True
+
+
 def _warn_for_8b_model(
     model_name: str,
     visual_enrichment_profile: str,
@@ -196,15 +216,39 @@ class CLMVPromptPlannerGGUF:
                         "tooltip": "Selects a bundled scalable system-prompt profile. performance_only preserves current conservative planning; lyric_visuals_light_8b requires one bounded auxiliary visual per Scene; lyric_visuals_full permits one to three for larger models.",
                     },
                 ),
+                "model_name_override": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Optional external model identifier. A connected non-empty STRING overrides model_name; an empty STRING falls back to the model_name combo.",
+                    },
+                ),
+                "visual_enrichment_profile_override": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Optional external profile identifier. A connected non-empty STRING overrides visual_enrichment_profile; an empty STRING falls back to the combo.",
+                    },
+                ),
             },
         }
 
     @classmethod
-    def IS_CHANGED(cls, model_name: str, **_: Any) -> tuple[Any, ...]:
+    def IS_CHANGED(
+        cls,
+        model_name: str,
+        model_name_override: str = "",
+        **_: Any,
+    ) -> tuple[Any, ...]:
         prompt_fingerprint = planner_prompts_fingerprint()
         try:
+            effective_model_name, _ = _select_string_override(
+                model_name,
+                model_name_override,
+                name="model_name",
+            )
             path = resolve_model_name(
-                model_name, log_name="cl_mv_prompt_planner"
+                effective_model_name, log_name="cl_mv_prompt_planner"
             )
             stat = path.stat()
             model_fingerprint: tuple[Any, ...] = (
@@ -214,13 +258,14 @@ class CLMVPromptPlannerGGUF:
             )
         except Exception as exc:
             error_digest = hashlib.sha256(
-                f"{model_name}|{type(exc).__name__}|{exc}".encode(
+                f"{model_name}|{model_name_override}|{type(exc).__name__}|{exc}".encode(
                     "utf-8", "replace"
                 )
             ).hexdigest()
             model_fingerprint = (
                 "model-resolution-error",
                 model_name,
+                model_name_override,
                 error_digest,
             )
         return model_fingerprint + prompt_fingerprint
@@ -300,8 +345,23 @@ class CLMVPromptPlannerGGUF:
         camera_guard: str = "warn",
         vocal_guard: str = "warn",
         visual_enrichment_profile: str = DEFAULT_VISUAL_PROFILE_ID,
+        model_name_override: str = "",
+        visual_enrichment_profile_override: str = "",
     ) -> tuple[str, str, str]:
         with self._lock:
+            effective_model_name, model_override_active = _select_string_override(
+                model_name,
+                model_name_override,
+                name="model_name",
+            )
+            (
+                effective_visual_enrichment_profile,
+                visual_profile_override_active,
+            ) = _select_string_override(
+                visual_enrichment_profile,
+                visual_enrichment_profile_override,
+                name="visual_enrichment_profile",
+            )
             self._validate_parameters(
                 chat_format=chat_format,
                 max_tokens=max_tokens,
@@ -320,10 +380,23 @@ class CLMVPromptPlannerGGUF:
                 retry_max=retry_max,
                 camera_guard=camera_guard,
                 vocal_guard=vocal_guard,
-                visual_enrichment_profile=visual_enrichment_profile,
+                visual_enrichment_profile=effective_visual_enrichment_profile,
                 save_debug_output=save_debug_output,
             )
-            _warn_for_8b_model(model_name, visual_enrichment_profile)
+            if model_override_active:
+                LOGGER.info(
+                    "[cl_mv_prompt_planner] Using external model_name_override: %s",
+                    effective_model_name,
+                )
+            if visual_profile_override_active:
+                LOGGER.info(
+                    "[cl_mv_prompt_planner] Using external visual_enrichment_profile_override: %s",
+                    effective_visual_enrichment_profile,
+                )
+            _warn_for_8b_model(
+                effective_model_name,
+                effective_visual_enrichment_profile,
+            )
             brief = parse_planning_brief(planning_markdown)
             timeline = parse_prompt_timeline(prompt_segments)
             progress_state: dict[str, Any] = {"label": None, "bar": None}
@@ -347,7 +420,16 @@ class CLMVPromptPlannerGGUF:
                 "retry_max": retry_max,
                 "camera_guard": camera_guard,
                 "vocal_guard": vocal_guard,
-                "visual_enrichment_profile": visual_enrichment_profile,
+                "model_name_widget": model_name,
+                "model_name_override": model_name_override,
+                "effective_model_name": effective_model_name,
+                "visual_enrichment_profile_widget": visual_enrichment_profile,
+                "visual_enrichment_profile_override": (
+                    visual_enrichment_profile_override
+                ),
+                "visual_enrichment_profile": (
+                    effective_visual_enrichment_profile
+                ),
                 "save_debug_output": save_debug_output,
             }
 
@@ -373,7 +455,7 @@ class CLMVPromptPlannerGGUF:
 
             try:
                 model_path = resolve_model_name(
-                    model_name, log_name="cl_mv_prompt_planner"
+                    effective_model_name, log_name="cl_mv_prompt_planner"
                 )
                 self._backend.ensure_loaded(
                     model_path,
@@ -398,7 +480,7 @@ class CLMVPromptPlannerGGUF:
                     retry_max=retry_max,
                     camera_guard=camera_guard,
                     vocal_guard=vocal_guard,
-                    visual_enrichment_profile=visual_enrichment_profile,
+                    visual_enrichment_profile=effective_visual_enrichment_profile,
                     progress_callback=progress,
                     interrupt_callback=_throw_if_interrupted,
                     debug_events=(debug_events if save_debug_output else None),
@@ -411,12 +493,13 @@ class CLMVPromptPlannerGGUF:
                 request_count = int(plan.metadata.get("request_count", 0))
                 status = (
                     f"planned {len(plan.scenes)} scene(s) in {request_count} "
-                    f"LLM request(s); retries={plan.attempts}; model={model_name}; "
+                    f"LLM request(s); retries={plan.attempts}; model={effective_model_name}; "
                     f"chat_format={chat_format}; camera_guard={camera_guard}; "
                     f"camera_warnings={len(plan.metadata.get('camera_warnings', []))}; "
                     f"vocal_guard={vocal_guard}; "
                     f"vocal_warnings={len(plan.metadata.get('vocal_warnings', []))}; "
-                    f"visual_enrichment_profile={visual_enrichment_profile}"
+                    "visual_enrichment_profile="
+                    f"{effective_visual_enrichment_profile}"
                 )
                 log_node_success(
                     LOGGER,
@@ -428,7 +511,7 @@ class CLMVPromptPlannerGGUF:
                     self._save_debug_output(
                         prompt_segments=prompt_segments,
                         planning_markdown=planning_markdown,
-                        model_name=model_name,
+                        model_name=effective_model_name,
                         settings=settings,
                         events=debug_events,
                         final_state=debug_state,
@@ -445,7 +528,7 @@ class CLMVPromptPlannerGGUF:
                     self._save_debug_output(
                         prompt_segments=prompt_segments,
                         planning_markdown=planning_markdown,
-                        model_name=model_name,
+                        model_name=effective_model_name,
                         settings=settings,
                         events=debug_events,
                         final_state=debug_state,

@@ -159,6 +159,18 @@ def search_locations(
     return ", ".join(str(root.path) for root in roots)
 
 
+def normalize_model_id(model_name: str) -> str:
+    """Normalize a user-supplied model identifier to the discovery format.
+
+    Discovered identifiers are POSIX-style paths relative to a configured
+    model root. External STRING nodes commonly emit a leading slash or use
+    Windows separators, so accept those harmless presentation differences
+    without ever interpreting the value as a filesystem path.
+    """
+
+    return model_name.strip().replace("\\", "/").lstrip("/")
+
+
 def resolve_model_name(
     model_name: str,
     folder_paths_module: Any | None = None,
@@ -171,10 +183,17 @@ def resolve_model_name(
             f"{search_locations(folder_paths_module, log_name=log_name)}"
         )
     model_map = discover_model_map(folder_paths_module, log_name=log_name)
-    path = model_map.get(model_name)
+    normalized_name = normalize_model_id(model_name)
+    path = model_map.get(normalized_name)
     if path is None:
+        normalized_note = (
+            f" (normalized to {normalized_name!r})"
+            if normalized_name != model_name
+            else ""
+        )
         raise ModelDiscoveryError(
-            f"Selected GGUF model {model_name!r} is no longer available below: "
+            f"Selected GGUF model {model_name!r}{normalized_note} is no longer "
+            "available below: "
             f"{search_locations(folder_paths_module, log_name=log_name)}"
         )
     return path

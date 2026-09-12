@@ -36,6 +36,12 @@
 | `camera_guard` | COMBO（optional） | `warn` | 高確度のカメラ意味矛盾を警告又はScene再試行にする。候補は`warn`/`strict` |
 | `vocal_guard` | COMBO（optional） | `warn` | Timelineと矛盾する発声cueを警告又はScene再試行にする。候補は`warn`/`strict` |
 | `visual_enrichment_profile` | COMBO（optional） | `performance_only` | 人物演技のみ、8B向け軽量歌詞映像又は大型モデル向け歌詞映像を選ぶ。候補はプロファイルディレクトリから発見する |
+| `model_name_override` | STRING socket（optional） | 未接続 | 空でない外部文字列で`model_name`のCOMBO選択を上書きする |
+| `visual_enrichment_profile_override` | STRING socket（optional） | 未接続 | 空でない外部文字列で`visual_enrichment_profile`のCOMBO選択を上書きする |
+
+2個のoverrideは接続専用の`forceInput`ソケットとする。前後空白を除いた外部文字列が空でなければ対応するCOMBOより優先し、未接続又は空文字列ならCOMBOへフォールバックする。`model_name_override`はモデルCOMBOに表示される、モデルルートからの相対検出IDと一致させる。外部STRINGノードとの接続性のため、前後空白、先頭の`/`または`\\`及びWindows形式の`\\`区切りは、ファイルシステムパスとして解釈せず相対検出IDの`/`区切りへ正規化する。正規化後に存在しない値なら停止エラーとする。`visual_enrichment_profile_override`はインストール済みプロファイルIDとの完全一致を要求し、未知値なら停止エラーとする。実効値は8B警告判定、モデルロード、プロファイルロード、デバッグmanifest、status及びComfyUIキャッシュ判定で一貫して使用する。
+
+既存のCOMBOをSTRINGソケットへ置換してはならない。overrideソケットはoptional入力の末尾へ追加し、既存ワークフローの`widgets_values`位置と手動選択UIを維持する。
 
 `chat_format=auto`では`llama-cpp-python`へchat formatを明示せずGGUF metadata/templateへ委ねる。Qwen系、Gemma系及び将来の互換モデルを同じモデル選択欄で切り替えられる。明示値はメタデータ不備のGGUF用である。
 
@@ -102,6 +108,8 @@ CL Scene Limiter（任意。省略時はVocal出力を直接接続）
                  ▼
 CL MV Prompt Planner (GGUF).prompt_segments
 Planning Markdown ──────────────► planning_markdown
+CL String Combo（任意）─────────► model_name_override
+CL String Combo（任意）─────────► visual_enrichment_profile_override
                  │
                  ▼
 CL Japanese to JSON (GGUF).plain_text

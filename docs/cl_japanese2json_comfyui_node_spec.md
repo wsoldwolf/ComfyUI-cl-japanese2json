@@ -2,15 +2,15 @@
 
 ## 1. 目的
 
-本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/cl_audio_pad_spec.md`、`docs/cl_text_file_spec.md`、`docs/cl_vocal2promptseg_spec.md`、`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_mv_prompt_planner_song_bible_spec.md`及び`docs/cl_scene_limiter_spec.md`である。
+本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー、グローバルプロンプト統合、ユーザー定義文字列コンボ及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/cl_audio_pad_spec.md`、`docs/cl_text_file_spec.md`、`docs/cl_vocal2promptseg_spec.md`、`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_mv_prompt_planner_song_bible_spec.md`、`docs/cl_prompt_merger_spec.md`、`docs/cl_string_combo_spec.md`及び`docs/cl_scene_limiter_spec.md`である。
 
 本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、`prompt_prefix`へ格納するCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
 - パッケージ名: `ComfyUI-cl-japanese2json`
-- ノードクラス: `CLJapaneseToJSONGGUF`, `CLMVPromptPlannerGGUF`, `CLSceneLimiter`, `CLAudioPad`, `CLAudioPadPair`, `CLVocalToPromptSegments`, `CLLoadTextFile`
-- 表示名: `CL Japanese to JSON (GGUF)`, `CL MV Prompt Planner (GGUF)`, `CL Scene Limiter (Reduced Markdown)`, `CL Audio Pad (PCM Silence)`, `CL Audio Pad Pair (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`
+- ノードクラス: `CLJapaneseToJSONGGUF`, `CLMVPromptPlannerGGUF`, `CLPromptMerger`, `CLStringCombo`, `CLSceneLimiter`, `CLAudioPad`, `CLAudioPadPair`, `CLVocalToPromptSegments`, `CLLoadTextFile`, `CLImageAnalyzerVisionGGUF`
+- 表示名: `CL Japanese to JSON (GGUF)`, `CL MV Prompt Planner (GGUF)`, `CL Prompt Merger (Reduced Markdown)`, `CL String Combo`, `CL Scene Limiter (Reduced Markdown)`, `CL Audio Pad (PCM Silence)`, `CL Audio Pad Pair (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`, `CL Image Analyzer (Vision GGUF)`
 - カテゴリ: `MiniMax H3/Prompt Tools`, `MiniMax H3/Audio Tools`
 - 出力ノードではない。
 - ComfyUI本体及び他の`custom_nodes`を変更しない。
@@ -34,6 +34,8 @@
 NODE_CLASS_MAPPINGS = {
     "CLJapaneseToJSONGGUF": CLJapaneseToJSONGGUF,
     "CLMVPromptPlannerGGUF": CLMVPromptPlannerGGUF,
+    "CLPromptMerger": CLPromptMerger,
+    "CLStringCombo": CLStringCombo,
     "CLSceneLimiter": CLSceneLimiter,
     "CLAudioPad": CLAudioPad,
     "CLAudioPadPair": CLAudioPadPair,
@@ -44,6 +46,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLJapaneseToJSONGGUF": "CL Japanese to JSON (GGUF)",
     "CLMVPromptPlannerGGUF": "CL MV Prompt Planner (GGUF)",
+    "CLPromptMerger": "CL Prompt Merger (Reduced Markdown)",
+    "CLStringCombo": "CL String Combo",
     "CLSceneLimiter": "CL Scene Limiter (Reduced Markdown)",
     "CLAudioPad": "CL Audio Pad (PCM Silence)",
     "CLAudioPadPair": "CL Audio Pad Pair (PCM Silence)",
@@ -68,7 +72,7 @@ OUTPUT_NODE = False
 
 `CLVocalToPromptSegments`のクラスメタデータ、4出力、入力順序、Whisper探索、PCM解析、Lyrics整列、SRT及びテンプレート生成規則は`docs/cl_vocal2promptseg_spec.md`に従う。
 
-`CLMVPromptPlannerGGUF`及び`CLSceneLimiter`の契約は、それぞれ`docs/cl_mv_prompt_planner_comfyui_node_spec.md`及び`docs/cl_scene_limiter_spec.md`に従う。MVプランナーのSong Bible v3と構造化入力、直前Scene状態、重複排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/cl_mv_prompt_visual_profiles_spec.md`に従う。
+`CLMVPromptPlannerGGUF`、`CLPromptMerger`、`CLStringCombo`及び`CLSceneLimiter`の契約は、それぞれ`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_prompt_merger_spec.md`、`docs/cl_string_combo_spec.md`及び`docs/cl_scene_limiter_spec.md`に従う。MVプランナーのSong Bible v3と構造化入力、直前Scene状態、重複排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/cl_mv_prompt_visual_profiles_spec.md`に従う。
 
 `CLAudioPad`及び`CLAudioPadPair`の詳細契約は`docs/cl_audio_pad_spec.md`、`CLLoadTextFile`の詳細契約は`docs/cl_text_file_spec.md`に従う。本書の4.2、4.2.1及び4.3は共通仕様から参照するための概要であり、相違する場合は各詳細仕様を優先する。
 

@@ -82,6 +82,14 @@ node_mv_prompt_planner/
 node_scene_limiter/
   node.py
   errors.py
+node_prompt_merger/
+  node.py
+  merger.py
+  errors.py
+node_string_combo/
+  node.py
+  parser.py
+  errors.py
 node_audio_pad/
   node.py
 node_text_file/
@@ -119,6 +127,8 @@ Pythonファイルの旧パスは内部実装であり互換対象にしない�
 - `CLLoadTextFile`
 - `CLMVPromptPlannerGGUF`
 - `CLSceneLimiter`
+- `CLPromptMerger`
+- `CLStringCombo`
 - `CLImageAnalyzerVisionGGUF`
 
 ディレクトリ変更だけを理由にワークフローJSONへPythonモジュールパスを書き込まない。ワークフローは上記型名と入出力契約によって読み込まれる。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from .errors import VisionAnalyzerError
 from .structures import FEATURE_CATEGORIES, SubjectFeature, VisionObservation
@@ -15,7 +16,8 @@ ANALYSIS_PROFILES = (
     "planner_brief",
     "structured_json",
 )
-RENDERER_VERSION = "vision-renderer-v2"
+RENDERER_VERSION = "vision-renderer-v3"
+_COMMON_DIRECT_SPEECH_RE = re.compile(r"<d>|</d>|「|」")
 
 
 def _sentence(value: str) -> str:
@@ -108,50 +110,86 @@ def _subject_and_retention(
     return subject, retention
 
 
-def _scene_bullets(observation: VisionObservation) -> list[str]:
+def _core_safe_common_value(value: str) -> tuple[str, int]:
+    """Remove image-text clauses that would become Common direct speech."""
+
+    clauses = [part.strip() for part in re.split(r"[、,]", value) if part.strip()]
+    kept = [
+        clause
+        for clause in clauses
+        if _COMMON_DIRECT_SPEECH_RE.search(clause) is None
+    ]
+    return "、".join(kept), len(clauses) - len(kept)
+
+
+def _scene_bullets(
+    observation: VisionObservation,
+    *,
+    core_safe: bool = False,
+) -> tuple[list[str], int]:
     bullets: list[str] = []
-    if observation.scene.setting:
-        bullets.append(_sentence(f"舞台は{_fragment(observation.scene.setting)}とする"))
-    if observation.scene.elements:
+    excluded_clause_count = 0
+
+    def safe(value: str) -> str:
+        nonlocal excluded_clause_count
+        if not core_safe:
+            return value
+        result, excluded = _core_safe_common_value(value)
+        excluded_clause_count += excluded
+        return result
+
+    setting = safe(observation.scene.setting)
+    if setting:
+        bullets.append(_sentence(f"舞台は{_fragment(setting)}とする"))
+    elements = [safe(value) for value in observation.scene.elements]
+    elements = [value for value in elements if value]
+    if elements:
         bullets.append(
             _sentence(
                 "背景要素として"
-                + _join(list(observation.scene.elements))
+                + _join(elements)
                 + "を配置する"
             )
         )
-    if observation.scene.time_weather:
+    time_weather = safe(observation.scene.time_weather)
+    if time_weather:
         bullets.append(
             _sentence(
                 "時間帯と天候は"
-                + _fragment(observation.scene.time_weather)
+                + _fragment(time_weather)
                 + "とする"
             )
         )
-    if observation.scene.lighting:
+    lighting = safe(observation.scene.lighting)
+    if lighting:
         bullets.append(
             _sentence(
-                "照明は" + _fragment(observation.scene.lighting) + "とする"
+                "照明は" + _fragment(lighting) + "とする"
             )
         )
 
     composition = observation.composition
     composition_text = _join(
         [
-            composition.shot_size,
-            composition.viewpoint,
-            composition.subject_placement,
-            composition.depth,
+            safe(composition.shot_size),
+            safe(composition.viewpoint),
+            safe(composition.subject_placement),
+            safe(composition.depth),
         ]
     )
     if composition_text:
         bullets.append(_sentence(f"構図は{composition_text}とする"))
 
     style = observation.style
-    style_text = _join([style.medium, style.rendering, style.palette])
+    style_text = _join(
+        [safe(style.medium), safe(style.rendering), safe(style.palette)]
+    )
     if style_text:
         bullets.append(_sentence(f"画風は{style_text}とする"))
-    return bullets or ["画像から明瞭に確認できる情景情報だけを使用する。"]
+    return (
+        bullets or ["画像から明瞭に確認できる情景情報だけを使用する。"],
+        excluded_clause_count,
+    )
 
 
 def _render_general(
@@ -176,6 +214,7 @@ def _render_general(
     if not subject_summary:
         subject_summary = "明瞭な主要人物は確認できない"
 
+    scene_bullets, _ = _scene_bullets(observation)
     blocks = [
         "## 画像概要",
         f"* {_sentence(observation.overview)}",
@@ -184,7 +223,7 @@ def _render_general(
         f"* {_sentence(subject_summary)}",
         "",
         "## 情景と構図",
-        *(f"* {line}" for line in _scene_bullets(observation)),
+        *(f"* {line}" for line in scene_bullets),
     ]
     if observation.visible_text:
         blocks.extend(
@@ -234,11 +273,13 @@ def _render_subject(
     )
 
 
-def _render_scene(observation: VisionObservation) -> str:
+def _render_scene(observation: VisionObservation) -> tuple[str, int]:
+    scene_bullets, excluded = _scene_bullets(observation, core_safe=True)
     return (
         "# 共通プロンプト\n"
-        + "\n".join(f"* {line}" for line in _scene_bullets(observation))
-        + "\n"
+        + "\n".join(f"* {line}" for line in scene_bullets)
+        + "\n",
+        excluded,
     )
 
 
@@ -249,7 +290,7 @@ def _render_planner_brief(
     picture_index: int | None,
     subject_hint: str,
     hint_mode: str,
-) -> str:
+) -> tuple[str, int]:
     subject, retention = _subject_and_retention(
         observation,
         subject_index=subject_index,
@@ -264,7 +305,8 @@ def _render_planner_brief(
             "使用する。画像の背景、照明、構図、ポーズ及びカメラ位置を"
             "直接の情景参照として使用せず、情景は以下の文章から構成する。"
         )
-    common.extend(_scene_bullets(observation))
+    scene_bullets, excluded = _scene_bullets(observation, core_safe=True)
+    common.extend(scene_bullets)
     return (
         "# サブジェクト\n"
         f"* {subject}\n\n"
@@ -272,7 +314,8 @@ def _render_planner_brief(
         f"* {retention}\n\n"
         "# 共通プロンプト\n"
         + "\n".join(f"* {line}" for line in common)
-        + "\n"
+        + "\n",
+        excluded,
     )
 
 
@@ -287,6 +330,7 @@ def render_observation(
 ) -> tuple[str, tuple[str, ...]]:
     if profile not in ANALYSIS_PROFILES:
         raise VisionAnalyzerError(f"Unsupported analysis_profile: {profile!r}")
+    excluded_common_clauses = 0
     if profile == "general":
         result = _render_general(
             observation,
@@ -302,9 +346,9 @@ def render_observation(
             hint_mode=hint_mode,
         )
     elif profile == "scene_only":
-        result = _render_scene(observation)
+        result, excluded_common_clauses = _render_scene(observation)
     elif profile == "planner_brief":
-        result = _render_planner_brief(
+        result, excluded_common_clauses = _render_planner_brief(
             observation,
             subject_index=subject_index,
             picture_index=picture_index,
@@ -338,4 +382,10 @@ def render_observation(
         f"Uncertain observation: {value}"
         for value in observation.uncertainties
     )
+    if excluded_common_clauses:
+        warnings.append(
+            "Excluded "
+            f"{excluded_common_clauses} scene clause(s) containing direct-speech "
+            "markup from reduced Markdown"
+        )
     return result, tuple(warnings)
