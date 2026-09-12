@@ -168,22 +168,43 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     and isinstance(node["widgets_values"][0], str)
                     and "# サブジェクト" in node["widgets_values"][0]
                 ]
-                self.assertEqual(len(prompt_nodes), 1)
-                source = prompt_nodes[0]["widgets_values"][0]
-                self.assertIn("# 共通プロンプト", source)
-                if planner_nodes:
-                    self.assertEqual(len(planner_nodes), 1)
-                    self.assertIn("# 保持分析", source)
-                    self.assertNotIn("文字らしい", source)
+                self.assertLessEqual(len(prompt_nodes), 1)
+                source = ""
+                if prompt_nodes:
+                    source = prompt_nodes[0]["widgets_values"][0]
+                    self.assertIn("# 共通プロンプト", source)
+                    if planner_nodes:
+                        self.assertEqual(len(planner_nodes), 1)
+                        self.assertIn("# 保持分析", source)
+                        self.assertNotIn("文字らしい", source)
+                    else:
+                        self.assertIn("## ショット", source)
+                    self.assertNotRegex(source, r"\(S[1-9][0-9]*\)")
+                    for line in source.splitlines():
+                        if "「" in line:
+                            self.assertRegex(
+                                line,
+                                r"<Subject [1-9][0-9]*>.*「",
+                            )
                 else:
-                    self.assertIn("## ショット", source)
-                self.assertNotRegex(source, r"\(S[1-9][0-9]*\)")
-                for line in source.splitlines():
-                    if "「" in line:
-                        self.assertRegex(
-                            line,
-                            r"<Subject [1-9][0-9]*>.*「",
-                        )
+                    # Integrated Vision workflows may intentionally leave the
+                    # outer user brief empty. The embedded Vision analyzer and
+                    # Prompt Merger construct the reduced Markdown at runtime.
+                    self.assertTrue(planner_nodes)
+                    self.assertEqual(
+                        sum(
+                            node.get("type") == "CLImageAnalyzerVisionGGUF"
+                            for node in all_nodes
+                        ),
+                        1,
+                    )
+                    self.assertEqual(
+                        sum(
+                            node.get("type") == "CLPromptMerger"
+                            for node in all_nodes
+                        ),
+                        1,
+                    )
 
                 if not planner_nodes:
                     canonical = llmj2e.translate_markdown(
