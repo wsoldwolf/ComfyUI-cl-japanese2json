@@ -1254,13 +1254,12 @@ class VocalPromptNodeTests(unittest.TestCase):
             )
 
     def test_provided_suno_lyrics_asset_is_parseable(self) -> None:
-        asset = ROOT / "assets" / "bgm" / "bgm_lirics.txt"
-        if not asset.is_file():
-            self.skipTest("provided Suno Lyrics asset is not present")
+        asset = ROOT / "assets" / "bgm" / "bgm_millennium_torii_lyrics.txt"
+        self.assertTrue(asset.is_file(), "provided Suno Lyrics asset is missing")
         lines = vocal.parse_suno_lyrics(asset.read_text(encoding="utf-8-sig"))
         self.assertGreater(len(lines), 30)
-        self.assertTrue(lines[0].text.startswith("黄金の穂が"))
-        self.assertIn("共に笑える", lines[-1].text)
+        self.assertTrue(lines[0].text.startswith("遠い鈴の音"))
+        self.assertIn("鳥居をくぐる", lines[-1].text)
 
     def test_invalid_inputs_are_rejected_before_model_loading(self) -> None:
         with self.assertRaisesRegex(errors.VocalPromptError, "lyrics_text"):
