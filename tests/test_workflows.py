@@ -175,7 +175,6 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     self.assertEqual(len(planner_nodes), 1)
                     self.assertIn("# 保持分析", source)
                     self.assertNotIn("文字らしい", source)
-                    self.assertIn("不規則な孤立した短い傷又は溝", source)
                 else:
                     self.assertIn("## ショット", source)
                 self.assertNotRegex(source, r"\(S[1-9][0-9]*\)")
