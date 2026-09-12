@@ -80,6 +80,10 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     for node in workflow["nodes"]
                     if node.get("type") == "CLSceneLimiter"
                 ]
+                if not compiler_nodes and not vocal_nodes:
+                    # Utility-only workflows (for example the Vision analyzer
+                    # smoke-test workflow) do not contain either pipeline.
+                    continue
                 if not compiler_nodes:
                     self.assertEqual(len(vocal_nodes), 1)
                     vocal = vocal_nodes[0]

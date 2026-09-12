@@ -1,6 +1,6 @@
 # ComfyUI-cl-japanese2json
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownから開始番号以降の連続したScene範囲をコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Image Analyzer (Vision GGUF)`はアップロード画像をローカルVision GGUFで観測し、検証済み観測から日本語概要、Subject、情景、PlannerBrief又はJSONをPythonで生成すると同時に、元画像をRef2V用`IMAGE`として返します。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownから開始番号以降の連続したScene範囲をコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -52,6 +52,16 @@ node_audio_pad/
 node_text_file/
   node.py
   errors.py
+node_vision_analyzer/
+  node.py
+  discovery.py
+  runtime.py
+  image_io.py
+  cache.py
+  graph_binding.py
+  validation.py
+  renderer.py
+  prompts/
 ```
 
 配置と依存方向の詳細は`docs/project_module_layout_spec.md`を参照してください。
@@ -60,7 +70,7 @@ node_text_file/
 
 - Python 3.11以降を使用するComfyUI
 - Qwen3 8Bなどのテキスト用GGUFモデル
-- 使用環境に合う`llama-cpp-python`
+- 使用環境に合う`llama-cpp-python`。Visionノードには`MTMDChatHandler`を含む版が必要
 - Vocal区間・SRT生成を使用する場合のみ、ComfyUI環境へ手動導入したOpenAI Whisper（`openai-whisper`）とローカル`.pt`チェックポイント
 
 このノードは`llama-cpp-python`を自動インストール・更新しません。CUDA対応wheelやユーザー独自ビルドが依存解決によってCPU版へ置き換えられる事故を避けるためです。`requirements.txt`はなく、`pyproject.toml`の依存関係も空です。
@@ -103,10 +113,10 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 ## 導入
 
 1. このディレクトリ全体を`ComfyUI/custom_nodes/ComfyUI-cl-japanese2json/`へ配置します。
-2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。サブディレクトリも再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。ファイル名に`mmproj`を含むGGUFは除外します。
+2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。Visionモデルはモデル系列ごとのサブディレクトリを作り、本体GGUFと対応する`mmproj` GGUFを同じディレクトリへ配置します。サブディレクトリは再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。
 3. 使用環境向けの`llama-cpp-python`がComfyUIのPythonからimportできることを確認します。
 4. Vocal区間・SRT生成を使用する場合は、OpenAI WhisperをComfyUIのPython環境へユーザー自身で導入し、任意の公式`.pt`チェックポイントを`ComfyUI/models/whisper/`以下へ配置します。モデル名指定による暗黙ダウンロードは使用しません。
-5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Vocal to Prompt Segments`、`CL MV Prompt Planner (GGUF)`、`CL Scene Limiter (Reduced Markdown)`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
+5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Image Analyzer (Vision GGUF)`、`CL Vocal to Prompt Segments`、`CL MV Prompt Planner (GGUF)`、`CL Scene Limiter (Reduced Markdown)`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
 
 モデルの自動ダウンロードは行いません。
 
@@ -124,6 +134,20 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 - 実行ログはシアン色の`[cl_textfile] success:`接頭辞で、ファイル名、バイト数及び文字数だけを出します。本文や絶対パスは出しません。
 
 詳細な入力契約、ブラウザとバックエンドの信頼境界、キャッシュ及びエラー条件は[CL Load Text File仕様書](docs/cl_text_file_spec.md)を参照してください。
+
+## 画像をVision GGUFで観測する
+
+`CL Image Analyzer (Vision GGUF)`へ画像をD&Dし、本体GGUFを選択します。対応する`mmproj`は同じモデルディレクトリから自動選択されます。`general`、`subject_only`、`scene_only`、`planner_brief`又は`structured_json`を選ぶと、Visionモデルは共通の観測形式だけを返し、最終Markdown又はJSONはPythonが決定的に組み立てます。
+
+別の画像ローダー又は画像生成ノードを使う場合は、その`IMAGE`を任意入力`image_override`へ接続します。接続中は内部D&D画像を解析にも出力にも使用せず、外部`IMAGE`を優先します。外部バッチはそのまま`image`出力へ渡し、Visionは先頭画像だけを解析します。
+
+人物やキャラクターの種別を画像だけで判別しにくい場合は、`subject_hint`へ`成人の狼娘。頭頂部に一対の狼耳があり、一本の狼尻尾を持つ`のような通常の自然言語を入力します。`hint_mode=assist`はVisionの意味分類を補助し、`lock_identity`はヒントを確定した人物設定としてPythonが最終出力へ保持します。明瞭な画像証拠と矛盾した場合は`hint_conflict=warn`で警告を残し、`strict`で停止できます。`additional_instruction`は引き続き、眉、瞳、衣装等の観測箇所を指定する入力です。
+
+`image`出力は解析用縮小画像ではなく元解像度の画像です。Preview Image又はMiniMax H3の`ref_images.ref_image_0`～`ref_image_8`へ接続できます。`picture_reference_mode=auto_h3`ではH3接続番号を`<Picture 1>`～`<Picture 9>`へ対応付け、ノード下部の編集不能な`Picture参照`ラベルにも表示します。異なる番号へ同時接続した場合は曖昧な参照を出力せず停止します。
+
+`cache_mode=reuse`では画像pixel、モデル、projector、観測指示及び推論設定が同じ検証済み観測をメモリ又は永続cacheから返し、モデルを再ロードしません。プロファイルやPicture番号だけを変えた場合も同じ観測から再レンダリングします。強制再解析は`refresh`、cacheを一切使わない実行は`disabled`です。
+
+完全な入力、出力、H3番号解決、信頼境界及びcache仕様は[CL Image Analyzer (Vision GGUF)仕様書](docs/cl_image_analyzer_vision_gguf_spec.md)を参照してください。
 
 ## 入力Markdown
 

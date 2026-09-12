@@ -87,6 +87,22 @@ node_audio_pad/
 node_text_file/
   node.py
   errors.py
+node_vision_analyzer/
+  node.py
+  errors.py
+  discovery.py
+  runtime.py
+  image_io.py
+  cache.py
+  graph_binding.py
+  hinting.py
+  structures.py
+  validation.py
+  renderer.py
+  debug_output.py
+  prompts/
+    core/
+      observation_system_prompt.txt
 tests/
 web/
 workflows/
@@ -103,6 +119,7 @@ Pythonファイルの旧パスは内部実装であり互換対象にしない�
 - `CLLoadTextFile`
 - `CLMVPromptPlannerGGUF`
 - `CLSceneLimiter`
+- `CLImageAnalyzerVisionGGUF`
 
 ディレクトリ変更だけを理由にワークフローJSONへPythonモジュールパスを書き込まない。ワークフローは上記型名と入出力契約によって読み込まれる。
 
