@@ -32,19 +32,43 @@ class ReferenceProtector:
 
         return _REFERENCE_RE.sub(replace, text)
 
-    def restore(self, text: str) -> str:
-        raw_reference = _REFERENCE_RE.search(text)
-        if raw_reference is not None:
+    def restore(
+        self,
+        text: str,
+        *,
+        allow_known_raw_subjects: bool = False,
+    ) -> str:
+        raw_references = list(_REFERENCE_RE.finditer(text))
+        if raw_references and not allow_known_raw_subjects:
             raise PlannerResponseError(
                 "Planner response contains an unprotected reference tag "
-                f"{raw_reference.group(0)!r}"
+                f"{raw_references[0].group(0)!r}"
             )
-        unknown = [token for token in _TOKEN_RE.findall(text) if token not in self.token_to_reference]
+        normalized = text
+        if raw_references:
+            reference_to_token = {
+                reference: token
+                for token, reference in self.token_to_reference.items()
+            }
+            for match in raw_references:
+                reference = match.group(0)
+                token = reference_to_token.get(reference)
+                if match.group(1) != "Subject" or token is None:
+                    raise PlannerResponseError(
+                        "Planner response contains an unprotected reference tag "
+                        f"{reference!r}"
+                    )
+                normalized = normalized.replace(reference, token)
+        unknown = [
+            token
+            for token in _TOKEN_RE.findall(normalized)
+            if token not in self.token_to_reference
+        ]
         if unknown:
             raise PlannerResponseError(
                 f"Planner invented unknown reference placeholder {unknown[0]!r}"
             )
-        restored = text
+        restored = normalized
         for token, reference in sorted(
             self.token_to_reference.items(), key=lambda item: -len(item[0])
         ):

@@ -17,3 +17,7 @@ class TimelineParseError(MVPlannerError):
 
 class PlannerResponseError(MVPlannerError):
     """The model response does not satisfy the planner line protocol."""
+
+
+class PlannerInferenceStallError(PlannerResponseError):
+    """The local planner model stopped producing streamed output."""

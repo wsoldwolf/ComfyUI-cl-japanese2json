@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import threading
 from typing import Any
 
@@ -28,6 +29,32 @@ from .visual_profiles import (
 
 LOGGER = logging.getLogger("cl_mv_prompt_planner")
 _CHAT_FORMATS = {"auto": None, "qwen": "qwen", "gemma": "gemma"}
+_EIGHT_B_MODEL_RE = re.compile(
+    r"(?<![a-z0-9])8[\s._-]*b(?![a-z0-9])",
+    re.IGNORECASE,
+)
+_CRITICAL_WARNING_BORDER = "#" * 72
+
+
+def _warn_for_8b_model(
+    model_name: str,
+    visual_enrichment_profile: str,
+) -> bool:
+    """Warn only when an 8B model is paired with the full visual profile."""
+
+    if (
+        _EIGHT_B_MODEL_RE.search(str(model_name)) is None
+        or visual_enrichment_profile != "lyric_visuals_full"
+    ):
+        return False
+    LOGGER.warning(_CRITICAL_WARNING_BORDER)
+    LOGGER.warning(
+        "[cl_mv_prompt_planner] CRITICAL / FATAL-RISK: 8B model detected "
+        "with lyric_visuals_full; planning may exhaust retries and fail. "
+        "Select lyric_visuals_light_8b or use a 14B+ model."
+    )
+    LOGGER.warning(_CRITICAL_WARNING_BORDER)
+    return True
 
 try:  # Available only when loaded by ComfyUI.
     from comfy.utils import ProgressBar as _ComfyProgressBar  # type: ignore
@@ -296,6 +323,7 @@ class CLMVPromptPlannerGGUF:
                 visual_enrichment_profile=visual_enrichment_profile,
                 save_debug_output=save_debug_output,
             )
+            _warn_for_8b_model(model_name, visual_enrichment_profile)
             brief = parse_planning_brief(planning_markdown)
             timeline = parse_prompt_timeline(prompt_segments)
             progress_state: dict[str, Any] = {"label": None, "bar": None}

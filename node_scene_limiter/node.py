@@ -1,4 +1,4 @@
-"""Deterministically keep the first N Scenes of reduced Markdown."""
+"""Deterministically extract a contiguous Scene range from reduced Markdown."""
 
 from __future__ import annotations
 
@@ -58,9 +58,10 @@ def limit_reduced_markdown_scenes(
     reduced_markdown: str,
     scene_limit_count: int,
     *,
+    scene_start_number: int = 1,
     disable: bool = False,
 ) -> str:
-    """Return the source with only its first ``scene_limit_count`` Scenes."""
+    """Return a contiguous Scene range while retaining global directives."""
 
     if not isinstance(reduced_markdown, str):
         raise SceneLimiterError("reduced_markdown must be a string")
@@ -77,6 +78,14 @@ def limit_reduced_markdown_scenes(
     ):
         raise SceneLimiterError(
             "scene_limit_count must be an integer between 1 and 128"
+        )
+    if (
+        not isinstance(scene_start_number, int)
+        or isinstance(scene_start_number, bool)
+        or not 1 <= scene_start_number <= _MAX_SCENE_COUNT
+    ):
+        raise SceneLimiterError(
+            "scene_start_number must be an integer between 1 and 128"
         )
 
     try:
@@ -100,18 +109,32 @@ def limit_reduced_markdown_scenes(
     )
     if not starts:
         raise SceneLimiterError("reduced_markdown contains no # シーン directive")
-    if scene_limit_count >= len(starts):
+    if scene_start_number > len(starts):
+        raise SceneLimiterError(
+            "scene_start_number "
+            f"{scene_start_number} is outside the available Scene range 1-{len(starts)}"
+        )
+
+    start_index = scene_start_number - 1
+    end_index = min(start_index + scene_limit_count, len(starts))
+    if start_index == 0 and end_index == len(starts):
         return reduced_markdown
 
-    cut_line = starts[scene_limit_count]
-    result = "".join(original_lines[:cut_line])
+    global_prefix = original_lines[: starts[0]]
+    selected_start_line = starts[start_index]
+    selected_end_line = (
+        starts[end_index] if end_index < len(starts) else len(original_lines)
+    )
+    result = "".join(
+        [*global_prefix, *original_lines[selected_start_line:selected_end_line]]
+    )
     if not result.strip():
         raise SceneLimiterError("Scene limiting produced an empty document")
     return result
 
 
 class CLSceneLimiter:
-    """ComfyUI wrapper for exact first-N Scene filtering."""
+    """ComfyUI wrapper for exact contiguous Scene-range filtering."""
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("limited_markdown",)
@@ -127,7 +150,7 @@ class CLSceneLimiter:
                     "STRING",
                     {
                         "forceInput": True,
-                        "tooltip": "Japanese reduced Markdown whose first N Scenes will be retained.",
+                        "tooltip": "Japanese reduced Markdown from which a contiguous Scene range will be extracted.",
                     },
                 ),
                 "scene_limit_count": (
@@ -137,7 +160,7 @@ class CLSceneLimiter:
                         "min": 1,
                         "max": _MAX_SCENE_COUNT,
                         "step": 1,
-                        "tooltip": "Maximum number of Scenes to retain from the beginning of the document.",
+                        "tooltip": "Maximum number of Scenes to retain from scene_start_number.",
                     },
                 ),
                 "disable": (
@@ -145,6 +168,16 @@ class CLSceneLimiter:
                     {
                         "default": False,
                         "tooltip": "Bypass Scene limiting and return the original input unchanged.",
+                    },
+                ),
+                "scene_start_number": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": _MAX_SCENE_COUNT,
+                        "step": 1,
+                        "tooltip": "1-based number of the first Scene to retain.",
                     },
                 ),
             }
@@ -155,10 +188,12 @@ class CLSceneLimiter:
         reduced_markdown: str,
         scene_limit_count: int,
         disable: bool = False,
+        scene_start_number: int = 1,
     ) -> tuple[str]:
         result = limit_reduced_markdown_scenes(
             reduced_markdown,
             scene_limit_count,
+            scene_start_number=scene_start_number,
             disable=disable,
         )
         if disable:
@@ -172,8 +207,9 @@ class CLSceneLimiter:
             log_node_success(
                 LOGGER,
                 "cl_scene_limiter",
-                "retained the first %d scene(s); output=%d character(s)",
+                "retained up to %d scene(s) starting at Scene %d; output=%d character(s)",
                 scene_limit_count,
+                scene_start_number,
                 len(result),
             )
         return (result,)

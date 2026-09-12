@@ -12,6 +12,41 @@ jsongen = module("node_japanese_to_json.compiler.jsongen")
 
 
 class WorkflowCompatibilityTests(unittest.TestCase):
+    def test_bitbybit_planner_brief_is_concise_and_role_focused(self) -> None:
+        path = (
+            ROOT
+            / "workflows"
+            / "minimax_h3_ref2va_20260910_integrated_mv_generator_bitbybit.json"
+        )
+        workflow = json.loads(path.read_text(encoding="utf-8"))
+        brief_node = next(
+            node
+            for node in workflow["nodes"]
+            if node.get("id") == 2034
+        )
+        source = brief_node["widgets_values"][0]
+
+        self.assertLessEqual(len(source), 1_500)
+        self.assertEqual(
+            source, brief_node["widgets_values_named"]["value"]
+        )
+        self.assertIn("# サブジェクト", source)
+        self.assertIn("# 保持分析", source)
+        self.assertIn("# 共通プロンプト", source)
+        self.assertIn("必要なSceneでは<Subject 1>を画面外に置いてよい", source)
+        self.assertIn("現在の歌詞に具体的な身体動作", source)
+        self.assertIn("対象への接触及び動作後に残る変化", source)
+        self.assertIn("不規則な孤立した短い傷又は溝", source)
+        self.assertIn("横一列又は縦一列に並べず", source)
+        self.assertIn("鏡文字及び反射文字を作らない", source)
+        self.assertNotIn("非可読の文字らしい", source)
+        self.assertIn("開始視点、通過軌道、終了視点", source)
+        self.assertIn("Sceneの最後まで動きを展開", source)
+        self.assertNotIn("字幕、歌詞、文字、ロゴ", source)
+        self.assertNotIn("`n", source)
+        self.assertNotIn("人物の重心を周回軸", source)
+        self.assertNotIn("急激なプッシュイン", source)
+
     def test_bundled_workflows_use_current_node_inputs_and_scene_syntax(self) -> None:
         paths = sorted((ROOT / "workflows").glob("*.json"))
         self.assertTrue(paths)
@@ -39,6 +74,11 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                     node
                     for node in workflow["nodes"]
                     if node.get("type") == "CLVocalToPromptSegments"
+                ]
+                limiter_nodes = [
+                    node
+                    for node in workflow["nodes"]
+                    if node.get("type") == "CLSceneLimiter"
                 ]
                 if not compiler_nodes:
                     self.assertEqual(len(vocal_nodes), 1)
@@ -91,6 +131,35 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                         compiler["widgets_values_named"]["save_debug_output"]
                     )
 
+                if limiter_nodes:
+                    self.assertEqual(len(limiter_nodes), 1)
+                    limiter = limiter_nodes[0]
+                    self.assertEqual(
+                        [item["name"] for item in limiter["inputs"]],
+                        [
+                            "reduced_markdown",
+                            "scene_limit_count",
+                            "disable",
+                            "scene_start_number",
+                        ],
+                    )
+                    limiter_values = limiter["widgets_values_named"]
+                    self.assertEqual(
+                        set(limiter_values),
+                        {"scene_limit_count", "disable", "scene_start_number"},
+                    )
+                    self.assertGreaterEqual(limiter_values["scene_limit_count"], 1)
+                    self.assertGreaterEqual(limiter_values["scene_start_number"], 1)
+                    self.assertIsInstance(limiter_values["disable"], bool)
+                    self.assertEqual(
+                        limiter["widgets_values"],
+                        [
+                            limiter_values["scene_limit_count"],
+                            limiter_values["disable"],
+                            limiter_values["scene_start_number"],
+                        ],
+                    )
+
                 prompt_nodes = [
                     node
                     for node in workflow["nodes"]
@@ -105,6 +174,8 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 if planner_nodes:
                     self.assertEqual(len(planner_nodes), 1)
                     self.assertIn("# 保持分析", source)
+                    self.assertNotIn("文字らしい", source)
+                    self.assertIn("不規則な孤立した短い傷又は溝", source)
                 else:
                     self.assertIn("## ショット", source)
                 self.assertNotRegex(source, r"\(S[1-9][0-9]*\)")
@@ -152,68 +223,72 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                                 self.assertNotIn("継続する", line)
 
     def test_bgm_sync_workflow_uses_aligned_source_timeline_tracks(self) -> None:
-        path = (
-            ROOT
-            / "workflows"
-            / "minimax_h3_ref2va_20260908_bgm_sync_full_locked.json"
-        )
-        workflow = json.loads(path.read_text(encoding="utf-8"))
-        nodes = {int(node["id"]): node for node in workflow["nodes"]}
-        links = {int(link[0]): link for link in workflow["links"]}
+        paths = sorted((ROOT / "workflows").glob("*integrated_mv_generator*.json"))
+        self.assertTrue(paths)
 
-        audio_pair = nodes[2023]
-        self.assertNotIn(2020, nodes)
-        self.assertEqual(audio_pair["type"], "CLAudioPadPair")
-        self.assertEqual(
-            audio_pair["widgets_values_named"],
-            {
-                "target_duration_seconds": 0.0,
-                "extra_padding_seconds": 0.0,
-                "pad_position": "end",
-                "h3_frame_mode": "auto_safe",
-                "h3_target_frames": 0,
-            },
-        )
-        self.assertEqual(
-            [item["name"] for item in audio_pair["inputs"]],
-            [
-                "audio_a",
-                "audio_b",
-                "target_duration_seconds",
-                "extra_padding_seconds",
-                "pad_position",
-                "h3_frame_mode",
-                "h3_target_frames",
-            ],
-        )
-        self.assertEqual(links[3760][1:5], [2022, 0, 2023, 0])
-        self.assertEqual(links[3571][1:5], [2008, 0, 2023, 1])
-        self.assertNotIn(3761, links)
-        self.assertNotIn(3779, links)
-        self.assertNotIn(3790, links)
-        self.assertEqual(links[3763][1:5], [2023, 0, 2024, 0])
-        self.assertEqual(links[3762][1:5], [2023, 1, 2024, 1])
-        self.assertEqual(links[3764][1:5], [2024, 0, 1701, 3])
-        self.assertEqual(links[3778][1:5], [2008, 0, 2025, 0])
+        for path in paths:
+            with self.subTest(workflow=path.name):
+                workflow = json.loads(path.read_text(encoding="utf-8"))
+                nodes = {int(node["id"]): node for node in workflow["nodes"]}
+                links = {int(link[0]): link for link in workflow["links"]}
+                audio_pairs = [
+                    node for node in nodes.values()
+                    if node.get("type") == "CLAudioPadPair"
+                ]
+                audio_tracks = [
+                    node for node in nodes.values()
+                    if node.get("type") == "MiniMaxH3AudioTracks"
+                ]
+                chain_starts = [
+                    node for node in nodes.values()
+                    if node.get("type") == "MiniMaxH3ChainLoopStart"
+                ]
+                self.assertEqual(len(audio_pairs), 1)
+                self.assertEqual(len(audio_tracks), 1)
+                self.assertEqual(len(chain_starts), 1)
+                audio_pair = audio_pairs[0]
+                tracks = audio_tracks[0]
+                chain_start = chain_starts[0]
 
-        source = nodes[1952]["widgets_values"][0]
-        self.assertNotRegex(source, r"<Audio [0-9]+>")
-        self.assertIn("リップシンク: <Subject 1> <- ソースボーカル", source)
-        self.assertIn("発声: ソースボーカルのみ", source)
-        self.assertIn("ソース音声: 完全維持", source)
-        canonical = llmj2e.translate_markdown(
-            source,
-            FakeLLM(n_ctx=1_000_000),
-            "system",
-            max_tokens=16_384,
-        )
-        emd = mdparse.parse_markdown(canonical)
-        plan = jsongen.validate_final_json(
-            jsongen.generate_json(emd)
-        )
-        self.assertGreaterEqual(len(emd.scenes), 1)
-        self.assertEqual(len(plan["shots"]), len(emd.scenes))
-        for shot in plan["shots"]:
-            prompt = "\n".join(shot["prompt"])
-            self.assertNotRegex(prompt, r"<Audio [0-9]+>")
-            self.assertIn("locked Source Timeline", prompt)
+                self.assertEqual(
+                    audio_pair["widgets_values_named"],
+                    {
+                        "target_duration_seconds": 0.0,
+                        "extra_padding_seconds": 0.0,
+                        "pad_position": "end",
+                        "h3_frame_mode": "auto_safe",
+                        "h3_target_frames": 0,
+                    },
+                )
+                self.assertEqual(
+                    [item["name"] for item in audio_pair["inputs"]],
+                    [
+                        "audio_a",
+                        "audio_b",
+                        "target_duration_seconds",
+                        "extra_padding_seconds",
+                        "pad_position",
+                        "h3_frame_mode",
+                        "h3_target_frames",
+                    ],
+                )
+                pair_id = int(audio_pair["id"])
+                tracks_id = int(tracks["id"])
+                full_mix_link = next(
+                    item["link"] for item in tracks["inputs"]
+                    if item["name"] == "full_mix"
+                )
+                vocals_link = next(
+                    item["link"] for item in tracks["inputs"]
+                    if item["name"] == "vocals"
+                )
+                self.assertEqual(links[full_mix_link][1:5], [pair_id, 1, tracks_id, 0])
+                self.assertEqual(links[vocals_link][1:5], [pair_id, 0, tracks_id, 1])
+                timeline_link = next(
+                    item["link"] for item in chain_start["inputs"]
+                    if item["name"] == "source_timeline"
+                )
+                self.assertEqual(
+                    links[timeline_link][1:5],
+                    [tracks_id, 0, int(chain_start["id"]), 3],
+                )

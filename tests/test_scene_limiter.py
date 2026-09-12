@@ -61,11 +61,18 @@ class SceneLimiterTests(unittest.TestCase):
         required = cls.INPUT_TYPES()["required"]
         self.assertEqual(
             list(required),
-            ["reduced_markdown", "scene_limit_count", "disable"],
+            [
+                "reduced_markdown",
+                "scene_limit_count",
+                "disable",
+                "scene_start_number",
+            ],
         )
         self.assertTrue(required["reduced_markdown"][1]["forceInput"])
         self.assertEqual(required["scene_limit_count"][1]["default"], 1)
         self.assertEqual(required["scene_limit_count"][1]["max"], 128)
+        self.assertEqual(required["scene_start_number"][1]["default"], 1)
+        self.assertEqual(required["scene_start_number"][1]["max"], 128)
         self.assertEqual(required["disable"][0], "BOOLEAN")
         self.assertFalse(required["disable"][1]["default"])
 
@@ -85,6 +92,44 @@ class SceneLimiterTests(unittest.TestCase):
         self.assertIs(limiter.limit_reduced_markdown_scenes(SOURCE, 3), SOURCE)
         self.assertIs(limiter.limit_reduced_markdown_scenes(SOURCE, 99), SOURCE)
 
+    def test_extracts_requested_scene_range_and_retains_global_sections(self) -> None:
+        output = limiter.limit_reduced_markdown_scenes(
+            SOURCE,
+            1,
+            scene_start_number=2,
+        )
+        self.assertIn("# サブジェクト", output)
+        self.assertIn("# 保持分析", output)
+        self.assertIn("# 共通プロンプト", output)
+        self.assertNotIn("// シーン 1", output)
+        self.assertIn("// シーン 2", output)
+        self.assertIn("// Scene 2固有の注記", output)
+        self.assertIn("// 歌詞: 二番目のSceneに属する歌詞", output)
+        self.assertNotIn("// シーン 3", output)
+        self.assertEqual(output.count("# シーン "), 1)
+
+    def test_range_is_truncated_at_last_scene(self) -> None:
+        output = limiter.limit_reduced_markdown_scenes(
+            SOURCE,
+            99,
+            scene_start_number=2,
+        )
+        self.assertNotIn("// シーン 1", output)
+        self.assertIn("// シーン 2", output)
+        self.assertIn("// シーン 3", output)
+        self.assertEqual(output.count("# シーン "), 2)
+
+    def test_start_beyond_available_scene_range_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            errors.SceneLimiterError,
+            "outside the available Scene range 1-3",
+        ):
+            limiter.limit_reduced_markdown_scenes(
+                SOURCE,
+                1,
+                scene_start_number=4,
+            )
+
     def test_crlf_and_retained_text_are_not_normalized(self) -> None:
         source = SOURCE.replace("\n", "\r\n")
         output = limiter.limit_reduced_markdown_scenes(source, 1)
@@ -97,6 +142,7 @@ class SceneLimiterTests(unittest.TestCase):
                 output = limiter.limit_reduced_markdown_scenes(
                     source,
                     0,
+                    scene_start_number=0,
                     disable=True,
                 )
                 self.assertIs(output, source)
@@ -105,6 +151,7 @@ class SceneLimiterTests(unittest.TestCase):
             "未完成",
             1,
             True,
+            1,
         )
         self.assertEqual(node_output, ("未完成",))
 
@@ -131,6 +178,14 @@ class SceneLimiterTests(unittest.TestCase):
                 errors.SceneLimiterError
             ):
                 limiter.limit_reduced_markdown_scenes(SOURCE, value)
+            with self.subTest(start=value), self.assertRaises(
+                errors.SceneLimiterError
+            ):
+                limiter.limit_reduced_markdown_scenes(
+                    SOURCE,
+                    1,
+                    scene_start_number=value,
+                )
         with self.assertRaises(errors.SceneLimiterError):
             limiter.limit_reduced_markdown_scenes("/* unclosed", 1)
         with self.assertRaises(errors.SceneLimiterError):
@@ -148,9 +203,15 @@ class SceneLimiterTests(unittest.TestCase):
         output = "\n".join(captured.output)
         self.assertIn("\x1b[96m", output)
         self.assertIn(
-            "[cl_scene_limiter] success: retained the first 1 scene(s)",
+            "[cl_scene_limiter] success: retained up to 1 scene(s) starting at Scene 1",
             output,
         )
+
+    def test_node_accepts_a_nonfirst_start_scene(self) -> None:
+        result = limiter.CLSceneLimiter.limit_scenes(SOURCE, 1, False, 3)
+        self.assertNotIn("// シーン 1", result[0])
+        self.assertNotIn("// シーン 2", result[0])
+        self.assertIn("// シーン 3", result[0])
 
     def test_limited_output_compiles_to_the_same_number_of_plan_scenes(self) -> None:
         limited = limiter.limit_reduced_markdown_scenes(SOURCE, 2)
@@ -163,6 +224,22 @@ class SceneLimiterTests(unittest.TestCase):
         emd = mdparse.parse_markdown(canonical)
         plan = jsongen.validate_final_json(jsongen.generate_json(emd))
         self.assertEqual(len(plan["shots"]), 2)
+
+    def test_nonfirst_limited_output_compiles_as_one_plan_scene(self) -> None:
+        limited = limiter.limit_reduced_markdown_scenes(
+            SOURCE,
+            1,
+            scene_start_number=2,
+        )
+        canonical = llmj2e.translate_markdown(
+            limited,
+            FakeLLM(),
+            "system",
+            max_tokens=128,
+        )
+        emd = mdparse.parse_markdown(canonical)
+        plan = jsongen.validate_final_json(jsongen.generate_json(emd))
+        self.assertEqual(len(plan["shots"]), 1)
 
 
 if __name__ == "__main__":

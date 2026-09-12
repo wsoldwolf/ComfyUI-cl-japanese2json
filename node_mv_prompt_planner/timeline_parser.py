@@ -34,6 +34,7 @@ def parse_prompt_timeline(text: str) -> TimelineDocument:
         raise TimelineParseError("prompt_segments exceeds 4194304 characters")
 
     raw_scenes: list[dict[str, object]] = []
+    first_scene_id: int | None = None
     pending_number: int | None = None
     current: dict[str, object] | None = None
     mode: str | None = None
@@ -51,7 +52,11 @@ def parse_prompt_timeline(text: str) -> TimelineDocument:
 
         scene_match = _SCENE_RE.fullmatch(stripped)
         if scene_match:
-            expected = len(raw_scenes) + 1
+            if first_scene_id is None:
+                expected = pending_number if pending_number is not None else 1
+                first_scene_id = expected
+            else:
+                expected = first_scene_id + len(raw_scenes)
             if pending_number != expected:
                 raise TimelineParseError(
                     f"Scene comment before line {line_number} must be '// シーン {expected}'"
@@ -140,8 +145,8 @@ def parse_prompt_timeline(text: str) -> TimelineDocument:
         raise TimelineParseError("prompt_segments supports at most 128 Scenes")
 
     scenes: list[TimelineScene] = []
-    expected_start = 0
-    for item in raw_scenes:
+    expected_start: int | None = None
+    for item_index, item in enumerate(raw_scenes):
         scene_id = int(item["scene_id"])
         duration = int(item["duration_seconds"])
         state = item["state"]
@@ -151,6 +156,12 @@ def parse_prompt_timeline(text: str) -> TimelineDocument:
             raise TimelineParseError(
                 f"Scene {scene_id} is missing valid detection/source-range metadata"
             )
+        if item_index == 0:
+            # A complete Vocal timeline begins at Scene 1 and 0ms.  A Scene
+            # Limiter subset keeps the original Scene IDs and absolute Source
+            # ranges, so its first retained Scene may legitimately begin later.
+            expected_start = 0 if scene_id == 1 else start
+        assert expected_start is not None
         if start != expected_start:
             raise TimelineParseError(
                 f"Scene {scene_id} source range must start at {expected_start}ms, got {start}ms"
@@ -205,6 +216,6 @@ def parse_prompt_timeline(text: str) -> TimelineDocument:
             )
         )
 
-    if scenes[0].is_continue:
+    if scenes[0].scene_id == 1 and scenes[0].is_continue:
         raise TimelineParseError("Scene 1 cannot be a continuation")
     return TimelineDocument(tuple(scenes))

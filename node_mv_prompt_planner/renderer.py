@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .brief_parser import NO_SCREEN_TEXT_DIRECTIVE
 from ..node_japanese_to_json.compiler.llmj2e import lex_japanese_markdown
 from .errors import MVPlannerError
 from .structures import MVPlan, PlanningBrief, TimelineDocument
@@ -66,7 +67,14 @@ def render_planned_markdown(
     if sorted(planned_by_id) != expected_ids or len(planned_by_id) != len(plan.scenes):
         raise MVPlannerError("Validated plan does not contain every Timeline Scene exactly once")
 
-    lines = [brief.to_markdown()]
+    render_brief = brief
+    if NO_SCREEN_TEXT_DIRECTIVE not in brief.common:
+        render_brief = PlanningBrief(
+            subjects=brief.subjects,
+            retention=brief.retention,
+            common=(*brief.common, NO_SCREEN_TEXT_DIRECTIVE),
+        )
+    lines = [render_brief.to_markdown()]
     for scene in timeline.scenes:
         planned = planned_by_id[scene.scene_id]
         continuation = " 継続" if scene.is_continue else ""

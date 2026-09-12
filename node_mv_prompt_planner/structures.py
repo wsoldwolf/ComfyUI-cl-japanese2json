@@ -79,6 +79,20 @@ class PlannedScene:
     scene_id: int
     scene_intent: str
     shots: tuple[PlannedShot, ...]
+    lyric_anchor_index: int = 0
+    lyric_response_mode: str = "instrumental_continuity"
+
+
+@dataclass(frozen=True)
+class LyricActionBlueprint:
+    """Small-model semantic plan locked ahead of full Scene generation."""
+
+    scene_id: int
+    lyric_anchor_index: int
+    lyric_response_mode: str
+    composition_requirement: str
+    subject_actions: tuple[str, ...]
+    visible_result: str
 
 
 @dataclass(frozen=True)

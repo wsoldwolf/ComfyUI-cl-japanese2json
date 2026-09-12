@@ -1,12 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 4,
   "profile_id": "lyric_visuals_full",
   "display_name": "Lyric visuals full (14B+)",
   "description": "Allow one to three coordinated lyric-inspired auxiliary animations, including abstract cutaways and environmental metaphors, for larger planning models.",
   "ui_order": 30,
   "minimum_aux_visuals_per_scene": 1,
   "maximum_aux_visuals_per_scene": 3,
+  "long_lyric_scene_minimum_shots": 2,
+  "long_lyric_scene_maximum_shots": 3,
   "assignment_mode": "model",
+  "lyric_action_preplan": false,
+  "lyric_action_scenes_per_request": 0,
   "allowed_kinds": [
     "symbolic_object",
     "spatial_metaphor",
@@ -15,6 +19,7 @@
     "environmental_effect",
     "impact_effect",
     "abstract_cutaway",
-    "ink_transformation"
+    "material_transformation",
+    "spatial_trajectory"
   ]
 }

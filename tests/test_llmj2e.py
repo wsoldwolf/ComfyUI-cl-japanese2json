@@ -867,6 +867,41 @@ class LLMJ2ETests(unittest.TestCase):
             )
         )
 
+    def test_retry_recovers_reference_after_temporal_sentence_prefix(self) -> None:
+        def omit_reference(kwargs):
+            return default_stream_translation(
+                kwargs["messages"],
+                transform=lambda _: (
+                    "Initially, it remains in a fixed pose while its mouth moves "
+                    "with the source vocal."
+                ),
+            )
+
+        source = (
+            "# シーン\n## ショット\n"
+            "* 最初に、<Subject 1>は固定した姿勢で静止し、"
+            "口元がソースボーカルに合わせて動く。"
+        )
+        llm = FakeLLM([omit_reference, omit_reference])
+        with self.assertLogs("cl_japanese2json", level="WARNING") as captured:
+            output = llmj2e.translate_markdown(
+                source, llm, "sys", max_tokens=128, retry_max=1
+            )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn(
+            "* Initially, <Subject 1> remains in a fixed pose while its mouth "
+            "moves with the source vocal.",
+            output,
+        )
+        self.assertTrue(
+            any(
+                "Recovered 1 omitted sentence-head reference placeholder(s)"
+                in line
+                for line in captured.output
+            )
+        )
+
     def test_unclosed_thinking_preamble_does_not_retry_valid_records(self) -> None:
         def malformed_thinking_preamble(kwargs):
             return (

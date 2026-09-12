@@ -54,18 +54,31 @@ node_mv_prompt_planner/
   timeline_parser.py
   placeholders.py
   structures.py
+  camera_policy.py
   planning.py
   validation.py
   renderer.py
   prompt_loader.py
   visual_profiles.py
   prompts/
-    song_bible_system_prompt.txt
-    scene_plan_system_prompt.txt
+    core/
+      song_bible_system_prompt.txt
+      lyric_action_system_prompt.txt
+      scene_plan_system_prompt.txt
+      auxiliary_visual_repair_system_prompt.txt
     profiles/
       performance_only/
+        profile.json
+        song_bible.txt
+        scene_plan.txt
       lyric_visuals_light_8b/
+        profile.json
+        song_bible.txt
+        scene_plan.txt
       lyric_visuals_full/
+        profile.json
+        song_bible.txt
+        scene_plan.txt
 node_scene_limiter/
   node.py
   errors.py

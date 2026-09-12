@@ -1,4 +1,4 @@
-"""UTF-8 loader for planner system prompts."""
+"""UTF-8 loader for the shared planner protocol kernels."""
 
 from __future__ import annotations
 
@@ -14,10 +14,12 @@ from .visual_profiles import (
 )
 
 
-_PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
+_PROMPT_DIR = Path(__file__).resolve().parent / "prompts" / "core"
 _PROMPT_NAMES = (
     "song_bible_system_prompt.txt",
+    "lyric_action_system_prompt.txt",
     "scene_plan_system_prompt.txt",
+    "auxiliary_visual_repair_system_prompt.txt",
 )
 
 

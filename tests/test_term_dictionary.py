@@ -27,6 +27,20 @@ class PromptTermDictionaryTests(unittest.TestCase):
         )
         self.assertEqual(replaced, ("画面外", "画面"))
 
+    def test_bundled_dictionary_preserves_illegible_semantic_polarity(self) -> None:
+        entries = dictionary.load_prompt_term_entries(
+            (dictionary.BUNDLED_DICTIONARY_PATH,)
+        )
+        normalized, replaced = dictionary.normalize_prompt_terms(
+            "The trace is 非可読.",
+            entries=entries,
+        )
+        self.assertEqual(
+            normalized,
+            "The trace is illegible.",
+        )
+        self.assertEqual(replaced, ("非可読",))
+
     def test_later_dictionary_overrides_bundled_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             override = Path(directory) / "prompt_terms.csv"

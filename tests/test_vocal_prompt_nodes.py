@@ -435,13 +435,13 @@ class VocalPromptNodeTests(unittest.TestCase):
                     "words": [
                         {
                             "word": "missing harsh line",
-                            "start": 0.2,
-                            "end": 1.0,
+                            "start": 1.2,
+                            "end": 2.0,
                         },
                         {
                             "word": "second missing line",
-                            "start": 1.1,
-                            "end": 2.0,
+                            "start": 2.1,
+                            "end": 3.0,
                         },
                     ],
                 }
@@ -569,7 +569,7 @@ class VocalPromptNodeTests(unittest.TestCase):
                     "segments": [{
                         "text": "look into the void",
                         "words": [{
-                            "word": "look into the void", "start": 1.0, "end": 2.0,
+                            "word": "look into the void", "start": 2.0, "end": 3.0,
                         }],
                     }],
                 },
@@ -607,11 +607,11 @@ class VocalPromptNodeTests(unittest.TestCase):
         self.assertEqual(len(backend.transcribe_calls), 3)
         self.assertEqual(
             [len(call["audio"]) for call in backend.transcribe_calls],
-            [12 * 16000, 12 * 16000, 10 * 16000],
+            [12 * 16000, 12 * 16000, 12 * 16000],
         )
         self.assertEqual(
             [(entry.start_ms, entry.end_ms) for entry in updated[1:4]],
-            [(2000, 3000), (14000, 15000), (26000, 27000)],
+            [(2000, 3000), (13000, 14000), (25000, 26000)],
         )
         self.assertEqual(
             [entry.match_method for entry in updated[1:4]],
@@ -621,10 +621,151 @@ class VocalPromptNodeTests(unittest.TestCase):
             [call["initial_prompt"] for call in backend.transcribe_calls],
             [
                 "opening anchor",
+                "opening anchor",
                 "opening anchor\nlook into the void",
-                "opening anchor\nlook into the void\ntell me what you see",
             ],
         )
+
+    def test_targeted_retry_can_move_an_early_following_anchor_later(self) -> None:
+        lyrics = [
+            lyric(1, "opening lyric"),
+            lyric(2, "missing sung lyric"),
+            lyric(3, "closing lyric"),
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                lyrics[0], "resolved", 1.0, "opening lyric", 0, 2000,
+                match_method="primary",
+            ),
+            vocal.LyricAlignment(lyrics[1], "unresolved", 0.0, "", None, None),
+            vocal.LyricAlignment(
+                lyrics[2], "resolved", 1.0, "closing lyric", 4000, 6000,
+                match_method="primary",
+            ),
+        ]
+        backend = FakeBackend(
+            [
+                {
+                    "segments": [{
+                        "text": "indistinct growl closing lyric",
+                        "words": [
+                            {
+                                "word": "indistinct growl",
+                                "start": 2.1,
+                                "end": 4.8,
+                            },
+                            {
+                                "word": "closing lyric",
+                                "start": 4.8,
+                                "end": 5.8,
+                            },
+                        ],
+                    }],
+                },
+                {
+                    "segments": [{
+                        "text": "missing sung lyric closing lyric",
+                        "words": [
+                            {
+                                "word": "missing sung lyric",
+                                "start": 2.1,
+                                "end": 4.8,
+                            },
+                            {
+                                "word": "closing lyric",
+                                "start": 4.8,
+                                "end": 5.8,
+                            },
+                        ],
+                    }],
+                },
+            ]
+        )
+
+        updated, attempts, recovered, invalid = (
+            vocal.targeted_retry_unresolved_lyrics(
+                alignments,
+                list(range(6 * 16000)),
+                backend,
+                language="en",
+                device="cpu",
+                condition_on_previous_text=True,
+                match_threshold=0.55,
+                neighbor_match_threshold=0.45,
+            )
+        )
+
+        self.assertEqual((attempts, recovered, invalid), (1, 1, 0))
+        self.assertEqual(len(backend.transcribe_calls), 2)
+        self.assertEqual(updated[1].status, "resolved")
+        self.assertEqual(updated[1].match_method, "targeted")
+        self.assertEqual((updated[1].start_ms, updated[1].end_ms), (2100, 4800))
+        self.assertEqual((updated[2].start_ms, updated[2].end_ms), (4800, 6000))
+        self.assertEqual(updated[2].match_method, "primary")
+        self.assertEqual(
+            backend.transcribe_calls[0]["initial_prompt"],
+            "opening lyric",
+        )
+        self.assertEqual(
+            backend.transcribe_calls[1]["initial_prompt"],
+            "opening lyric\nmissing sung lyric",
+        )
+
+    def test_guided_targeted_retry_cannot_replace_following_anchor_without_support(
+        self,
+    ) -> None:
+        lyrics = [
+            lyric(1, "opening lyric"),
+            lyric(2, "missing sung lyric"),
+            lyric(3, "closing lyric"),
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                lyrics[0], "resolved", 1.0, "opening lyric", 0, 2000,
+                match_method="primary",
+            ),
+            vocal.LyricAlignment(lyrics[1], "unresolved", 0.0, "", None, None),
+            vocal.LyricAlignment(
+                lyrics[2], "resolved", 1.0, "closing lyric", 4000, 6000,
+                match_method="primary",
+            ),
+        ]
+        backend = FakeBackend(
+            [
+                {
+                    "segments": [{
+                        "text": "indistinct growl",
+                        "words": [{
+                            "word": "indistinct growl", "start": 2.1, "end": 4.8,
+                        }],
+                    }],
+                },
+                {
+                    "segments": [{
+                        "text": "missing sung lyric",
+                        "words": [{
+                            "word": "missing sung lyric", "start": 2.1, "end": 4.8,
+                        }],
+                    }],
+                },
+            ]
+        )
+
+        updated, attempts, recovered, invalid = (
+            vocal.targeted_retry_unresolved_lyrics(
+                alignments,
+                list(range(6 * 16000)),
+                backend,
+                language="en",
+                device="cpu",
+                condition_on_previous_text=True,
+                match_threshold=0.55,
+                neighbor_match_threshold=0.45,
+            )
+        )
+
+        self.assertEqual((attempts, recovered, invalid), (1, 0, 0))
+        self.assertEqual(updated, alignments)
 
     def test_targeted_window_merge_deduplicates_overlap_by_timestamp(self) -> None:
         merged = vocal._merge_targeted_window_words(

@@ -1,12 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 4,
   "profile_id": "lyric_visuals_light_8b",
   "display_name": "Lyric visuals light (8B)",
-  "description": "Add exactly one bounded lyric-inspired auxiliary animation per Scene, with its kind assigned deterministically by Python for small-model reliability.",
+  "description": "Add exactly one bounded lyric-inspired auxiliary animation per Scene while reinforcing earliest complete-predicate selection and head-verb fidelity for small-model reliability.",
   "ui_order": 20,
   "minimum_aux_visuals_per_scene": 1,
   "maximum_aux_visuals_per_scene": 1,
+  "long_lyric_scene_minimum_shots": 2,
+  "long_lyric_scene_maximum_shots": 2,
   "assignment_mode": "cycle",
+  "lyric_action_preplan": true,
+  "lyric_action_scenes_per_request": 1,
   "allowed_kinds": [
     "symbolic_object",
     "spatial_metaphor",

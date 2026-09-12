@@ -1,6 +1,6 @@
 # ComfyUI-cl-japanese2json
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownの先頭Nシーンだけをコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownから開始番号以降の連続したScene範囲をコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -39,6 +39,7 @@ node_mv_prompt_planner/
   node.py
   brief_parser.py
   timeline_parser.py
+  camera_policy.py
   planning.py
   validation.py
   renderer.py
@@ -495,11 +496,11 @@ Contex-Loopを`anchor_mode=head`で使うと、継続Sceneのraw先頭からcont
 
 Qwen3ではユーザーメッセージ末尾の`/no_think`に加え、llama-cpp-pythonのchat APIがhard switchを公開しない環境でも、空のthinking assistant prefillを生成開始位置へ与えてthinkingそのものを抑止します。
 
-応答では構造と保護プレースホルダの個数・順序・所有区間、コードフェンス、thinking、日本語残留などを検証します。正常に閉じた完全な`<think>...</think>` blockは位置にかかわらずQwenの制御出力として除去しますが、未閉鎖タグは推測して削除しません。応答全体の検証に失敗しても、余分な前置きや局所的な構造破損から独立して境界を確定できる正常区間を個別回収し、未解決区間だけを新しいseedで`retry_max`まで再送します。再送時は不透明な参照プレースホルダへ標準参照タグを一時注釈し、Qwenが`<Subject N>`等を代名詞として省略し続ける現象を抑えます。原文の文頭参照だけがなお省略された場合は、文境界が一意な場合に限って決定論的に復元します。
+応答では構造と保護プレースホルダの個数・順序・所有区間、コードフェンス、thinking、日本語残留などを検証します。正常に閉じた完全な`<think>...</think>` blockは位置にかかわらずQwenの制御出力として除去しますが、未閉鎖タグは推測して削除しません。応答全体の検証に失敗しても、余分な前置きや局所的な構造破損から独立して境界を確定できる正常区間を個別回収し、未解決区間だけを新しいseedで`retry_max`まで再送します。再送時は不透明な参照プレースホルダへ標準参照タグを一時注釈し、Qwenが`<Subject N>`等を代名詞として省略し続ける現象を抑えます。原文の文頭参照、又は`最初に、`、`次に、`、`続いて、`、`最後に、`等の既知の時系列接頭辞直後の参照だけがなお省略された場合は、文境界が一意な場合に限って決定論的に復元します。
 
 同じ未解決グループが2回連続で一件も減らない場合は、グループを半分ずつ縮小し、必要なら1行単位で再試行します。英語文中に日本語が一語だけ残った場合も、残留語を検証エラーと次の再送要求へ明示します。
 
-意味が一意な固定プロンプト用語は、外部CSV辞書を使って保護台詞の外だけをPythonで決定論的に英語化します。同梱辞書には`画面`、`画面全体`、`画面外`、`画面中央`等を収録しています。モデルが`entire画面`のような混在語を再生成した場合も検証前に同じ辞書で修復します。ユーザーは`ComfyUI/user/cl_japanese2json/prompt_terms.csv`へ`source,target`列を持つUTF-8 CSVを置くことで、コードを変更せず語句の追加と標準定義の上書きができます。ファイル更新は次の実行で自動再読込され、ワークフローの入力構造は変わりません。詳細は[CLプロンプト用語辞書仕様](docs/cl_prompt_term_dictionary_spec.md)を参照してください。
+意味が一意な固定プロンプト用語は、外部CSV辞書を使って保護台詞の外だけをPythonで決定論的に英語化します。同梱辞書には`画面`、`画面全体`、`画面外`、`画面中央`等の位置語と、意味の反転を防ぐ`非可読`を収録しています。モデルが`entire画面`のような混在語を再生成した場合も検証前に同じ辞書で修復します。ユーザーは`ComfyUI/user/cl_japanese2json/prompt_terms.csv`へ`source,target`列を持つUTF-8 CSVを置くことで、コードを変更せず語句の追加と標準定義の上書きができます。ファイル更新は次の実行で自動再読込され、ワークフローの入力構造は変わりません。詳細は[CLプロンプト用語辞書仕様](docs/cl_prompt_term_dictionary_spec.md)を参照してください。
 
 `save_debug_output=True`では、実行ごとのディレクトリを`ComfyUI/output/cl_japanese2json_debug/`へ作り、`source.md`、system prompt、保護要求、LLM生応答、検証メタデータ、成功時の`canonical.md`と`result.json`、失敗時の`error.txt`を保存します。入力内容を含むため共有前に確認してください。`ComfyUI/input`へは書きません。
 
@@ -578,13 +579,31 @@ CL MV Prompt Planner (GGUF).planned_markdown
   └─> CL Japanese to JSON (GGUF).plain_text
 ```
 
-Planning Markdownには既存文法の`# サブジェクト`、任意の`# 保持分析`及び任意の`# 共通プロンプト`だけを書きます。Scene、Shot及び音響はVocalノード出力から固定されるため重ねて記述しません。`chat_format=auto`はGGUF内のchat templateを使用し、Qwen系とGemma系をモデル名から切り替える通常設定です。メタデータが不完全なGGUFに限り`qwen`又は`gemma`を明示します。
+Planning Markdownには既存文法の`# サブジェクト`、任意の`# 保持分析`及び任意の`# 共通プロンプト`だけを書きます。人間が指定するのは人物、絶対に変えない特徴、全編の画風・世界・禁止事項までです。Sceneごとの動作、歌詞の映像化手順、カメラ軌道を共通プロンプトへ大量に列挙する必要はありません。これらはPlannerが歌詞と時間固定Sceneから生成します。Scene、Shot及び音響はVocalノード出力から固定されるため重ねて記述しません。`chat_format=auto`はGGUF内のchat templateを使用し、Qwen系とGemma系をモデル名から切り替える通常設定です。メタデータが不完全なGGUFに限り`qwen`又は`gemma`を明示します。
 
-任意入力`visual_enrichment_profile`で、歌詞から生成する付加映像の密度を明示的に選べます。既定の`performance_only`は人物演技、既存環境、照明及びカメラだけを計画します。`lyric_visuals_light_8b`は8B向けにSceneごと一つの種類をPythonが循環指定し、象徴物、空間的比喩、光と影、前景トランジション又は環境エフェクトを簡潔に加えます。`lyric_visuals_full`は14B以上を推奨し、Sceneごと一～三個の抽象的な道、象徴物、環境変化、インク変形又は抽象カットを許可します。どの設定でもSubject、保持分析、Timeline、発声及び禁止事項が優先されます。
+簡潔なPlanning Markdownの例:
 
-プランナーは最初に楽曲全体のsong bibleを作り、その後`scenes_per_batch`件ずつSceneを計画します。LLMへJSONを生成させず、固定フィールドの行指向プロトコルだけを返させます。検証に失敗しても正常Sceneを保持し、欠落又は不正なSceneだけを、前回のエラー内容と正確な要求Scene IDを添えて新しいseedで再送します。連続動作は`ACTION 1`からの連番で受け取り、Pythonが順序を維持した別バレットへ変換し、`最初に、`、`次に、`、`最後に、`を付けてH3へ時間順を明示します。最終出力は既存コンパイラで再検証される日本語縮小Markdownです。
+```text
+# サブジェクト
+* 成人の中性的な無毛の人型。左右非対称の顔、平坦な体格、不透明な黒い長衣を持つ。
 
-プランナーはv0.2.0から、Planning MarkdownをPythonで`hard_requirements`配列へ、Sunoセクションと歌詞を`section_sources`及びScene別`lyric_groups`へ構造化してLLMへ渡します。Song Bibleは創作ガイドだけを生成し、固定条件を言い換えません。各Sceneには該当セクションのモチーフと、直前に検証済みのSceneの最終構図・動作・環境・カメラだけを渡します。完全一致する重複Sceneは後のSceneだけを再試行します。重複後は未解決Sceneを一件ずつ時間順に再送し、直前Sceneを即座に継承します。禁止例本文は模倣を誘発するため再掲せず、既知の重複元と直前Sceneをcompact fingerprintとして渡します。Pythonが未使用のShot/ACTION件数を`duplicate_repair`で強制し、低temperatureでseedを変えても同じ応答になる連鎖を避けます。
+# 保持分析
+* <Subject 1> 完全に保持: 頭部、顔、体格、衣装、手足及び各手五本の指を維持する。頭髪、裸体及び余分な手足を生成しない。
+
+# 共通プロンプト
+* 全編を荒い多数の線による立体的な抽象映像として描き、滑らかな3DCGにしない。
+* 画面内に字幕、歌詞、文字、ロゴ及び透かしを表示しない。
+```
+
+任意入力`visual_enrichment_profile`で、歌詞から生成する付加映像の密度を明示的に選べます。既定の`performance_only`は人物演技、既存環境、照明及びカメラだけを計画します。`lyric_visuals_light_8b`は8B向けにSceneごと一つの種類をPythonが循環指定し、象徴物、空間的比喩、光と影、前景トランジション又は環境エフェクトを簡潔に加えます。`lyric_visuals_full`は14B以上を推奨し、Sceneごと一～三個の象徴物、空間軌道、状態変化、前景遷移又は抽象カットを許可します。プロファイル自身はインク、道路、雪等の特定媒体を前提にしません。入力した画材・世界を描画方法として使い、現在の歌詞から方向、距離、収束、分岐、蓄積、侵食、圧力、解放等の可視変化を計画します。どの設定でもSubject、保持分析、Timeline、発声及び禁止事項が優先されます。
+
+Plannerのsystem promptは、`node_mv_prompt_planner/prompts/core/`にある共通プロトコルと、選択した`prompts/profiles/<profile_id>/`の創作ポリシーへ分離されています。共通コアは行指向書式、固定Timeline、保持分析、参照、H3カメラ型及び音声ロックだけを扱います。歌詞の具現化、対象物・痕跡の扱い、人物演技、付加映像数及び長尺SceneのShot方針はプロファイル別の`song_bible.txt`と`scene_plan.txt`だけに置かれます。このため、8B向けの強い意味役割拘束を変更しても`lyric_visuals_full`や`performance_only`の創作方針へ波及しません。
+
+Plannerの`model_name`に独立した`8B`を検出し、同時に大型モデル向け`lyric_visuals_full`を選択している場合だけ、再試行上限に達して失敗する危険を上下を`#`で囲んだ3行の黄色い重大WARNINGで通知します。`lyric_visuals_light_8b`又は`performance_only`では警告しません。警告だけでモデルやプロファイルは自動変更されず、`18B`、`27B`、`80B`は8Bとして扱いません。
+
+プランナーは最初に楽曲全体のsong bibleを作り、その後`scenes_per_batch`件ずつSceneを計画します。LLMへJSONを生成させず、固定フィールドの行指向プロトコルだけを返させます。Song Bibleで小型モデルが最終`END_SONG_BIBLE`だけを省略した場合は、それ以外の全構造が完全に正常なときに限りPythonが終端を補完し、無駄な全体再推論を避けます。8B用歌詞動作preplanが内部のSubjectトークンを正確な既知`<Subject N>`へ戻した場合も、参照凡例に同じSubjectがある場合だけPythonが再保護してWARNING付きで受理します。未知Subjectや他種の生参照タグは拒否します。検証に失敗しても正常Sceneを保持し、欠落又は不正なSceneだけを、前回のエラー内容と正確な要求Scene IDを添えて新しいseedで再送します。連続動作は`ACTION 1`からの連番で受け取り、Pythonが順序を維持した別バレットへ変換し、`最初に、`、`次に、`、`最後に、`を付けてH3へ時間順を明示します。各Shotで1へ戻す番号を正規形とし、LLMが複数ShotをScene全体の通し連番にしても欠番なく一意なら同じ順序として受理します。最終出力は既存コンパイラで再検証される日本語縮小Markdownです。
+
+プランナーはPlanning MarkdownをPythonで`subject_identity`、`retention_constraints`及び`global_visual_direction`へ役割分離し、Sunoセクションと歌詞を`section_sources`及びScene別の1始まり`lyric_lines`へ構造化してLLMへ渡します。歌詞があるSceneは`LYRIC_RESPONSE`で一行を可視応答アンカーとして選び、制約に反しない具体的な身体動詞を人物の直接動作として優先します。選択歌詞は主体、動作、具体的な対象物及び動作後の可視結果まで一組として維持し、共通画材、背景運動、照明又はカメラだけへ置き換えません。歌詞が具体的対象を伴う場合、その対象を接触前の構図で認識可能に配置し、接触と変化後の状態まで同じ対象として維持します。直接的な接触動作は、歌詞から身体部位又は道具、接触点、軌道、反復、力加減、対象の抵抗と蓄積変化、離脱を導出し、必要な連続ACTIONへ分解します。意図的な痕跡を作る動作は胴体と上腕を安定させ、手、手首又は指の局所軌道を使用します。楽曲の激しさは、この動作機構を決めた後で速度、振幅又はカメラ強度へ適用するため、繊細な動詞を大振りな一撃へ置換しません。保持分析に含まれる身体と衣装は物理的な不変対象とし、付加映像による剥離、露出、破壊又は溶解を許しません。Song Bibleは創作ガイドだけを生成し、固定条件を言い換えません。`lyric_visuals_light_8b`ではSong Bibleのモチーフを人物動作から切り離し、外部の非人物状態変化だけに限定します。各Sceneには該当セクションのモチーフ、直前に検証済みのSceneの最終状態、直近4 Sceneのcamera type、振幅、速度及び付加映像kindを渡します。完全一致する重複Sceneは後のSceneだけを再試行します。完全一致する`AUX_VISUAL`文は、正確に一個を循環割当する軽量プロファイルでは有効なScene全体を保持したまま一文だけを最大2回の小さな専用推論で修復し、修復不能時もWARNING付きで元の有効Sceneを採用します。大型プロファイルでは従来どおり後のSceneを部分再試行します。固定のCAMERA例文は置かず、10秒以上の歌詞SceneではScene番号から6系列の`required_camera_sequence`を循環選択します。push、pull、truck、pedestal及びarcを組み替え、2 Shot構成の半数には被写体の前方斜めから側面を経て後方斜め等へ広く回り込む部分周回を配置します。`lyric_visuals_light_8b`では正確に2 Shot、`lyric_visuals_full`では2～3 Shotについてtype、振幅及び速度をPythonが検証し、同一の寄りや正面構図の全Scene複製を防ぎます。
 
 batch内の全Sceneが不正な場合も、以降は一件ずつ再送します。8BモデルがCAMERA書式の説明語`type`、`amplitude`、`speed`を値として出した場合は、Pythonが有効な具体値を`camera_protocol_repair`として付け、Scene固有の診断だけで修復します。
 
@@ -596,7 +615,7 @@ batch内の全Sceneが不正な場合も、以降は一件ずつ再送します�
 
 ## テスト生成用にScene数を制限
 
-`CL Scene Limiter (Reduced Markdown)`は、日本語縮小Markdownの先頭から`scene_limit_count`個のSceneだけを残します。LLMや翻訳を使わず、保持するSceneと、`# サブジェクト`、`# 保持分析`、`# 共通プロンプト`を元の文字列のまま出力します。
+`CL Scene Limiter (Reduced Markdown)`は、日本語縮小Markdownの`scene_start_number`（1始まり）から`scene_limit_count`個までの連続したSceneだけを残します。LLMや翻訳を使わず、保持するSceneと、`# サブジェクト`、`# 保持分析`、`# 共通プロンプト`を元の文字列のまま出力します。`CL MV Prompt Planner (GGUF)`の直前にも接続でき、元のScene番号とソース音声上の絶対範囲を保ったまま、LLMへ渡すScene数を減らせます。
 
 ```text
 縮小Markdown ──> CL Scene Limiter (Reduced Markdown).reduced_markdown
@@ -607,7 +626,7 @@ CL Scene Limiter (Reduced Markdown).limited_markdown
 
 `// シーン N`が対応する`# シーン`の直前にある場合は番号コメントもScene境界として扱うため、除外したSceneの番号だけが残ることはありません。保持Scene内の`// 検出状態`、`// 楽曲セクション`、`// 歌詞`及びブロックコメントは変更しません。明示的な番号コメントがない入力では、関連先を確定できない`# シーン`直前のコメントを安全のため残します。
 
-`scene_limit_count`は現行コンパイラの上限に合わせて1～128です。実際のScene数以上を指定した場合は、改行コードと末尾改行を含め入力を完全にそのまま返します。`disable=True`にするとScene検出とMarkdown検証をバイパスし、入力STRINGをそのまま出力します。通常動作では、入力にSceneがない場合又は既存の日本語縮小Markdown文法として不正な場合は停止エラーになります。詳細は`docs/cl_scene_limiter_spec.md`を参照してください。
+`scene_start_number`と`scene_limit_count`は現行コンパイラの上限に合わせて1～128、既定値はどちらも1です。要求範囲の終端が最終Sceneを越える場合は最終Sceneで打ち切ります。開始番号自体が存在しない場合は停止エラーです。開始が1で要求範囲が全Sceneを覆う場合は、改行コードと末尾改行を含め入力を完全にそのまま返します。`disable=True`にするとScene検出とMarkdown検証をバイパスし、入力STRINGをそのまま出力します。通常動作では、入力にSceneがない場合又は既存の日本語縮小Markdown文法として不正な場合も停止エラーになります。詳細は`docs/cl_scene_limiter_spec.md`を参照してください。
 
 ## PCM無音パディング
 

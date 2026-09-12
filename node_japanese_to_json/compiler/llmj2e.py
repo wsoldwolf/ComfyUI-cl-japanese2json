@@ -1762,6 +1762,10 @@ def _repair_retry_sentence_head_references(
         if sentence.strip()
     ]
 
+    source_sequence_prefix_re = re.compile(
+        r"\A\s*(?:(?:最初に|まず|はじめに|初めに|次に|続いて|その後|最後に|"
+        r"終わりに)\s*[、,]\s*)*"
+    )
     by_sentence: dict[int, list[str]] = {}
     for token, replacement in record.payload.replacements.items():
         if translated.count(token) != 0:
@@ -1771,7 +1775,9 @@ def _repair_retry_sentence_head_references(
         matching = [
             index
             for index, sentence in enumerate(source_sentences)
-            if sentence.lstrip().startswith(token)
+            if source_sequence_prefix_re.sub("", sentence, count=1).startswith(
+                token
+            )
         ]
         if len(matching) != 1:
             return None
@@ -1782,17 +1788,23 @@ def _repair_retry_sentence_head_references(
 
     repaired_sentences = list(translated_sentences)
     leading_subject_re = re.compile(
-        r"\A\s*(?:she|he|they|it|the (?:character|subject|woman|man|person)|"
+        r"\A(?P<sequence>\s*(?:(?:first|firstly|at first|initially|then|next|"
+        r"subsequently|after that|afterward|afterwards|finally|lastly)"
+        r"[,:]?\s+)*)(?:she|he|they|it|"
+        r"the (?:character|subject|woman|man|person)|"
         r"this (?:character|subject|woman|man|person))\b",
         re.IGNORECASE,
     )
     for sentence_index, tokens in by_sentence.items():
         sentence = repaired_sentences[sentence_index]
         prefix = " ".join(tokens)
-        if leading_subject_re.match(sentence):
-            separator = " " if sentence_index > 0 else ""
-            sentence = leading_subject_re.sub(
-                f"{separator}{prefix}", sentence, count=1
+        match = leading_subject_re.match(sentence)
+        if match:
+            sentence = (
+                sentence[: match.start()]
+                + match.group("sequence")
+                + prefix
+                + sentence[match.end() :]
             )
         else:
             sentence = f" {prefix}: {sentence.lstrip()}"

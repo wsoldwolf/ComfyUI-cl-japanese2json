@@ -1,11 +1,15 @@
 {
-  "schema_version": 1,
+  "schema_version": 4,
   "profile_id": "performance_only",
   "display_name": "Performance only",
   "description": "Prioritize character performance, the required environment, and camera movement without auxiliary lyric-derived visual layers.",
   "ui_order": 10,
   "minimum_aux_visuals_per_scene": 0,
   "maximum_aux_visuals_per_scene": 0,
+  "long_lyric_scene_minimum_shots": 1,
+  "long_lyric_scene_maximum_shots": 6,
   "assignment_mode": "none",
+  "lyric_action_preplan": false,
+  "lyric_action_scenes_per_request": 0,
   "allowed_kinds": []
 }

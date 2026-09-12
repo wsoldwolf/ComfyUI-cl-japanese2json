@@ -29,10 +29,14 @@ class VisualEnrichmentProfile:
     ui_order: int
     minimum_aux_visuals_per_scene: int
     maximum_aux_visuals_per_scene: int
+    long_lyric_scene_minimum_shots: int
+    long_lyric_scene_maximum_shots: int
     assignment_mode: str
     allowed_kinds: tuple[str, ...]
-    song_bible_appendix: str
-    scene_plan_appendix: str
+    lyric_action_preplan: bool
+    lyric_action_scenes_per_request: int
+    song_bible_policy: str
+    scene_plan_policy: str
 
     def scene_contract(self, scene_id: int) -> dict[str, Any]:
         required_kind: str | None = None
@@ -58,8 +62,18 @@ class VisualEnrichmentProfile:
             "maximum_aux_visuals_per_scene": (
                 self.maximum_aux_visuals_per_scene
             ),
+            "long_lyric_scene_minimum_shots": (
+                self.long_lyric_scene_minimum_shots
+            ),
+            "long_lyric_scene_maximum_shots": (
+                self.long_lyric_scene_maximum_shots
+            ),
             "assignment_mode": self.assignment_mode,
             "allowed_kinds": list(self.allowed_kinds),
+            "lyric_action_preplan": self.lyric_action_preplan,
+            "lyric_action_scenes_per_request": (
+                self.lyric_action_scenes_per_request
+            ),
         }
 
 
@@ -141,8 +155,12 @@ def _load_profile_cached(
         "ui_order",
         "minimum_aux_visuals_per_scene",
         "maximum_aux_visuals_per_scene",
+        "long_lyric_scene_minimum_shots",
+        "long_lyric_scene_maximum_shots",
         "assignment_mode",
         "allowed_kinds",
+        "lyric_action_preplan",
+        "lyric_action_scenes_per_request",
     }
     if set(data) != expected_fields:
         missing = sorted(expected_fields - set(data))
@@ -150,8 +168,8 @@ def _load_profile_cached(
         raise MVPlannerError(
             f"{context} manifest fields are invalid; missing={missing}, extra={extra}"
         )
-    if data["schema_version"] != 1:
-        raise MVPlannerError(f"{context}.schema_version must be 1")
+    if data["schema_version"] != 4:
+        raise MVPlannerError(f"{context}.schema_version must be 4")
     profile_id = _require_string(data, "profile_id", context)
     if not _PROFILE_ID_RE.fullmatch(profile_id) or profile_id != directory.name:
         raise MVPlannerError(
@@ -162,6 +180,8 @@ def _load_profile_cached(
     ui_order = data["ui_order"]
     minimum = data["minimum_aux_visuals_per_scene"]
     maximum = data["maximum_aux_visuals_per_scene"]
+    minimum_long_shots = data["long_lyric_scene_minimum_shots"]
+    maximum_long_shots = data["long_lyric_scene_maximum_shots"]
     if not isinstance(ui_order, int) or isinstance(ui_order, bool):
         raise MVPlannerError(f"{context}.ui_order must be an integer")
     if (
@@ -174,12 +194,50 @@ def _load_profile_cached(
         raise MVPlannerError(
             f"{context} auxiliary visual counts must satisfy 0 <= minimum <= maximum <= 3"
         )
+    if (
+        not isinstance(minimum_long_shots, int)
+        or isinstance(minimum_long_shots, bool)
+        or not isinstance(maximum_long_shots, int)
+        or isinstance(maximum_long_shots, bool)
+        or not 1 <= minimum_long_shots <= maximum_long_shots <= 6
+    ):
+        raise MVPlannerError(
+            f"{context} long lyric Scene Shot counts must satisfy "
+            "1 <= minimum <= maximum <= 6"
+        )
     assignment_mode = _require_string(data, "assignment_mode", context)
     if assignment_mode not in _ASSIGNMENT_MODES:
         raise MVPlannerError(
             f"{context}.assignment_mode must be one of {sorted(_ASSIGNMENT_MODES)}"
         )
     raw_kinds = data["allowed_kinds"]
+    lyric_action_preplan = data["lyric_action_preplan"]
+    lyric_action_scenes_per_request = data[
+        "lyric_action_scenes_per_request"
+    ]
+    if not isinstance(lyric_action_preplan, bool):
+        raise MVPlannerError(
+            f"{context}.lyric_action_preplan must be a boolean"
+        )
+    if (
+        not isinstance(lyric_action_scenes_per_request, int)
+        or isinstance(lyric_action_scenes_per_request, bool)
+        or not 0 <= lyric_action_scenes_per_request <= 16
+    ):
+        raise MVPlannerError(
+            f"{context}.lyric_action_scenes_per_request must be an integer "
+            "between 0 and 16"
+        )
+    if lyric_action_preplan and lyric_action_scenes_per_request < 1:
+        raise MVPlannerError(
+            f"{context} enables lyric_action_preplan and requires "
+            "lyric_action_scenes_per_request >= 1"
+        )
+    if not lyric_action_preplan and lyric_action_scenes_per_request != 0:
+        raise MVPlannerError(
+            f"{context} disables lyric_action_preplan and requires "
+            "lyric_action_scenes_per_request=0"
+        )
     if not isinstance(raw_kinds, list) or any(
         not isinstance(value, str) or not _KIND_RE.fullmatch(value)
         for value in raw_kinds
@@ -204,12 +262,12 @@ def _load_profile_cached(
             f"{context} cycle assignment requires exactly one auxiliary visual per Scene"
         )
     try:
-        song_appendix = song_path.read_text(encoding="utf-8-sig").strip()
-        scene_appendix = scene_path.read_text(encoding="utf-8-sig").strip()
+        song_policy = song_path.read_text(encoding="utf-8-sig").strip()
+        scene_policy = scene_path.read_text(encoding="utf-8-sig").strip()
     except (OSError, UnicodeError) as exc:
-        raise MVPlannerError(f"Could not load prompt appendix for {context}: {exc}") from exc
-    if not song_appendix or not scene_appendix:
-        raise MVPlannerError(f"{context} prompt appendices must not be empty")
+        raise MVPlannerError(f"Could not load prompt policy for {context}: {exc}") from exc
+    if not song_policy or not scene_policy:
+        raise MVPlannerError(f"{context} prompt policies must not be empty")
     return VisualEnrichmentProfile(
         profile_id=profile_id,
         display_name=display_name,
@@ -217,10 +275,14 @@ def _load_profile_cached(
         ui_order=ui_order,
         minimum_aux_visuals_per_scene=minimum,
         maximum_aux_visuals_per_scene=maximum,
+        long_lyric_scene_minimum_shots=minimum_long_shots,
+        long_lyric_scene_maximum_shots=maximum_long_shots,
         assignment_mode=assignment_mode,
         allowed_kinds=allowed_kinds,
-        song_bible_appendix=song_appendix,
-        scene_plan_appendix=scene_appendix,
+        lyric_action_preplan=lyric_action_preplan,
+        lyric_action_scenes_per_request=lyric_action_scenes_per_request,
+        song_bible_policy=song_policy,
+        scene_plan_policy=scene_policy,
     )
 
 
@@ -268,13 +330,13 @@ def compose_profiled_system_prompt(
 ) -> str:
     if stage not in _STAGES:
         raise MVPlannerError(f"Unknown planner prompt stage {stage!r}")
-    appendix = (
-        profile.song_bible_appendix
+    policy = (
+        profile.song_bible_policy
         if stage == "song_bible"
-        else profile.scene_plan_appendix
+        else profile.scene_plan_policy
     )
     return (
         f"{base_prompt.rstrip()}\n\n"
         f"VISUAL ENRICHMENT PROFILE: {profile.profile_id}\n"
-        f"{appendix.strip()}"
+        f"{policy.strip()}"
     )

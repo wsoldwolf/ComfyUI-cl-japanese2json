@@ -7,6 +7,16 @@ from .errors import PlanningBriefError
 from .structures import PlanningBrief
 
 
+# H3 tends to turn even explicitly "illegible" writing into pseudo-typography.
+# Keep the physical writing/carving action available, but describe its visible
+# residue only in geometric, non-linguistic terms.
+NO_SCREEN_TEXT_DIRECTIVE = (
+    "画面内に文字、数字、記号、字幕、ロゴ、透かし及び"
+    "タイポグラフィを表示しない。書字・彫刻の痕跡は、長さ・向き・"
+    "曲率・間隔が不規則な孤立した短い傷又は溝だけで表し、"
+    "横一列又は縦一列に並べず、基準線、反復字形、字間、単語間隔、"
+    "鏡文字及び反射文字を作らない。"
+)
 _DIRECTIVES = {
     "# サブジェクト": "subjects",
     "# 保持分析": "retention",
