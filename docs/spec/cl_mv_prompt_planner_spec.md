@@ -10,6 +10,8 @@
 
 ## 2. 処理境界
 
+Enhancerからの固定情景バレットは`planning_brief.scene_anchors`として全プロファイルへ渡し、最初の要求シーンの初回ショットにも保持する。タイムライン・人物動作・リップシンクは変更しない。詳細は[意味・情景保全仕様](prompt_semantic_preservation_spec.md)を参照する。
+
 Pythonが決定するもの:
 
 - Scene番号、Scene順序、Scene秒数及び`継続`の有無

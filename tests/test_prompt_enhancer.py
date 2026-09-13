@@ -69,6 +69,7 @@ def node_arguments(**overrides):
         "style_profile_override": "",
         "background_detail_override": "",
         "save_debug_output": False,
+        "semantic_guard": False,  # Legacy transport fixtures; semantic cases have independent verdicts.
     }
     values.update(overrides)
     return values

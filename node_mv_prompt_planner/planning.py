@@ -307,7 +307,9 @@ def _planning_brief_payload(
     Scene events for the model to copy into every response.
     """
 
-    return {
+    from ..common.scene_anchors import extract_scene_anchors
+
+    payload = {
         "subject_identity": [
             protector.protect(value) for value in brief.subjects
         ],
@@ -318,6 +320,10 @@ def _planning_brief_payload(
             protector.protect(value) for value in brief.common
         ],
     }
+    anchors = extract_scene_anchors(brief.common)
+    if anchors:
+        payload["scene_anchors"] = [protector.protect(value) for value in anchors]
+    return payload
 
 
 def _lyric_lines(

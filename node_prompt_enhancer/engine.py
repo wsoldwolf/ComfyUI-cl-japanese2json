@@ -10,6 +10,9 @@ import threading
 import time
 from typing import Any, Callable
 
+from ..common.scene_anchors import scene_anchor
+from ..common.semantic_review import SemanticReviewError, review_batches, run_review
+
 from ..node_prompt_merger.merger import merge_reduced_markdown
 from .errors import (
     EnhancerInferenceStallError,
@@ -246,6 +249,7 @@ def enhance_reduced_markdown(
     progress_callback: Callable[[str, int], None] | None = None,
     interrupt_callback: Callable[[], Any] | None = None,
     debug_events: list[dict[str, Any]] | None = None,
+    semantic_guard: bool = False,
 ) -> PromptEnhancementResult:
     source = inspect_prompt(source_markdown, "source_markdown")
     user = inspect_prompt(user_prompt, "user_prompt")
@@ -284,6 +288,8 @@ def enhance_reduced_markdown(
         )
     events: list[dict[str, Any]] = debug_events if debug_events is not None else []
     request_count = 0
+    review_requests = 0
+    review_failures = 0
     retries = 0
     response = EnhancementResponse(
         classifications={item.source_id: "keep" for item in source.common},
@@ -339,6 +345,57 @@ def enhance_reduced_markdown(
                     minimum_background_lines=background.minimum_lines,
                     maximum_background_lines=background.maximum_lines,
                 )
+                if semantic_guard:
+                    candidate_removed, candidate_additions, _anchors, _blocked = _common_changes(
+                        source, response, style, background, conflicting_source_ids, time_authority)
+                    candidate_common = [item.text for item in source.common
+                                        if item.source_id not in candidate_removed]
+                    candidate_common.extend(candidate_additions)
+                    candidate_common.extend(item.text for item in user.common)
+                    review_context = {
+                        "candidate_common": candidate_common,
+                        "immutable_user_prompt": user.payload(),
+                        "style_replacement_enabled": not style.passthrough,
+                        "background_detail": background.profile_id,
+                    }
+
+                    def invoke(messages, grammar_source, on_progress, abort):
+                        nonlocal request_count, review_requests
+                        request_count += 1
+                        review_requests += 1
+                        factory = getattr(backend, "compile_grammar", None)
+                        kwargs = {}
+                        if callable(factory):
+                            kwargs["grammar"] = factory(grammar_source)
+                        raw_response = backend.complete_chat(
+                            messages=messages, max_tokens=min(max_tokens, 1024),
+                            temperature=temperature, top_p=top_p,
+                            repeat_penalty=repetition_penalty,
+                            seed=_seed_for_attempt(seed, 7_919 + request_count),
+                            progress_callback=on_progress, interrupt_callback=abort, **kwargs)
+                        return _response_content(raw_response), {"usage": raw_response.get("usage")}
+
+                    try:
+                        # Verbatim source copying is stronger evidence of
+                        # retention than a model verdict. Only replaced/lost
+                        # sentences need semantic comparison (avoids false
+                        # failures on already-preserved physical anchors).
+                        pairs = [{"id": item.source_id, "source": item.text} for item in source.common
+                                 if not any(item.text in value for value in candidate_common)]
+                        for batch in review_batches(pairs, policy="environment", context=review_context,
+                                                    backend=backend, output_budget=min(max_tokens, 1024)):
+                            failures = run_review(
+                                batch,
+                                policy="environment", context=review_context, invoke=invoke,
+                                logger=LOGGER, label="[cl_prompt_enhancer] Environment review",
+                                events=events, interrupt_callback=interrupt_callback,
+                                progress_callback=(lambda n: progress_callback("Environment review", n))
+                                if progress_callback else None)
+                            if failures:
+                                raise SemanticReviewError("; ".join(f"{key}: {value}" for key, value in failures.items()))
+                    except SemanticReviewError as exc:
+                        review_failures += 1
+                        raise EnhancerResponseError(f"Environment facts were not preserved: {exc}") from exc
                 for warning in response.warnings:
                     LOGGER.warning("[cl_prompt_enhancer] %s", warning)
                 event["parsed_response"] = {
@@ -355,7 +412,7 @@ def enhance_reduced_markdown(
                 event["error"] = f"{type(exc).__name__}: {exc}"
                 previous_error = exc
                 retryable = isinstance(exc, EnhancerResponseError)
-                if not retryable or attempt_index >= retry_max:
+                if not retryable or attempt_index >= retry_max or review_failures >= 3:
                     raise PromptEnhancerError(
                         f"Prompt enhancement failed after {attempt_index + 1} attempt(s): {exc}"
                     ) from exc
@@ -366,11 +423,8 @@ def enhance_reduced_markdown(
                     retry_max,
                     exc,
                 )
-    conflicting_background_lines = tuple(
-        value
-        for value in response.background_lines
-        if conflicts_with_time_of_day(value, time_authority)
-    )
+    removed, additions, anchor_lines, conflicting_background_lines = _common_changes(
+        source, response, style, background, conflicting_source_ids, time_authority)
     if conflicting_background_lines:
         LOGGER.warning(
             "[cl_prompt_enhancer] Removed %d generated background line(s) "
@@ -383,20 +437,6 @@ def enhance_reduced_markdown(
         for value in response.background_lines
         if value not in conflicting_background_lines
     )
-    removed: set[str] = set(conflicting_source_ids)
-    if not style.passthrough:
-        removed.update(
-            source_id
-            for source_id, kind in response.classifications.items()
-            if kind == "style"
-        )
-    if not background.passthrough:
-        removed.update(
-            source_id
-            for source_id, kind in response.classifications.items()
-            if kind == "background"
-        )
-    additions = (*style.directives, *accepted_background_lines)
     enhanced_base = rewrite_common(
         source_markdown,
         source,
@@ -431,6 +471,9 @@ def enhance_reduced_markdown(
         "background_lines_added": len(accepted_background_lines),
         "llm_requests": request_count,
         "retries": retries,
+        "semantic_guard": semantic_guard,
+        "semantic_review_requests": review_requests,
+        "scene_anchors": list(anchor_lines),
         "warnings": [
             *response.warnings,
             *(
@@ -467,3 +510,25 @@ def enhance_reduced_markdown(
         retry_count=retries,
         events=tuple(events),
     )
+
+
+def _common_changes(source, response, style, background, conflicting_ids, time_authority):
+    """Construct exactly the candidate that is reviewed, then rendered."""
+    removed = set(conflicting_ids)
+    anchors = []
+    for item in source.common:
+        kind = response.classifications[item.source_id]
+        if kind == "style" and not style.passthrough:
+            removed.add(item.source_id)
+        if kind == "background" and not background.passthrough:
+            removed.add(item.source_id)
+        if kind == "anchor" and not background.passthrough and item.source_id not in conflicting_ids:
+            # This is a model-selected source sentence, copied verbatim rather
+            # than regenerated. No domain-specific object list is used.
+            anchors.append(scene_anchor(item.text))
+            removed.add(item.source_id)
+    blocked = tuple(value for value in response.background_lines
+                    if conflicts_with_time_of_day(value, time_authority))
+    additions = (*style.directives, *dict.fromkeys(anchors),
+                 *(value for value in response.background_lines if value not in blocked))
+    return removed, additions, tuple(dict.fromkeys(anchors)), blocked

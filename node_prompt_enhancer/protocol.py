@@ -9,7 +9,7 @@ from .errors import EnhancerResponseError
 
 
 _SOURCE_ID_RE = re.compile(r"C[0-9]{3}\Z")
-_CLASSES = frozenset({"keep", "style", "background"})
+_CLASSES = frozenset({"keep", "style", "background", "anchor"})
 _REFERENCE_RE = re.compile(r"<(?:Subject|Picture)\s+[1-9][0-9]*>")
 _PLACEHOLDER_RE = re.compile(r"CLPE(?:SUB|PIC)[0-9]+X")
 _NON_BACKGROUND_CONTENT_RE = re.compile(
@@ -19,7 +19,7 @@ _NON_BACKGROUND_CONTENT_RE = re.compile(
     r"(?:全身|上半身|顔|胸元|足元).{0,12}(?:ショット|中心)|"
     r"(?:正面|背面|側面|斜め|俯瞰|仰角).{0,12}(?:視点|撮影)|"
     r"(?:画面|中央).{0,12}(?:配置|位置)|"
-    r"(?:立つ|座る|歩く|走る|踊る|振り向く|手を|腕を|脚を|足を)"
+    r"(?:(?<!際)立つ|座る|歩く|走る|踊る|振り向く|手を|腕を|脚を|足を)"
     r")"
 )
 

@@ -6,7 +6,7 @@
 
 本ノードは完成MarkdownをLLMへ自由生成させない。Pythonが入力構造、Subject、保持分析、Commonの順序及び最終組み立てを所有し、LLMは次の二つだけを担当する。
 
-- source側Commonバレットを`keep`、`style`又は`background`へ分類する。
+- source側Commonバレットを`keep`、`style`、`background`又は`anchor`へ分類する。
 - 選択した背景密度の範囲内で、既存事実を補足する日本語Common文を生成する。
 
 画風文は外部プロファイルから決定的に挿入する。別入力`user_prompt`はLLMへ変更対象として渡さず、source側の拡張後に既存Prompt Mergerで機械的に統合する。これにより、ユーザーが明示したSubject、保持条件、世界設定及び禁止事項を保護しながら、プリセットだけを切り替えられるようにする。
@@ -54,6 +54,7 @@
 | `style_profile_override` | STRING socket | 空 | 非空なら`style_profile`を上書き |
 | `background_detail_override` | STRING socket | 空 | 非空なら`background_detail`を上書き |
 | `save_debug_output` | BOOLEAN | `False` | ComfyUI output以下へ診断bundleを保存 |
+| `semantic_guard` | BOOLEAN | `False` | 実験的な情景の意味監査。8Bで誤検出があるため既定OFF。原文anchor保持は常時有効 |
 
 三つのoverrideは前後空白を除去した非空文字列だけを採用する。未知のモデル又はプロファイルは暗黙に先頭項目へ置換せず停止する。
 
@@ -122,9 +123,9 @@ user_prompt ──────> 独立検証・変更禁止 ──────�
 4. user Commonから一意な時間帯権威値を抽出し、矛盾するsource背景専用行を決定論的除外候補とする。
 5. 必要な場合だけLLMへsource Common分類と背景差分を要求する。時間帯権威値がある場合は`authoritative_environment.time_of_day`として構造化して渡す。
 6. `style`と分類されたsource Commonを、画風変更時だけ除外する。
-7. `background`と分類されたsource Commonを、背景変更時だけ除外する。
+7. `background`と分類されたsource Commonを、背景変更時だけ除外する。`anchor`はユーザーと矛盾しない物理的情景の元文を固定要素バレットへコピーする。時間帯変更を含む複合背景文では物体自体を新BACKGROUNDへ引き継ぐ。
 8. LLM生成背景から時間帯権威値と矛盾する行を除外する。
-9. 選択画風の固定directive、次に受理したLLM生成背景文をsource Common先頭へ追加する。
+9. 選択画風の固定directive、固定要素バレット、次に受理したLLM生成背景文をsource Common先頭へ追加する。semantic_guard有効時は、この候補と元Common・ユーザー権威を照合してから採用する。
 10. userを既存Prompt Mergerで最後に統合する。
 11. 最終Markdownを再検証し、user意味本文の存在を確認する。
 
@@ -216,7 +217,9 @@ END_ENHANCEMENT
 ```
 
 - source Commonごとに、同じ順序で正確に一件の`SOURCE`が必要である。
-- classは`keep`、`style`、`background`だけである。
+- classは`keep`、`style`、`background`、`anchor`だけである。
+
+固定要素の保全、追加監査プロトコル及び最大2回の意味修復は[意味・情景保全仕様](prompt_semantic_preservation_spec.md)で定義する。監査は外部システムプロンプトに従う同一ロード済みLLMが行うため、誤検出と見逃しの可能性は残る。
 - `BACKGROUND`件数は選択背景プロファイルの範囲内でなければならない。
 - Markdown、JSON、コードフェンス、説明、直接話法、`<Subject N>`、`<Picture N>`又は内部保護tokenを応答へ含めてはならない。
 - 正規区切りはU+0009の実TABである。小型モデルが区切り記号を文字列`<TAB>`又は`\t`として出した場合だけ、Pythonが実TABへ正規化してWARNINGを記録する。

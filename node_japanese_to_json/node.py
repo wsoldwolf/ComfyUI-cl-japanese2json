@@ -160,6 +160,10 @@ class CLJapaneseToJSONGGUF:
                         "tooltip": "Head-overlap frames used by continued Scenes. The compiler writes matching H3 raw lengths so the delivered video covers the complete requested timeline. Keep this aligned with the Contex-Loop generation profile.",
                     },
                 ),
+                "semantic_guard": (
+                    ["global", "all", "off"],
+                    {"default": "global", "tooltip": "LLM meaning review: global checks Subjects, Retention and Common; all also checks shots/audio. Up to 2 targeted repairs. off uses structural validation only."},
+                ),
             },
         }
 
@@ -315,6 +319,7 @@ class CLJapaneseToJSONGGUF:
         save_debug_output: bool = False,
         speech_guard: str = SPEECH_GUARD_STRICT,
         continuation_context_length: int = DEFAULT_CONTINUATION_CONTEXT_LENGTH,
+        semantic_guard: str = "global",
     ) -> tuple[str]:
         with self._lock:
             if keep_last_prompt and self.last_json_text is not None:
@@ -376,6 +381,7 @@ class CLJapaneseToJSONGGUF:
             canonical: str | None = None
             json_text: str | None = None
             settings = {
+                "semantic_guard": semantic_guard,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
@@ -396,6 +402,8 @@ class CLJapaneseToJSONGGUF:
                 "continuation_context_length": continuation_context_length,
             }
             try:
+                if semantic_guard not in {"global", "all", "off"}:
+                    raise CLJapaneseToJSONError("semantic_guard must be global, all, or off")
                 self._validate_parameters(
                     plain_text,
                     max_tokens=max_tokens,
@@ -443,6 +451,7 @@ class CLJapaneseToJSONGGUF:
                     ),
                     progress_callback=translation_progress,
                     interrupt_callback=_throw_if_interrupted,
+                    semantic_guard=semantic_guard,
                 )
                 emd = parse_markdown(canonical)
                 json_text = generate_json(

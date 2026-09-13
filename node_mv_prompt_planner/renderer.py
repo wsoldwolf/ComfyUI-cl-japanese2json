@@ -7,6 +7,7 @@ from ..node_japanese_to_json.compiler.llmj2e import lex_japanese_markdown
 from .errors import MVPlannerError
 from .structures import MVPlan, PlanningBrief, TimelineDocument
 from .timeline_parser import parse_prompt_timeline
+from ..common.scene_anchors import extract_scene_anchors
 
 
 _CAMERA_LABELS = {
@@ -75,6 +76,7 @@ def render_planned_markdown(
             common=(*brief.common, NO_SCREEN_TEXT_DIRECTIVE),
         )
     lines = [render_brief.to_markdown()]
+    scene_anchors = extract_scene_anchors(brief.common)
     for scene in timeline.scenes:
         planned = planned_by_id[scene.scene_id]
         continuation = " 継続" if scene.is_continue else ""
@@ -107,6 +109,12 @@ def render_planned_markdown(
                 for visual in shot.auxiliary_visuals
             )
             lines.append(f"* {shot.environment}")
+            if scene.scene_id == expected_ids[0] and shot_index == 0:
+                # Establish the selected range's setting, including when a
+                # limiter starts in the middle of a song. This is source text,
+                # not invented scenery or a replacement for planned actions.
+                lines.extend(f"* {value}" for value in scene_anchors
+                             if value not in shot.environment and value not in shot.composition)
             camera = shot.camera
             if camera.type == "static":
                 lines.append(f"* カメラは固定し、移動せず、{camera.description}")

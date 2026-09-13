@@ -7,6 +7,7 @@ from pathlib import Path
 import threading
 
 from .errors import SystemPromptError
+from ...common.semantic_review import review_fingerprint
 
 
 COMPILER_DIR = Path(__file__).resolve().parent
@@ -23,7 +24,7 @@ def system_prompt_fingerprint() -> tuple[object, ...]:
         stat = SYSTEM_PROMPT_PATH.stat()
     except OSError as exc:
         return ("system-prompt-error", str(SYSTEM_PROMPT_PATH), type(exc).__name__)
-    return (stat.st_size, stat.st_mtime_ns, hashlib.sha256(data).hexdigest())
+    return (stat.st_size, stat.st_mtime_ns, hashlib.sha256(data).hexdigest(), review_fingerprint())
 
 
 def load_system_prompt() -> str:

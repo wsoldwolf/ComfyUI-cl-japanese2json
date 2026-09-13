@@ -7,6 +7,7 @@
 - [縮小Markdown・JSONコンパイラ仕様](cl_japanese2json_spec.md)
 - [ComfyUIカスタムノード共通実装仕様](cl_japanese2json_comfyui_node_spec.md)
 - [プロンプト用語辞書仕様](cl_prompt_term_dictionary_spec.md)
+- [プロンプトの意味・情景保全](prompt_semantic_preservation_spec.md): 翻訳の意味監査、背景の固定要素、Plannerへの受け渡し
 - [プロジェクト・モジュール配置仕様](project_module_layout_spec.md)
 
 ## MV計画

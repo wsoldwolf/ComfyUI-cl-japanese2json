@@ -203,6 +203,9 @@ class CLPromptEnhancerGGUF:
                         "tooltip": "Save a diagnostic bundle below ComfyUI/output.",
                     },
                 ),
+                "semantic_guard": (
+                    "BOOLEAN", {"default": False, "tooltip": "Experimental LLM review of changed environment facts. Small models may reject valid changes; disabled by default. Verbatim scene-anchor preservation is always active. Up to 2 meaning repairs."},
+                ),
             },
         }
 
@@ -302,8 +305,11 @@ class CLPromptEnhancerGGUF:
         style_profile_override: str = "",
         background_detail_override: str = "",
         save_debug_output: bool = False,
+        semantic_guard: bool = False,
     ) -> tuple[str, str, str]:
         with self._lock:
+            if not isinstance(semantic_guard, bool):
+                raise PromptEnhancerError("semantic_guard must be Boolean")
             effective_model, model_overridden = _select_override(
                 model_name, model_name_override, "model_name"
             )
@@ -348,6 +354,7 @@ class CLPromptEnhancerGGUF:
                         "[cl_prompt_enhancer] Using external %s_override: %s", name, value
                     )
             settings = {
+                "semantic_guard": semantic_guard,
                 "model_name": effective_model,
                 "chat_format": chat_format,
                 "style_profile": effective_style,
@@ -408,6 +415,7 @@ class CLPromptEnhancerGGUF:
                     progress_callback=progress,
                     interrupt_callback=_throw_if_interrupted,
                     debug_events=events,
+                    semantic_guard=semantic_guard,
                 )
                 enhanced = result.markdown
                 report = dict(result.report)

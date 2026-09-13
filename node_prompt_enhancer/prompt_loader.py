@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .errors import PromptEnhancerError
 from .profiles import BackgroundProfile, StyleProfile, enhancer_profiles_fingerprint
+from ..common.semantic_review import review_fingerprint
 
 
 _CORE_PATH = Path(__file__).resolve().parent / "prompts" / "core" / "enhancer_system_prompt.txt"
@@ -47,4 +48,4 @@ def enhancer_prompts_fingerprint() -> tuple[object, ...]:
         )
     except OSError as exc:
         core = ("core-prompt-error", type(exc).__name__)
-    return core + enhancer_profiles_fingerprint()
+    return core + enhancer_profiles_fingerprint() + (review_fingerprint(),)

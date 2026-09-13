@@ -1963,6 +1963,7 @@ def _translate_batch(
     debug_events: list[dict[str, Any]] | None,
     progress_callback: Callable[[int, int, int, int, int], None] | None,
     interrupt_callback: Callable[[], Any] | None,
+    initial_retry_reason: str | None = None,
 ) -> list[str]:
     validated: list[str | None] = [None] * len(records)
     unresolved_indices = list(range(len(records)))
@@ -2099,7 +2100,7 @@ def _translate_batch(
                 system_prompt,
                 stream,
                 retry_reason=(
-                    str(last_error) if retry_number > 0 and last_error else None
+                    str(last_error) if retry_number > 0 and last_error else initial_retry_reason
                 ),
             )
             event = _start_debug_event(
@@ -2343,6 +2344,7 @@ def translate_markdown(
     debug_events: list[dict[str, Any]] | None = None,
     progress_callback: Callable[[int, int, int, int, int], None] | None = None,
     interrupt_callback: Callable[[], Any] | None = None,
+    semantic_guard: str = "off",
 ) -> str:
     """Translate Japanese bullet payloads and rebuild canonical Markdown."""
 
@@ -2352,6 +2354,10 @@ def translate_markdown(
         or retry_max < -1
     ):
         raise TranslationError("retry_max must be -1 or a non-negative integer")
+
+    if semantic_guard not in {"off", "global", "all"}:
+        raise TranslationError("semantic_guard must be global, all, or off")
+    from .semantic_guard import audit_translations, source_key
 
     document = lex_japanese_markdown(plain_text)
     source_records = document.records
@@ -2365,7 +2371,19 @@ def translate_markdown(
             len(records),
             len(source_records),
         )
-        for batch_index, batch in enumerate(batches):
+        translated_sources: dict[tuple, str] = {}
+        for batch_index, original_batch in enumerate(batches):
+            batch = []
+            keys = set()
+            for record in original_batch:
+                key = source_key(record)
+                if semantic_guard != "off" and key in translated_sources:
+                    record.translated = translated_sources[key]
+                elif semantic_guard == "off" or key not in keys:
+                    batch.append(record)
+                    keys.add(key)
+            if not batch:
+                continue
             LOGGER.info(
                 "[cl_japanese2json] Translating batch %d/%d with %d text segment(s)",
                 batch_index + 1,
@@ -2390,6 +2408,17 @@ def translate_markdown(
             )
             for record, translated in zip(batch, translations):
                 record.translated = translated
+                translated_sources[source_key(record)] = translated
+            if semantic_guard != "off":
+                for record in original_batch:
+                    record.translated = translated_sources[source_key(record)]
+        if semantic_guard != "off":
+            audit_translations(
+                records, llm, system_prompt, scope=semantic_guard,
+                max_tokens=max_tokens, temperature=temperature, top_p=top_p,
+                repetition_penalty=repetition_penalty, seed=seed, retry_max=retry_max,
+                debug_events=debug_events, progress_callback=progress_callback,
+                interrupt_callback=interrupt_callback)
         for record in source_records:
             sentences = sentence_groups[record.record_id]
             if not sentences or any(item.translated is None for item in sentences):

@@ -2,6 +2,8 @@
 
 ## 1. 目的
 
+コンパイラの追加任意入力`semantic_guard`はCOMBO（`global`/`all`/`off`）、既定`global`である。既存ウィジェットの保存順序を壊さないよう任意入力末尾へ追加する。キャッシュの変更判定には監査プロンプトの指紋も含む。詳細は[意味・情景保全仕様](prompt_semantic_preservation_spec.md)を参照する。
+
 本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー、グローバルプロンプト統合、GGUFによる保護付きプロンプト拡張、ユーザー定義文字列コンボ、接続先追従コンボ及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/spec/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/spec/cl_audio_pad_spec.md`、`docs/spec/cl_text_file_spec.md`、`docs/spec/cl_vocal2promptseg_spec.md`、`docs/spec/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/spec/cl_mv_prompt_planner_song_bible_spec.md`、`docs/spec/cl_prompt_merger_spec.md`、`docs/spec/cl_prompt_enhancer_spec.md`、`docs/spec/cl_string_combo_spec.md`、`docs/spec/cl_connected_combo_spec.md`及び`docs/spec/cl_scene_limiter_spec.md`である。
 
 本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、`prompt_prefix`へ格納するCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
