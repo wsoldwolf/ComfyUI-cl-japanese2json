@@ -79,7 +79,7 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
     def assess(pairs, *, policy="translation", context=None):
         nonlocal request_index
         context = context or {}
-        output_budget = min(max_tokens, 2048) if policy == "translation_patch" else budget
+        output_budget = min(max_tokens, 2048) if policy in {"translation_patch", "translation_replacement"} else budget
         messages = review_messages(policy, pairs, context)
         n_ctx = translator._effective_n_ctx(llm)
         if n_ctx and translator._count_input_tokens(llm, messages) + output_budget > n_ctx:
@@ -102,7 +102,7 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
         return run_review(
             pairs, policy=policy, context=context, invoke=invoke,
             logger=translator.LOGGER,
-            label="[cl_japanese2json] Meaning confirmation" if policy == "translation_patch"
+            label="[cl_japanese2json] Meaning confirmation" if policy in {"translation_patch", "translation_replacement"}
             else "[cl_japanese2json] Meaning review",
             events=debug_events, interrupt_callback=interrupt_callback,
             progress_callback=(lambda n: progress_callback(1, 1, 1, min(n, output_budget), output_budget))
@@ -114,10 +114,12 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
         focus = _source_focus(record, reason)
         feedback = {"source_focus": focus} if focus else {}
         # Malformed edits are reviewer errors, not translation repairs.
-        # Recheck once; never silently accept an invalid confirmation.
+        # Recheck once using a whole-unit replacement. Python owns the source
+        # and target literals so a model cannot repeat the same copy error.
         for confirmation_attempt in range(2):
             try:
-                patches = assess(pairs, policy="translation_patch", context=feedback)
+                policy = "translation_replacement" if confirmation_attempt else "translation_patch"
+                patches = assess(pairs, policy=policy, context=feedback)
                 patch = patches.get(record.record_id)
                 if patch is None:
                     raise SemanticReviewError("Meaning confirmation omitted the requested translation")
@@ -129,7 +131,7 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
                         f"Meaning confirmation could not validate {record.record_id} after 2 checks: {exc}") from exc
                 feedback = {"source_focus": focus, "validation_feedback": str(exc)}
                 translator.LOGGER.warning(
-                    "[cl_japanese2json] Rechecking invalid meaning confirmation %s: %s",
+                    "[cl_japanese2json] Rechecking invalid meaning confirmation %s with a source-bound full-unit repair: %s",
                     record.record_id, exc)
 
     while pending:

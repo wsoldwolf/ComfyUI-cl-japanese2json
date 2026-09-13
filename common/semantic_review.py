@@ -16,6 +16,7 @@ import time
 PROMPT_PATH = Path(__file__).with_name("prompts") / "semantic_review.txt"
 ENVIRONMENT_PROMPT_PATH = PROMPT_PATH.with_name("environment_review.txt")
 TRANSLATION_PATCH_PROMPT_PATH = PROMPT_PATH.with_name("translation_patch.txt")
+TRANSLATION_REPLACEMENT_PROMPT_PATH = PROMPT_PATH.with_name("translation_replacement.txt")
 
 
 class SemanticReviewError(ValueError):
@@ -36,11 +37,13 @@ def review_prompt() -> str:
 
 def review_fingerprint() -> str:
     return hashlib.sha256(b"\0".join(path.read_bytes() for path in (
-        PROMPT_PATH, ENVIRONMENT_PROMPT_PATH, TRANSLATION_PATCH_PROMPT_PATH))).hexdigest()
+        PROMPT_PATH, ENVIRONMENT_PROMPT_PATH, TRANSLATION_PATCH_PROMPT_PATH,
+        TRANSLATION_REPLACEMENT_PROMPT_PATH))).hexdigest()
 
 
 def review_messages(policy: str, pairs: list[dict], context: dict) -> list[dict]:
     path = {"environment": ENVIRONMENT_PROMPT_PATH,
+            "translation_replacement": TRANSLATION_REPLACEMENT_PROMPT_PATH,
             "translation_patch": TRANSLATION_PATCH_PROMPT_PATH}.get(policy, PROMPT_PATH)
     prompt = path.read_text(encoding="utf-8-sig").strip()
     if policy == "environment":
@@ -82,6 +85,14 @@ def review_batches(pairs, *, policy, context, backend, output_budget):
 
 
 def review_grammar(ids: tuple[str, ...], *, policy: str = "translation") -> str:
+    if policy == "translation_replacement":
+        if len(ids) != 1:
+            raise SemanticReviewError("Meaning confirmation reviews exactly one current translation")
+        return r'''root ::= "{" ws "\"after\"" ws ":" ws string ws "}" ws
+string ::= "\"" char{1,8192} "\""
+char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= [ \t\n\r]*
+'''
     if policy == "translation_patch":
         if len(ids) != 1:
             raise SemanticReviewError("Meaning confirmation reviews exactly one current translation")
@@ -150,9 +161,13 @@ def run_review(pairs, *, policy, context, invoke, logger, label,
         raw, metadata = invoke(messages, review_grammar(ids, policy=policy), progress, abort)
         event.update(metadata)
         event["response_content"] = raw
-        failures = (parse_translation_patches(raw, ids, source=pairs[0]["source"]) if policy == "translation_patch"
-                    else parse_review(raw, ids, policy=policy))
-        if policy == "translation_patch":
+        if policy == "translation_replacement":
+            failures = parse_translation_replacement(raw, pairs)
+        elif policy == "translation_patch":
+            failures = parse_translation_patches(raw, ids, source=pairs[0]["source"])
+        else:
+            failures = parse_review(raw, ids, policy=policy)
+        if policy in {"translation_patch", "translation_replacement"}:
             event["patches"] = failures
             event["validation"] = "passed"  # Schema validated; caller checks/applies the literal proposal.
         else:
@@ -200,6 +215,31 @@ def parse_review(raw: str, expected_ids: tuple[str, ...], *, policy: str = "tran
     if tuple(verdicts) != expected_ids:
         raise SemanticReviewError("Meaning review did not cover every requested id in order")
     return {key: value for key, value in verdicts.items() if value}
+
+
+def parse_translation_replacement(raw: str, pairs: list[dict]) -> dict[str, dict[str, str]]:
+    """Bind a full-unit repair to the current pair without model-copied locators."""
+    if len(pairs) != 1:
+        raise SemanticReviewError("Meaning confirmation reviews exactly one current translation")
+
+    def unique_object(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise SemanticReviewError(f"Meaning confirmation has duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        data = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, TypeError) as exc:
+        raise SemanticReviewError(f"Meaning confirmation requires one complete JSON object: {exc}") from exc
+    if (not isinstance(data, dict) or set(data) != {"after"}
+            or not isinstance(data["after"], str) or not data["after"].strip()
+            or len(data["after"]) > 8192):
+        raise SemanticReviewError("Meaning confirmation requires one nonempty after string (maximum 8192 characters)")
+    pair = pairs[0]
+    return {pair["id"]: {"source": pair["source"], "before": pair["candidate"], "after": data["after"]}}
 
 
 def parse_translation_patches(raw: str, expected_ids: tuple[str, ...], *, source=None) -> dict[str, dict[str, str]]:

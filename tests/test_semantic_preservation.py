@@ -18,6 +18,8 @@ enhance_errors = module("node_prompt_enhancer.errors")
 
 def verdict(kwargs, rejected=None):
     request = json.loads(kwargs["messages"][-1]["content"])
+    if request["review_policy"] == "translation_replacement":
+        return json.dumps({"after": request["pairs"][0]["candidate"]})
     if request["review_policy"] == "translation_patch":
         if rejected:
             raise AssertionError("Use a grounded patch instead of an arbitrary failure reason")
@@ -62,6 +64,19 @@ class SemanticProtocolTests(unittest.TestCase):
             review.review_grammar(("C1", "C2"), policy="environment"), verbose=False))
         self.assertIsNotNone(LlamaGrammar.from_string(
             review.review_grammar(("R1",), policy="translation_patch"), verbose=False))
+        self.assertIsNotNone(LlamaGrammar.from_string(
+            review.review_grammar(("R1",), policy="translation_replacement"), verbose=False))
+
+    def test_full_unit_replacement_binds_only_to_the_supplied_pair(self):
+        pairs = [{"id": "R13", "source": "白い服", "candidate": "A black outfit."}]
+        self.assertEqual(review.parse_translation_replacement('{"after":"A white outfit."}', pairs),
+                         {"R13": {"source": "白い服", "before": "A black outfit.", "after": "A white outfit."}})
+        for raw in ('{}', '{"after":""}', '{"after":42}',
+                    '{"after":"a","after":"b"}', '{"before":"other","after":"a"}',
+                    '{"after":"truncated', json.dumps({"after": "x" * 8193})):
+            with self.subTest(raw=raw[:60]), self.assertRaises(review.SemanticReviewError):
+                review.parse_translation_replacement(raw, pairs)
+
 
     def test_patch_protocol_requires_complete_literals_for_one_pair(self):
         raw = json.dumps({"source_excerpt": "短い", "before": "thick ovals", "after": "short thick ovals"})
@@ -251,6 +266,45 @@ class TranslationMeaningTests(unittest.TestCase):
                 llm, "system", semantic_guard="global", retry_max=0)
             self.assertIn("One on each side.", result)
             self.assertEqual(len(llm.calls), 3)
+
+    def test_missing_or_ambiguous_patch_locator_uses_full_unit_and_reaudits(self):
+        source = "# 共通プロンプト\n* 左の衣装は白く、右の衣装は黒い。\n# シーン\n## ショット\n* 動作。"
+        original = "The left outfit is black and the right outfit is black."
+        corrected = "The left outfit is white and the right outfit is black."
+        for locator in ("black", "The left outfit is white"):
+            def replace(kwargs):
+                request = json.loads(kwargs["messages"][-1]["content"])
+                self.assertEqual(request["review_policy"], "translation_replacement")
+                self.assertEqual(request["pairs"][0]["candidate"], original)
+                self.assertIn("validation_feedback", request["context"])
+                return json.dumps({"after": corrected})
+            def recheck(kwargs):
+                request = json.loads(kwargs["messages"][-1]["content"])
+                self.assertEqual(request["review_policy"], "translation")
+                self.assertEqual(request["pairs"][0]["candidate"], corrected)
+                return verdict(kwargs)
+            with self.subTest(locator=locator):
+                events = []
+                llm = FakeLLM([
+                    lambda k: default_stream_translation(k["messages"], lambda _: original),
+                    lambda k: verdict(k, "Wrong color of the left outfit"),
+                    lambda k: self.patch_response(k, "左の衣装は白く", locator, "white"),
+                    replace, recheck])
+                result = compiler.translate_markdown(source, llm, "system", semantic_guard="global", debug_events=events)
+                self.assertIn(corrected, result)
+                self.assertEqual(len(llm.calls), 5)
+                self.assertEqual(sum(e.get("stage") == "semantic_patch" for e in events), 1)
+
+    def test_full_unit_repair_cannot_remove_reference_tag(self):
+        source = "# シーン\n## ショット\n* <Subject 1>は白い衣装を着る。"
+        llm = FakeLLM([
+            lambda k: default_stream_translation(k["messages"]),
+            lambda k: verdict(k, "Wrong meaning"),
+            lambda k: self.patch_response(k, "白い衣装", "absent", "white outfit"),
+            json.dumps({"after": "A white outfit."})])
+        with self.assertRaisesRegex(compile_errors.TranslationError, "preserve every reference tag"):
+            compiler.translate_markdown(source, llm, "system", semantic_guard="all")
+        self.assertEqual(len(llm.calls), 4)
 
     def test_noop_detection_preserves_word_boundaries_and_numeric_punctuation(self):
         guard = module("node_japanese_to_json.compiler.semantic_guard")
