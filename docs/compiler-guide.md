@@ -177,6 +177,10 @@ Audio区間そのものを発声内容の正本にする形式:
 
 出力`json_text`をMiniMax H3 Contex-Loop Planの`plan_json_input`へ接続します。出力は`json.loads()`で再検証済みのJSON文字列です。
 
-長文は最大16翻訳区間のバッチへ分割されます。応答検証に失敗しても正常区間を保持し、未解決区間だけを新しいseedで再試行します。外部用語辞書の詳細は[プロンプト用語辞書仕様](spec/cl_prompt_term_dictionary_spec.md)を参照してください。
+長いSubject・保持分析は内部で文単位に分割し、翻訳後に元のバレットへ戻します。それらの各文と、明示的な禁止を含む区間は独立して翻訳し、その他は最大16区間をまとめます。共通プロンプトやShotは、動作と例外・禁止の関係を保つため元のバレット単位で翻訳します。Subjectと保持分析をユーザー側で複数行へ分ける必要はありません。
+
+検出対象の禁止文から英語の否定が脱落した場合は、`lost explicit negation`を記録し、その文だけ既存の`retry_max`内で再翻訳します。正常区間は保持し、上限に達した未解決結果は返しません。これは翻訳の意味全体を保証する検査ではなく、否定の対象や範囲が正しいかは英訳の確認も必要です。`save_debug_output`で元バレット・文番号と応答を追跡できます。外部用語辞書の詳細は[プロンプト用語辞書仕様](spec/cl_prompt_term_dictionary_spec.md)を参照してください。
+
+開発時に実GGUFで再現確認する場合は、ComfyUIのPython環境から`tools/check_compiler_translation.py`を使用できます。`--model`、`--source`、`--output-dir`を指定し、必要に応じて`--seeds 1 17 42`を付けてください。英語Markdown、Plan JSON及びデバッグ応答を保存し、動画生成は実行しません。小さな否定翻訳の回帰入力は`tests/fixtures/compiler_negation_ja.md`にあります。
 
 厳密な文法とJSON契約は[コンパイラ仕様](spec/cl_japanese2json_spec.md)、ComfyUIノード契約は[ノード実装仕様](spec/cl_japanese2json_comfyui_node_spec.md)を正本とします。

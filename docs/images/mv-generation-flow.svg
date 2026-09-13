@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="840" viewBox="0 0 1400 840" role="img" aria-labelledby="title desc">
+<title id="title">MV自動生成フロー</title>
+<desc id="desc">参照画像とユーザープロンプト、ボーカルと歌詞から演出を計画し、JSONへコンパイルする。フルミックスとボーカルはAudio Pad Pairで音声尺を調整する。Planと音声をContex Loopへ渡し、MiniMax H3 Ref2VAでMVを生成する概念図。参照画像からH3への接続等は省略。</desc>
+<rect width="1400" height="840" fill="white"/>
+<g stroke="#607c8e" stroke-width="3" fill="none" stroke-linejoin="round">
+<polyline points="830,126 830,182"/>
+<polygon stroke="none" fill="#607c8e" points="830,182 825,171 835,171"/>
+<polyline points="310,230 360,230"/>
+<polygon stroke="none" fill="#607c8e" points="360,230 349,235 349,225"/>
+<polyline points="620,230 700,230"/>
+<polygon stroke="none" fill="#607c8e" points="700,230 689,235 689,225"/>
+<polyline points="960,230 1025,230 1025,287 1090,287"/>
+<polygon stroke="none" fill="#607c8e" points="1090,287 1079,292 1079,282"/>
+<polyline points="310,394 360,394"/>
+<polygon stroke="none" fill="#607c8e" points="360,394 349,399 349,389"/>
+<polyline points="620,394 700,394"/>
+<polygon stroke="none" fill="#607c8e" points="700,394 689,399 689,389"/>
+<polyline points="960,394 1045,394 1045,332 1090,332"/>
+<polygon stroke="none" fill="#607c8e" points="1090,332 1079,337 1079,327"/>
+<polyline points="1220,364 1220,430"/>
+<polygon stroke="none" fill="#607c8e" points="1220,430 1215,419 1225,419"/>
+<polyline points="1220,520 1220,585 695,585 695,690"/>
+<polygon stroke="none" fill="#607c8e" points="695,690 690,679 700,679"/>
+<polyline points="270,735 310,735"/>
+<polygon stroke="none" fill="#607c8e" points="310,735 299,740 299,730"/>
+<polyline points="540,735 580,735"/>
+<polygon stroke="none" fill="#607c8e" points="580,735 569,740 569,730"/>
+<polyline points="810,735 850,735"/>
+<polygon stroke="none" fill="#607c8e" points="850,735 839,740 839,730"/>
+<polyline points="1120,735 1160,735"/>
+<polygon stroke="none" fill="#607c8e" points="1160,735 1149,740 1149,730"/>
+</g>
+<rect x="700" y="40" width="260" height="86" rx="14" fill="#edf5fc" stroke="#aac8e3" stroke-width="2"/>
+<text x="830" y="67" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">ユーザープロンプト</text>
+<text x="830" y="99" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">人物・世界観・演出の指示</text>
+<rect x="50" y="182" width="260" height="96" rx="14" fill="#edf5fc" stroke="#aac8e3" stroke-width="2"/>
+<text x="180" y="230" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">参照画像</text>
+<rect x="360" y="182" width="260" height="96" rx="14" fill="#ebf7f3" stroke="#96cabb" stroke-width="2"/>
+<text x="490" y="214" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Image Analyzer</text>
+<text x="490" y="246" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">画像解析</text>
+<rect x="700" y="182" width="260" height="96" rx="14" fill="#ebf7f3" stroke="#96cabb" stroke-width="2"/>
+<text x="830" y="214" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Prompt Enhancer</text>
+<text x="830" y="246" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">プロンプトの統合・拡張</text>
+<rect x="50" y="344" width="260" height="100" rx="14" fill="#edf5fc" stroke="#aac8e3" stroke-width="2"/>
+<text x="180" y="394" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">ボーカル + Lyrics</text>
+<rect x="360" y="344" width="260" height="100" rx="14" fill="#ebf7f3" stroke="#96cabb" stroke-width="2"/>
+<text x="490" y="378" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Vocal to Prompt</text>
+<text x="490" y="410" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Segments</text>
+<rect x="700" y="344" width="260" height="100" rx="14" fill="#ebf7f3" stroke="#96cabb" stroke-width="2"/>
+<text x="830" y="378" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Scene Limiter</text>
+<text x="830" y="410" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">対象シーンの選択</text>
+<rect x="1090" y="256" width="260" height="108" rx="14" fill="#ebf7f3" stroke="#96cabb" stroke-width="2"/>
+<text x="1220" y="294" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">MV Prompt Planner</text>
+<text x="1220" y="326" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">シーンごとの演出を計画</text>
+<rect x="1090" y="430" width="260" height="90" rx="14" fill="#ebf7f3" stroke="#96cabb" stroke-width="2"/>
+<text x="1220" y="459" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Japanese to JSON</text>
+<text x="1220" y="491" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">H3用Planへコンパイル</text>
+<rect x="50" y="690" width="220" height="90" rx="14" fill="#edf5fc" stroke="#aac8e3" stroke-width="2"/>
+<text x="160" y="719" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">フルミックス</text>
+<text x="160" y="751" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">+ ボーカル</text>
+<rect x="310" y="690" width="230" height="90" rx="14" fill="#ebf7f3" stroke="#96cabb" stroke-width="2"/>
+<text x="425" y="719" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Audio Pad Pair</text>
+<text x="425" y="751" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">音声の尺を調整</text>
+<rect x="580" y="690" width="230" height="90" rx="14" fill="#f2effb" stroke="#b9a9df" stroke-width="2"/>
+<text x="695" y="719" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">Contex Loop</text>
+<text x="695" y="751" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">シーンの連続生成を制御</text>
+<rect x="850" y="690" width="270" height="90" rx="14" fill="#f2effb" stroke="#b9a9df" stroke-width="2"/>
+<text x="985" y="719" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">MiniMax H3 Ref2VA</text>
+<text x="985" y="751" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="17" font-weight="400" fill="#4d6475">映像・音声を生成</text>
+<rect x="1160" y="690" width="190" height="90" rx="14" fill="#fff4d9" stroke="#dfbf67" stroke-width="2"/>
+<text x="1255" y="735" text-anchor="middle" dominant-baseline="central" font-family="Meiryo, Noto Sans CJK JP, sans-serif" font-size="23" font-weight="700" fill="#183247">完成MV</text>
+</svg>

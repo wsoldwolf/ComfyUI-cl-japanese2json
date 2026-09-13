@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from .helpers import FakeLLM, PKG, ROOT, module
+from .helpers import FakeLLM, PKG, ROOT, StructureOnlyLLM, module
 
 
 brief_parser = module("node_mv_prompt_planner.brief_parser")
@@ -3149,7 +3149,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         )
 
         canonical = llmj2e.translate_markdown(
-            planned_markdown, FakeLLM(), "system", max_tokens=1024
+            planned_markdown, StructureOnlyLLM(), "system", max_tokens=1024
         )
         generated = jsongen.validate_final_json(
             jsongen.generate_json(mdparse.parse_markdown(canonical))

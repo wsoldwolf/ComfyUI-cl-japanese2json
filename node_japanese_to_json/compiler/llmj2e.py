@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 import logging
 import re
 import threading
@@ -20,6 +21,11 @@ from .protected_text import (
     validate_protected_translation,
 )
 from .term_dictionary import normalize_prompt_terms
+from .translation_units import (
+    has_explicit_negation,
+    needs_explicit_negation,
+    split_sentences,
+)
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
@@ -53,6 +59,8 @@ class TranslationRecord:
     payload: ProtectedPayload | None
     output_prefix: str = "* "
     translated: str | None = None
+    source_record_id: str | None = None
+    sentence_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -747,6 +755,44 @@ SECTION_STREAM_CODES = {
 }
 
 
+def _sentence_records(
+    records: list[TranslationRecord],
+) -> tuple[list[TranslationRecord], dict[str, list[TranslationRecord]]]:
+    """Keep document bullets intact while translating their sentences separately."""
+
+    units: list[TranslationRecord] = []
+    by_record: dict[str, list[TranslationRecord]] = {}
+    for record in records:
+        if record.payload is None:
+            continue
+        children: list[TranslationRecord] = []
+        # Global identity lists can be very long. Keep the context of complete
+        # Common/Shot sentences together (e.g. allowed walking followed by a
+        # prohibition of sliding without steps).
+        sentences = (
+            split_sentences(record.payload.text)
+            if record.section in {"Subjects", "Retention"}
+            else [record.payload.text]
+        )
+        for index, sentence in enumerate(sentences):
+            replacements = {
+                token: value for token, value in record.payload.replacements.items()
+                if token in sentence
+            }
+            unit = replace(
+                record,
+                record_id=f"R{len(units) + 1:06d}",
+                payload=ProtectedPayload(sentence, replacements),
+                source_record_id=record.record_id,
+                sentence_index=index,
+                translated=None,
+            )
+            units.append(unit)
+            children.append(unit)
+        by_record[record.record_id] = children
+    return units, by_record
+
+
 def _build_translation_stream(records: Iterable[TranslationRecord]) -> TranslationStream:
     selected = list(records)
     if any(record.payload is None for record in selected):
@@ -799,7 +845,8 @@ def _user_payload(
         "otherwise-English prose; no hiragana, katakana, or kanji may remain outside "
         "protected direct speech. "
         "Do not translate, alter, move, duplicate, or delete any placeholder token. "
-        "A SUB marker starts a singular noun phrase ending in an ASCII period; RET, COM, SCN, and SND "
+        "SUB descriptive introductions start with a singular noun phrase; SUB constraint "
+        "sentences keep their instructions intact. End SUB text with an ASCII period. RET, COM, SCN, and SND "
         "markers start concise natural US English. RET translates only a retention explanation, "
         "and COM translates one reusable global prompt line. "
         "Keep one segment after each marker and preserve the "
@@ -809,6 +856,20 @@ def _user_payload(
         "one blank-line-separated paragraph per source segment in the original order and keep "
         "every CLJ protected placeholder unchanged."
     )
+    negative_markers = [
+        item.marker_token for item in stream.records
+        if needs_explicit_negation(item.record.payload.text)
+    ]
+    if negative_markers:
+        requirement += (
+            " These segments contain explicit prohibitions: "
+            + ", ".join(negative_markers)
+            + ". Preserve each prohibited action or state with explicit English negation "
+            "(not, never, without, avoid, or an equivalent negative expression). "
+            "Do not replace a prohibition by a positive paraphrase. Preserve its scope: "
+            "a forbidden state must not become a requested state. A following positive "
+            "instruction must stay positive. Translate the whole sentence."
+        )
     if retry_reason is not None:
         safe_reason = retry_reason.replace("\r", " ").replace("\n", " ")[:400]
         requirement = (
@@ -881,6 +942,15 @@ def _start_debug_event(
         "batch": batch_index + 1,
         "attempt": attempt,
         "protected_stream": stream.text,
+        "source_sentences": [
+            {
+                "marker": item.marker_token,
+                "source_record": item.record.source_record_id or item.record.record_id,
+                "sentence": item.record.sentence_index + 1,
+                "explicit_negation": needs_explicit_negation(item.record.payload.text),
+            }
+            for item in stream.records
+        ],
         "user_request": messages[-1]["content"],
         "response_content": None,
         "finish_reason": None,
@@ -972,8 +1042,22 @@ def _make_batches(
 ) -> list[list[TranslationRecord]]:
     if not records:
         return []
+    # Adjacent same-section sentences can be silently shifted between markers
+    # by small models. Isolate explicit prohibitions and multi-sentence global
+    # definitions so another sentence cannot donate a negation or attributes.
+    source_counts = Counter(record.source_record_id for record in records)
+    isolated = {
+        id(record) for record in records
+        if needs_explicit_negation(record.payload.text)
+        or (
+            record.section in {"Subjects", "Retention"}
+            and record.source_record_id is not None
+            and source_counts[record.source_record_id] > 1
+        )
+    }
     if (
         len(records) <= MAX_RECORDS_PER_INFERENCE
+        and not isolated
         and _fits_context(llm, system_prompt, records, max_tokens)
     ):
         return [records]
@@ -981,6 +1065,16 @@ def _make_batches(
     batches: list[list[TranslationRecord]] = []
     current: list[TranslationRecord] = []
     for record in records:
+        if id(record) in isolated:
+            if current:
+                batches.append(current)
+                current = []
+            if not _fits_context(llm, system_prompt, [record], max_tokens):
+                raise TranslationError(
+                    f"Record {record.record_id} does not fit the effective context length with max_tokens={max_tokens}"
+                )
+            batches.append([record])
+            continue
         candidate = [*current, record]
         if (
             len(candidate) <= MAX_RECORDS_PER_INFERENCE
@@ -1114,6 +1208,15 @@ def _validate_translation_text(record: TranslationRecord, translated: str) -> st
             f"Record {record.record_id} contains Qwen thinking markup"
         )
     validate_protected_translation(record.payload, translated)
+    if (
+        needs_explicit_negation(record.payload.text)
+        and not has_explicit_negation(translated)
+    ):
+        raise TranslationError(
+            f"Record {record.record_id} lost explicit negation: retranslate the "
+            "original sentence using an explicit English prohibition for the "
+            "same action or state, and preserve any following positive instruction"
+        )
     if record.section == "Subjects" and SUBJECT_LABEL_RE.match(translated):
         raise TranslationError(
             f"Subject record {record.record_id} contains model-added subject framing"
@@ -2202,14 +2305,16 @@ def translate_markdown(
         raise TranslationError("retry_max must be -1 or a non-negative integer")
 
     document = lex_japanese_markdown(plain_text)
-    records = document.records
+    source_records = document.records
+    records, sentence_groups = _sentence_records(source_records)
     if records:
         batches = _make_batches(records, llm, system_prompt, max_tokens)
         LOGGER.info(
             "[cl_japanese2json] Prepared %d protected translation batch(es) "
-            "for %d text segment(s)",
+            "for %d sentence segment(s) from %d bullet(s)",
             len(batches),
             len(records),
+            len(source_records),
         )
         for batch_index, batch in enumerate(batches):
             LOGGER.info(
@@ -2236,4 +2341,11 @@ def translate_markdown(
             )
             for record, translated in zip(batch, translations):
                 record.translated = translated
+        for record in source_records:
+            sentences = sentence_groups[record.record_id]
+            if not sentences or any(item.translated is None for item in sentences):
+                raise TranslationError(
+                    f"Record {record.record_id} has incomplete sentence translations"
+                )
+            record.translated = " ".join(item.translated for item in sentences)
     return _rebuild(document)

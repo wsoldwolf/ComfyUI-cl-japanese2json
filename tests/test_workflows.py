@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from .helpers import FakeLLM, ROOT, module
+from .helpers import ROOT, StructureOnlyLLM, module
 
 
 llmj2e = module("node_japanese_to_json.compiler.llmj2e")
@@ -212,7 +212,7 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 if not planner_nodes:
                     canonical = llmj2e.translate_markdown(
                         source,
-                        FakeLLM(n_ctx=1_000_000),
+                        StructureOnlyLLM(n_ctx=1_000_000),
                         "system",
                         max_tokens=16_384,
                     )

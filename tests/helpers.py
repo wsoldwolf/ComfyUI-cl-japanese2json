@@ -131,6 +131,20 @@ class FakeLLM:
         }
 
 
+class StructureOnlyLLM(FakeLLM):
+    """Canned protocol-compliant prose for graph/schema tests, not semantic tests."""
+
+    def create_chat_completion(self, **kwargs: Any) -> Any:
+        def transform(record):
+            value = default_translation(record)
+            if "explicit prohibitions" in kwargs["messages"][-1]["content"]:
+                value += " Do not change the specified constraints."
+            return value
+
+        self.responses.append(default_stream_translation(kwargs["messages"], transform))
+        return super().create_chat_completion(**kwargs)
+
+
 def transport_response(transform: Callable[[dict[str, Any]], str] = default_translation):
     def responder(kwargs: dict[str, Any]) -> str:
         return default_stream_translation(kwargs["messages"], transform=transform)

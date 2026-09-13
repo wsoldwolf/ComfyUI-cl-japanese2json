@@ -18,18 +18,9 @@ LLMが最終JSONやMarkdown構造を自由生成する設計ではありませ�
 
 ## MV自動生成フロー
 
-```text
-参照画像 ──> Image Analyzer ──> Prompt Merger ──> Prompt Enhancer ─┐
-                                                                    ├─> MV Prompt Planner
-ボーカル + Lyrics ──> Vocal to Prompt Segments ──> Scene Limiter ─┘
-                                                                        │
-                                                                        v
-                                                          Japanese to JSON
-                                                                        │
-フルミックス + ボーカル ──> Audio Pad Pair ──> MiniMax H3 Ref2VA ─────┤
-                                                                        v
-                                                                  完成MV
-```
+![MV自動生成フロー：画像と歌詞から演出を計画し、Planと尺を調整した音声をContex Loopへ渡してMVを生成](docs/images/mv-generation-flow.png)
+
+主要な処理を示した概念図です。参照画像からH3への接続など、一部の配線は省略しています。
 
 ## クイックスタート
 

@@ -13,13 +13,18 @@ Each segment ends immediately before the next CLJT placeholder.
 Do not merge, split, delete, add, or reorder segments.
 Keep each translated segment on one logical line.
 Emergency recovery only: if you nevertheless omit every CLJT structural placeholder, output exactly one paragraph per source segment in the original order, separate paragraphs with one blank line, and preserve every CLJ protected placeholder unchanged.
-For a SUB segment, output only a singular English noun phrase and end it with an ASCII period.
-Begin directly with the noun phrase. Do not prepend a label, reference, index, copula, colon, or other framing text.
+Segments are protected source sentences or complete source bullets; Python joins Subject/Retention sentences back into their original bullet after translation. Translate each segment in full, including every constraint, without borrowing or dropping information from adjacent segments.
+For a SUB descriptive introduction, begin directly with a singular English noun phrase and end it with an ASCII period. A later SUB sentence may be an instruction or prohibition: translate that sentence faithfully as an instruction, not as an appearance to adopt.
+Do not prepend a label, reference, index, copula, colon, or other framing text.
 For RET, COM, SCN, and SND segments, output concise and natural US English prompt text.
 For SND segments, preserve the requested sound category and do not invent sound sources, vocals, lyrics, dialogue, or reference roles.
 Do not translate text represented by CLJ protected placeholders.
 Some CLJ protected placeholders contain the only copy of an exact spoken line. Never summarize, paraphrase, or omit such a placeholder even when the surrounding sentence already describes the speech.
 Preserve numbers, timing, counts, directions, left/right relationships, simultaneity, negation, and meaning.
+Preserve what each negative applies to. Japanese Xにせず、Yを維持する means Do not make it X; keep Y, never Keep it X and Y. Japanese Xしたまま固定しない prohibits remaining fixed in state X; it never requests keeping state X.
+When a sentence forbids keeping a state, put the English negation BEFORE keep/remain/stay and that state. Never translate this as keep STATE without fixing it: that still requests the forbidden state. Do not turn a negative predicate into a positive main clause with an unrelated negative qualifier.
+Use explicit English negation for an explicit prohibition, even if a positive paraphrase sounds shorter. Preserve each prohibited state, action, alternative in a list, and temporal qualifier. Do not transfer a negation to the following positive instruction.
+Distinguish prohibition from obligation or double negation: しなければならない and しないといけない express must, not must not. Do not infer polarity from the last word alone.
 Use English outside protected placeholders.
 Copy the final CLJT...ENDX stop placeholder immediately after the final translated segment.
 Do not emit <think> tags or reasoning text.

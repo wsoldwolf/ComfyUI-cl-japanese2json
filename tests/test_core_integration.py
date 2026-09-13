@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from .helpers import FakeLLM, module
+from .helpers import FakeLLM, default_stream_translation, default_translation, module
 
 
 llmj2e = module("node_japanese_to_json.compiler.llmj2e")
@@ -39,8 +39,16 @@ class CoreIntegrationTests(unittest.TestCase):
 * <Subject 1>が「次です」と言う。
 ## 音響
 * 発声: 指定台詞のみ"""
+        def response(kwargs):
+            def translate(record):
+                if "混同しない" in record["text"]:
+                    one, two = record["protected_placeholders"]
+                    return f"Do not confuse {one} and {two}."
+                return default_translation(record)
+            return default_stream_translation(kwargs["messages"], translate)
+
         canonical = llmj2e.translate_markdown(
-            source, FakeLLM(), "system", max_tokens=64
+            source, FakeLLM([response] * 3), "system", max_tokens=64
         )
         emd = mdparse.parse_markdown(canonical)
         text = jsongen.generate_json(emd)
@@ -55,11 +63,11 @@ class CoreIntegrationTests(unittest.TestCase):
         self.assertIn("<Subject 2> (S2)", parsed["shots"][0]["prompt"][3])
         self.assertIn("<Subject 1> (S1)", parsed["shots"][1]["prompt"][3])
         self.assertIn(
-            "The action occurs <Subject 1> <Subject 2>.",
+            "Do not confuse <Subject 1> and <Subject 2>.",
             parsed["prompt_prefix"],
         )
         self.assertNotIn(
-            "The action occurs <Subject 1> <Subject 2>.",
+            "Do not confuse <Subject 1> and <Subject 2>.",
             parsed["shots"][0]["prompt"][3],
         )
         self.assertNotIn("<Subject 2>", parsed["shots"][1]["prompt"][3])
