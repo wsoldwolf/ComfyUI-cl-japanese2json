@@ -27,5 +27,4 @@
 ## 開発者向け
 
 - [実装仕様一覧](spec/README.md): 入出力契約、検証規則及び決定論的処理の正本
-- [開発資料](development/README.md): 過去の実装依頼等、利用者向けではない資料
 - [開発・検証用ワークフロー](../workflows/development/README.md): 動作を保証しないノード検証用ワークフロー
