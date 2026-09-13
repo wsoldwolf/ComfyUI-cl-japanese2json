@@ -15,6 +15,7 @@ import time
 
 PROMPT_PATH = Path(__file__).with_name("prompts") / "semantic_review.txt"
 ENVIRONMENT_PROMPT_PATH = PROMPT_PATH.with_name("environment_review.txt")
+TRANSLATION_PATCH_PROMPT_PATH = PROMPT_PATH.with_name("translation_patch.txt")
 
 
 class SemanticReviewError(ValueError):
@@ -34,12 +35,14 @@ def review_prompt() -> str:
 
 
 def review_fingerprint() -> str:
-    return hashlib.sha256(PROMPT_PATH.read_bytes() + b"\0" + ENVIRONMENT_PROMPT_PATH.read_bytes()).hexdigest()
+    return hashlib.sha256(b"\0".join(path.read_bytes() for path in (
+        PROMPT_PATH, ENVIRONMENT_PROMPT_PATH, TRANSLATION_PATCH_PROMPT_PATH))).hexdigest()
 
 
 def review_messages(policy: str, pairs: list[dict], context: dict) -> list[dict]:
-    prompt = (ENVIRONMENT_PROMPT_PATH.read_text(encoding="utf-8-sig").strip()
-              if policy == "environment" else review_prompt())
+    path = {"environment": ENVIRONMENT_PROMPT_PATH,
+            "translation_patch": TRANSLATION_PATCH_PROMPT_PATH}.get(policy, PROMPT_PATH)
+    prompt = path.read_text(encoding="utf-8-sig").strip()
     if policy == "environment":
         # Keep the source/candidate adjacent like a translation pair; small
         # models otherwise confuse source text with distant context evidence.
@@ -79,6 +82,14 @@ def review_batches(pairs, *, policy, context, backend, output_budget):
 
 
 def review_grammar(ids: tuple[str, ...], *, policy: str = "translation") -> str:
+    if policy == "translation_patch":
+        if len(ids) != 1:
+            raise SemanticReviewError("Meaning confirmation reviews exactly one current translation")
+        return r'''root ::= "{" ws "\"source_excerpt\"" ws ":" ws string ws "," ws "\"before\"" ws ":" ws string ws "," ws "\"after\"" ws ":" ws string ws "}" ws
+string ::= "\"" char{1,512} "\""
+char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= [ \t\n\r]*
+'''
     rows = []
     for key in ids:
         if policy == "environment":
@@ -86,8 +97,8 @@ def review_grammar(ids: tuple[str, ...], *, policy: str = "translation") -> str:
                         json.dumps(f"CHECK\t{key}\t") + " verdict")
         else:
             rows.append(json.dumps(f"CHECK\t{key}\t") + " verdict")
-    return ('root ::= ' + ' "\\n" '.join(rows) + ' "\\n"?\n'
-            'verdict ::= "PASS" | "FAIL\\t" reason\n'
+    verdict = 'verdict ::= "PASS" | "FAIL\\t" reason\n'
+    return ('root ::= ' + ' "\\n" '.join(rows) + ' "\\n"?\n' + verdict +
             'reason ::= [^\\t\\n\\r]{1,256}\n'
             'evidence ::= [^\\t\\n\\r]{1,512}\n')
 
@@ -139,9 +150,14 @@ def run_review(pairs, *, policy, context, invoke, logger, label,
         raw, metadata = invoke(messages, review_grammar(ids, policy=policy), progress, abort)
         event.update(metadata)
         event["response_content"] = raw
-        failures = parse_review(raw, ids, policy=policy)
-        event["failures"] = failures
-        event["validation"] = "failed" if failures else "passed"
+        failures = (parse_translation_patches(raw, ids, source=pairs[0]["source"]) if policy == "translation_patch"
+                    else parse_review(raw, ids, policy=policy))
+        if policy == "translation_patch":
+            event["patches"] = failures
+            event["validation"] = "passed"  # Schema validated; caller checks/applies the literal proposal.
+        else:
+            event["failures"] = failures
+            event["validation"] = "failed" if failures else "passed"
         return failures
     except Exception as exc:
         event.update(validation="failed", error=f"{type(exc).__name__}: {exc}")
@@ -184,3 +200,29 @@ def parse_review(raw: str, expected_ids: tuple[str, ...], *, policy: str = "tran
     if tuple(verdicts) != expected_ids:
         raise SemanticReviewError("Meaning review did not cover every requested id in order")
     return {key: value for key, value in verdicts.items() if value}
+
+
+def parse_translation_patches(raw: str, expected_ids: tuple[str, ...], *, source=None) -> dict[str, dict[str, str]]:
+    """Parse literal evidence and a replacement, not an unconstrained critique."""
+    if len(expected_ids) != 1:
+        raise SemanticReviewError("Meaning confirmation reviews exactly one current translation")
+
+    def unique_object(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise SemanticReviewError(f"Meaning confirmation has duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        data = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, TypeError) as exc:
+        raise SemanticReviewError(f"Meaning confirmation requires one complete JSON object: {exc}") from exc
+    expected = {"source_excerpt", "before", "after"}
+    if not isinstance(data, dict) or set(data) != expected or any(
+            not isinstance(value, str) or not value.strip() for value in data.values()):
+        raise SemanticReviewError("Meaning confirmation requires source_excerpt, before and after strings")
+    if source is not None and data["source_excerpt"] not in source:
+        raise SemanticReviewError("source_excerpt must be copied exactly from the current source")
+    return {expected_ids[0]: {"source": data["source_excerpt"], "before": data["before"], "after": data["after"]}}

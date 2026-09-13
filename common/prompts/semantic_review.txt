@@ -5,6 +5,9 @@ CHECK<TAB>id<TAB>PASS
 or CHECK<TAB>id<TAB>FAIL<TAB>one short factual reason and the required correction
 Use actual U+0009 TABs. No header, footer, JSON, Markdown, reasoning or extra text.
 PASS needs no fourth field. FAIL requires a specific reason, not a stylistic preference.
+Report only the strongest actual meaning difference, concisely. Do not repeat long quotations.
+Never reject an expression because it should be replaced with the same expression.
+Judge only the CURRENT candidate; a fact already present is not an omission.
 
 For policy translation, compare the Japanese source to its English candidate independently.
 Check every entity and attribute owner, shape, size, color, count, left/right, part/whole,
