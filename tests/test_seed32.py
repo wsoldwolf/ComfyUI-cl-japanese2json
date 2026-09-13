@@ -24,6 +24,7 @@ class Seed32Tests(unittest.TestCase):
         self.assertEqual(required["seed"][1]["default"], -1)
         self.assertEqual(required["seed"][1]["min"], -1)
         self.assertEqual(required["seed"][1]["max"], 2_147_483_647)
+        self.assertIs(required["seed"][1]["control_after_generate"], False)
         self.assertEqual(required["mode"][0], ["fixed", "random"])
 
     def test_fixed_and_one_run_hold_keep_the_current_seed(self) -> None:

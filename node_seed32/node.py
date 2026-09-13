@@ -59,6 +59,7 @@ class CLSeed32:
                         "min": -1,
                         "max": MAX_SEED_32,
                         "step": 1,
+                        "control_after_generate": False,
                         "tooltip": "-1 generates a random seed; valid shared seeds are 1..INT_MAX.",
                     },
                 ),
