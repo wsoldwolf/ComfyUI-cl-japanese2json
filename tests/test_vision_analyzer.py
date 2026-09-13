@@ -267,6 +267,102 @@ class VisionAnalyzerTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "unknown visibility 'opaque'"):
             validation.parse_observation_response(explicit_unknown)
 
+    def test_protocol_repairs_missing_subject_pose_before_scene_setting(self):
+        missing_pose = VALID_RESPONSE.replace(
+            "SUBJECT_POSE\t片手を前へ伸ばして立つ\n",
+            "",
+        )
+        repaired, warnings = validation.parse_observation_response(missing_pose)
+        self.assertEqual(repaired.primary_subject.pose, "")
+        self.assertEqual(repaired.scene.setting, "深い森の神社参道")
+        self.assertTrue(
+            any("empty missing SUBJECT_POSE" in value for value in warnings)
+        )
+
+        bare_pose = VALID_RESPONSE.replace(
+            "SUBJECT_POSE\t片手を前へ伸ばして立つ",
+            "SUBJECT_POSE",
+        )
+        repaired, warnings = validation.parse_observation_response(bare_pose)
+        self.assertEqual(repaired.primary_subject.pose, "")
+        self.assertTrue(
+            any("Normalized empty SUBJECT_POSE" in value for value in warnings)
+        )
+
+        empty_extra_field = VALID_RESPONSE.replace(
+            "SUBJECT_POSE\t片手を前へ伸ばして立つ",
+            "SUBJECT_POSE\t\t",
+        )
+        repaired, warnings = validation.parse_observation_response(
+            empty_extra_field
+        )
+        self.assertEqual(repaired.primary_subject.pose, "")
+        self.assertTrue(
+            any("Normalized empty SUBJECT_POSE" in value for value in warnings)
+        )
+
+        split_pose = VALID_RESPONSE.replace(
+            "SUBJECT_POSE\t片手を前へ伸ばして立つ",
+            "SUBJECT_POSE\t正面を向いて立つ\t片手を前へ伸ばす",
+        )
+        repaired, warnings = validation.parse_observation_response(split_pose)
+        self.assertEqual(
+            repaired.primary_subject.pose,
+            "正面を向いて立つ、片手を前へ伸ばす",
+        )
+        self.assertTrue(
+            any("TAB-separated SUBJECT_POSE value fragments" in value for value in warnings)
+        )
+
+        unknown_record = VALID_RESPONSE.replace(
+            "SUBJECT_POSE\t片手を前へ伸ばして立つ",
+            "SUBJECT_ACTION\t片手を前へ伸ばして立つ",
+        )
+        with self.assertRaisesRegex(Exception, "found 'SUBJECT_ACTION'"):
+            validation.parse_observation_response(unknown_record)
+
+    def test_protocol_repairs_tabs_inside_other_natural_language_values(self):
+        split_values = (
+            VALID_RESPONSE.replace(
+                "HINT_ASSESSMENT\tnot_used\t",
+                "HINT_ASSESSMENT\tconsistent\tヒントと一致\t形状も一致",
+            )
+            .replace(
+                "SCENE_ELEMENT\t朱色の鳥居",
+                "SCENE_ELEMENT\t朱色の鳥居\t石造りの基部",
+            )
+            .replace(
+                "COMPOSITION\tviewpoint\t低い位置から見上げる",
+                "COMPOSITION\tviewpoint\t低い位置\t見上げる",
+            )
+            .replace(
+                "STYLE\trendering\tセル調の陰影",
+                "STYLE\trendering\tセル調\t二段階の陰影",
+            )
+            .replace(
+                "VISIBLE_TEXT\t神社の額に文字がある",
+                "VISIBLE_TEXT\t神社の額\t文字がある",
+            )
+            .replace(
+                "UNCERTAINTY\t尻尾の付け根は衣装で隠れている",
+                "UNCERTAINTY\t尻尾の付け根\t衣装で隠れている",
+            )
+        )
+        repaired, warnings = validation.parse_observation_response(split_values)
+        self.assertEqual(
+            repaired.hint_assessment.explanation,
+            "ヒントと一致、形状も一致",
+        )
+        self.assertEqual(repaired.scene.elements[0], "朱色の鳥居、石造りの基部")
+        self.assertEqual(repaired.composition.viewpoint, "低い位置、見上げる")
+        self.assertEqual(repaired.style.rendering, "セル調、二段階の陰影")
+        self.assertEqual(repaired.visible_text[0], "神社の額、文字がある")
+        self.assertEqual(
+            repaired.uncertainties[0],
+            "尻尾の付け根、衣装で隠れている",
+        )
+        self.assertGreaterEqual(len(warnings), 6)
+
     def test_legacy_upload_sentinel_is_not_used_as_subject_hint(self):
         normalized, warning = node_mod.normalize_subject_hint_compat("image")
         self.assertEqual(normalized, "")

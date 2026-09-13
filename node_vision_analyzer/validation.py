@@ -95,20 +95,77 @@ def parse_observation_response(
             "Observation response must start with OBSERVATION_V2"
         )
     cursor = 1
+    warnings: list[str] = []
 
     def take(prefix: str, *, allow_empty: bool = True) -> str:
         nonlocal cursor
         if cursor >= len(lines):
             raise VisionObservationError(f"Observation expected {prefix}")
         parts = lines[cursor].split("\t")
+        if (
+            parts
+            and parts[0] == prefix
+            and allow_empty
+            and all(not part.strip() for part in parts[1:])
+        ):
+            # Text generation commonly strips trailing TAB characters. A bare
+            # name (or only empty trailing fields) for an empty-allowed scalar
+            # has one unambiguous value: the empty string.
+            if len(parts) != 2:
+                warnings.append(
+                    f"Normalized empty {prefix} without its canonical single "
+                    f"TAB value field at line {cursor + 1}"
+                )
+            cursor += 1
+            return ""
+        if parts and parts[0] == prefix and len(parts) > 2:
+            # A scalar observation has no subordinate TAB fields. If a small
+            # VL model inserts TABs inside its natural-language value, every
+            # trailing field is therefore an ordered fragment of that same
+            # value and can be joined without guessing or dropping content.
+            merged_value = "、".join(
+                part.strip() for part in parts[1:] if part.strip()
+            )
+            warnings.append(
+                f"Merged {len(parts) - 1} TAB-separated {prefix} value "
+                f"fragments at line {cursor + 1}"
+            )
+            cursor += 1
+            return _value(
+                merged_value, prefix, allow_empty=allow_empty
+            )
         if len(parts) != 2 or parts[0] != prefix:
+            found = parts[0] if parts else lines[cursor]
             raise VisionObservationError(
-                f"Observation expected {prefix} at line {cursor + 1}"
+                f"Observation expected {prefix} at line {cursor + 1}; "
+                f"found {found!r} with {len(parts)} TAB-separated field(s)"
             )
         cursor += 1
         return _value(
             parts[1], prefix, allow_empty=allow_empty
         )
+
+    def take_keyed(prefix: str, key: str) -> str:
+        nonlocal cursor
+        context = f"{prefix} {key}"
+        if cursor >= len(lines):
+            raise VisionObservationError(f"Observation expected {context}")
+        parts = lines[cursor].split("\t")
+        if len(parts) < 2 or parts[:2] != [prefix, key]:
+            found = "\t".join(parts[:2]) if parts else lines[cursor]
+            raise VisionObservationError(
+                f"Observation expected {context} at line {cursor + 1}; "
+                f"found {found!r} with {len(parts)} TAB-separated field(s)"
+            )
+        fragments = [part.strip() for part in parts[2:] if part.strip()]
+        value = "、".join(fragments)
+        if len(parts) != 3:
+            warnings.append(
+                f"Normalized {len(parts) - 2} TAB-separated {context} "
+                f"value fragment(s) at line {cursor + 1}"
+            )
+        cursor += 1
+        return _value(value, context)
 
     overview = take("OVERVIEW", allow_empty=False)
     identity = take("PRIMARY_SUBJECT")
@@ -116,21 +173,32 @@ def parse_observation_response(
         raise VisionObservationError(
             "PRIMARY_SUBJECT must describe the visible subject, not a generic image label"
         )
-    warnings: list[str] = []
-
     if cursor >= len(lines):
         raise VisionObservationError("Observation expected HINT_ASSESSMENT")
     hint_parts = lines[cursor].split("\t")
-    if len(hint_parts) != 3 or hint_parts[0] != "HINT_ASSESSMENT":
+    if len(hint_parts) < 2 or hint_parts[0] != "HINT_ASSESSMENT":
+        found = hint_parts[0] if hint_parts else lines[cursor]
         raise VisionObservationError(
-            f"Observation expected HINT_ASSESSMENT at line {cursor + 1}"
+            f"Observation expected HINT_ASSESSMENT at line {cursor + 1}; "
+            f"found {found!r} with {len(hint_parts)} TAB-separated field(s)"
         )
-    hint_alignment = hint_parts[1]
+    hint_alignment = hint_parts[1].strip()
     if hint_alignment not in HINT_ALIGNMENTS:
         raise VisionObservationError(
             f"HINT_ASSESSMENT uses unknown alignment {hint_alignment!r}"
         )
-    hint_explanation = _value(hint_parts[2], "HINT_ASSESSMENT explanation")
+    hint_explanation = _value(
+        "、".join(
+            part.strip() for part in hint_parts[2:] if part.strip()
+        ),
+        "HINT_ASSESSMENT explanation",
+    )
+    if len(hint_parts) != 3:
+        warnings.append(
+            "Normalized HINT_ASSESSMENT explanation from "
+            f"{max(0, len(hint_parts) - 2)} TAB-separated value fragment(s) "
+            f"at line {cursor + 1}"
+        )
     if hint_alignment == "not_used" and hint_explanation:
         raise VisionObservationError(
             "HINT_ASSESSMENT not_used must have an empty explanation"
@@ -243,73 +311,39 @@ def parse_observation_response(
         )
         cursor += 1
 
-    pose = take("SUBJECT_POSE")
+    if cursor < len(lines) and lines[cursor].startswith("SCENE_SETTING\t"):
+        # SUBJECT_POSE is allowed to be empty. If the next canonical record is
+        # already SCENE_SETTING, the omission is unambiguous and no visual fact
+        # can be recovered safely, so insert the empty value deterministically.
+        pose = ""
+        warnings.append(
+            "Inserted an empty missing SUBJECT_POSE before line "
+            f"{cursor + 1}"
+        )
+    else:
+        pose = take("SUBJECT_POSE")
     setting = take("SCENE_SETTING")
     elements: list[str] = []
     while cursor < len(lines) and lines[cursor].startswith("SCENE_ELEMENT\t"):
-        parts = lines[cursor].split("\t")
-        if len(parts) != 2:
-            raise VisionObservationError(
-                f"SCENE_ELEMENT at line {cursor + 1} requires two TAB fields"
-            )
-        elements.append(
-            _value(parts[1], "SCENE_ELEMENT", allow_empty=False)
-        )
-        cursor += 1
+        elements.append(take("SCENE_ELEMENT", allow_empty=False))
     lighting = take("LIGHTING")
     time_weather = take("TIME_WEATHER")
 
     composition_values: dict[str, str] = {}
     for field in _COMPOSITION_FIELDS:
-        if cursor >= len(lines):
-            raise VisionObservationError(
-                f"Observation expected COMPOSITION {field}"
-            )
-        parts = lines[cursor].split("\t")
-        if len(parts) != 3 or parts[:2] != ["COMPOSITION", field]:
-            raise VisionObservationError(
-                f"Observation expected COMPOSITION {field} at line {cursor + 1}"
-            )
-        composition_values[field] = _value(
-            parts[2], f"COMPOSITION {field}"
-        )
-        cursor += 1
+        composition_values[field] = take_keyed("COMPOSITION", field)
 
     style_values: dict[str, str] = {}
     for field in _STYLE_FIELDS:
-        if cursor >= len(lines):
-            raise VisionObservationError(f"Observation expected STYLE {field}")
-        parts = lines[cursor].split("\t")
-        if len(parts) != 3 or parts[:2] != ["STYLE", field]:
-            raise VisionObservationError(
-                f"Observation expected STYLE {field} at line {cursor + 1}"
-            )
-        style_values[field] = _value(parts[2], f"STYLE {field}")
-        cursor += 1
+        style_values[field] = take_keyed("STYLE", field)
 
     visible_text: list[str] = []
     while cursor < len(lines) and lines[cursor].startswith("VISIBLE_TEXT\t"):
-        parts = lines[cursor].split("\t")
-        if len(parts) != 2:
-            raise VisionObservationError(
-                f"VISIBLE_TEXT at line {cursor + 1} requires two TAB fields"
-            )
-        visible_text.append(
-            _value(parts[1], "VISIBLE_TEXT", allow_empty=False)
-        )
-        cursor += 1
+        visible_text.append(take("VISIBLE_TEXT", allow_empty=False))
 
     uncertainties: list[str] = []
     while cursor < len(lines) and lines[cursor].startswith("UNCERTAINTY\t"):
-        parts = lines[cursor].split("\t")
-        if len(parts) != 2:
-            raise VisionObservationError(
-                f"UNCERTAINTY at line {cursor + 1} requires two TAB fields"
-            )
-        uncertainties.append(
-            _value(parts[1], "UNCERTAINTY", allow_empty=False)
-        )
-        cursor += 1
+        uncertainties.append(take("UNCERTAINTY", allow_empty=False))
 
     if cursor < len(lines) and lines[cursor] == "END_OBSERVATION":
         cursor += 1

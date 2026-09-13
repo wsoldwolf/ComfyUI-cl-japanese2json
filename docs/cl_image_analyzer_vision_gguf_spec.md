@@ -421,6 +421,8 @@ END_OBSERVATION
 
 小型Visionモデルが`SUBJECT_FEATURE`を`category, visibility, description`の順で返した場合、第三列が既知visibilityで最終列が未知visibilityであることを条件に、Pythonは`category, description, visibility`へ決定論的に入れ替える。説明本文を破棄せず、一意に確定するこの列反転だけでLLMを再試行してはならない。
 
+`SUBJECT_POSE`は空値を許す必須レコードである。小型Visionモデルが空値の末尾TABを除去し、`SUBJECT_POSE`のレコード名だけ、又は空の余分な列だけを返した場合、Pythonは正規の空値へ変換して警告する。自然言語値の途中にTABが混入した場合、単一値レコードと`SCENE_ELEMENT`、`VISIBLE_TEXT`、`UNCERTAINTY`ではレコード名以降、`COMPOSITION`と`STYLE`では固定key以降、`HINT_ASSESSMENT`では固定alignment以降の非空断片を順序どおり読点で結合し、情報を削除せず警告する。小型Visionモデルが`SUBJECT_POSE`レコード自体を省略し、複数の`SUBJECT_FEATURE`直後に正規の`SCENE_SETTING`が現れた場合も、欠落位置は一意であり復元できる視覚情報も存在しないため、Pythonは空の`SUBJECT_POSE`を挿入して警告する。いずれもLLM再試行を消費しない。未知レコード、固定key又は列順の違反、及びその他の必須レコード欠落には適用しない。
+
 値は単一物理行とし、TAB、NUL、参照タグ、Markdown見出し、コードフェンス又はプロトコル終端語を含めない。フィールド順、必須フィールド及び許可レコードは正規観測schemaとして共通に検証する。未知レコード、重複単一フィールド、不正visibility、不正category又は終端欠落は検証エラーとする。
 
 Pythonは検証済みレコードから正規データ構造を作る。`structured_json`もこの正規構造を`json.dumps(..., ensure_ascii=False, indent=2)`で直列化し、生LLM応答をJSONとして解釈しない。

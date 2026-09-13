@@ -9,7 +9,7 @@ Emit zero or more SUBJECT_FEATURE lines. Every SUBJECT_FEATURE line must contain
 Every SUBJECT_FEATURE description must state concrete visible attributes such as color, shape, count, material, pattern, length, or condition. Never emit empty observations such as "face is visible", "hair is visible", "eyes are visible", "full body is visible", or their Japanese equivalents. Omit a category when no concrete attribute can be observed.
 For eyes, report the apparent iris color and basic eye shape when they can be seen. Judge iris color from the central colored iris area. Keep it distinct from red eyeliner, eyelashes, eyelid shadow, reflected light, and nearby clothing. When the iris has a color gradient or colored rim, name the dominant central hue first and the rim second; do not reduce the whole iris to the rim color.
 PRIMARY_SUBJECT must identify the visible person, character, animal, or object concisely. Never use a generic label such as image, picture, photo, 画像, or 写真 as the identity.
-Then emit exactly one SUBJECT_POSE line and exactly one SCENE_SETTING line.
+Then emit exactly one SUBJECT_POSE line and exactly one SCENE_SETTING line. Never omit SUBJECT_POSE; when no pose can be observed, emit SUBJECT_POSE followed by one TAB and an empty value.
 Emit zero or more SCENE_ELEMENT lines.
 Then emit exactly one LIGHTING line and exactly one TIME_WEATHER line.
 Then emit the four COMPOSITION lines in this exact order: shot_size, viewpoint, subject_placement, depth.
