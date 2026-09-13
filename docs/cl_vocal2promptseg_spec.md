@@ -105,8 +105,13 @@ optionalは次とする。
 | `condition_on_previous_text` | BOOLEAN | True | True/False | Whisper内部復号窓間で直前テキストを次窓の条件として使う。TrueはWhisper CLI既定と同じ |
 | `srt_time_offset` | INT | 0 | 符号付き32bit整数、step 1 | SRTの全開始・終了時刻だけへ加算するミリ秒単位の一律オフセット。正数は遅延、負数は前進 |
 | `include_lyrics_comments` | BOOLEAN | True | True/False | 解決済みLyricsを割当先の有声Sceneへ`// 歌詞: ...`コメントとして出力する |
+| `cache_mode` | COMBO | `reuse` | `reuse`, `refresh`, `disabled` | ComfyUI実行キャッシュの利用方針。`refresh`及び`disabled`はノードを毎回再実行する |
 
-`condition_on_previous_text`、`srt_time_offset`及び`include_lyrics_comments`は既存ワークフローとの互換性のためoptionalとする。保存済みワークフローに入力が存在しない場合は、それぞれTrue、0及びTrueを使用し、ComfyUIのprompt検証で実行を拒否してはならない。
+`condition_on_previous_text`、`srt_time_offset`、`include_lyrics_comments`及び`cache_mode`は既存ワークフローとの互換性のためoptionalとする。保存済みワークフローに入力が存在しない場合は、それぞれTrue、0、True及び`reuse`を使用し、ComfyUIのprompt検証で実行を拒否してはならない。
+
+`cache_mode=reuse`では同一入力、同一Whisperチェックポイント及び同一ノード実装versionに対するComfyUI標準の正常出力キャッシュを許可する。`refresh`と`disabled`では`IS_CHANGED()`が毎Queueでchangedとなる値を返し、以前の出力を使用せずWhisper推論から再実行する。本ノードは独自の永続出力キャッシュを持たないため、`refresh`は選択中の各Queueで再実行される。self-test失敗は例外終了して出力tupleを返さないため、失敗結果をComfyUIの正常出力キャッシュへ登録しない。
+
+OpenAI Whisperの`transcribe()`及び`DecodingOptions`にはseed引数がない。本ノードは`temperature=0.0`かつ`beam_size=5`の決定的復号を使用するため、動作しない疑似seedをUIへ公開しない。
 
 `lyrics_text`は入力ソケット専用で、ノード内へ大きな編集widgetを重複表示しない。空白だけ、又は見出し以外の歌詞行が0件の場合は実行時エラーとする。
 
@@ -288,26 +293,27 @@ LyricsとWhisperのどちらにも存在しない文字列を補完してはな�
 
 ### 8.5 未解決区間の局所Whisper再認識
 
-通常整列と前後アンカー限定救済の後も未解決Lyricsが残る場合、前後に解決済みLyricsがある連続runだけを対象として、全尺音声を再推論せず局所Whisper再認識を行う。
+通常整列と前後アンカー限定救済の後も未解決Lyricsが残る場合、前後に解決済みLyricsがある連続run、又は直前に解決済みLyricsがあり音声終端まで続く末尾runを対象として、全尺音声を再推論せず局所Whisper再認識を行う。
 
-1. 時刻採用上の前アンカーを直前の解決済みLyricsの`end_ms`、後アンカーを直後の解決済みLyricsの`start_ms`とする。100ms未満のアンカー間隔、先頭run、末尾run又は前後時刻を確定できないrunは再認識しない。
-2. 復号PCMは前アンカーの最大2秒前から開始し、直後Lyricsの`end_ms`から最大1秒後まで含める。いずれも音声範囲へクリップする。直後Lyricsの開始時刻が本来より早く推定されていても、未解決行の語尾を切断せず、前後歌詞を同じ局所復号で再確認できるようにするためである。
+1. 時刻採用上の前アンカーを直前の解決済みLyricsの`end_ms`とする。直後に解決済みLyricsがあるrunでは後アンカーをその`start_ms`、末尾runでは実PCMの終端時刻とする。100ms未満のアンカー間隔、先頭run又は必要な時刻を確定できないrunは再認識しない。音声終端は実在する決定的境界であり、推測時刻ではない。
+2. 復号PCMは前アンカーの最大2秒前から開始する。直後Lyricsがあるrunではその`end_ms`から最大1秒後まで、末尾runでは実PCM終端までを含め、いずれも音声範囲へクリップする。直後Lyricsの開始時刻が本来より早く推定されていても未解決行の語尾を切断しないこと、及び長尺Whisperが途中で転写を終了した場合に残りの実音声を再確認することを目的とする。
 3. 16kHz mono Whisper入力から当該PCM範囲だけを切り出す。元音声ファイル、ComfyUI入出力ディレクトリ又は一時ファイルへ書き出してはならない。
 4. 当該PCM範囲が12秒以下なら、そのPCMを1個の復号窓とする。12秒を超える場合は最大12秒、隣接窓間2秒重複の短い復号窓へ分割する。
 5. 第1復号の各窓の`initial_prompt`には、その窓でこれから認識するLyricsを入れず、直前の解決済みLyricsと、その窓の推定位置より前にあるrun内Lyricsだけを末尾側から最大12行・160文字入れる。Whisperは`initial_prompt`を既出文脈として扱うため、現在窓のLyricsを入れて認識済みとして読み飛ばさせてはならない。窓の相対位置は直前文脈の選択だけに使い、歌詞時刻の決定には使わない。
 6. 最初の推論と同じモデル、language、device、`temperature=0.0`、`beam_size=5`、`condition_on_previous_text`及びword timestamp設定を使用する。
 7. 各窓で得たword timestampを元の局所PCM時刻へ戻す。重複部分に同じ正規化wordが350ms以内の中心時刻で複数存在する場合は、持続時間が短い方を残して1個へ統合する。
 8. 統合した第1復号word列は、当該PCM範囲全体を有声の照合範囲として8.4の単調整列を1回行う。これは既知の未解決範囲に限定した再認識であり、全尺VADによるword除外を再適用しない。
-9. 第1復号でrun全行を解決し、各終了時刻が元の後アンカー以前に収まる場合は、その結果を採用する。一部が未解決又は後アンカーを越える場合だけ、第2の歌詞ヒント付き復号を同じPCMへ行う。
-10. 第2復号の`initial_prompt`には、直前Lyricsに加え、その窓の推定位置にある未解決Lyricsを含める。これは日本語歌唱を音として認識しながら異なる漢字を選んだ場合の表記ヒントであり、単独では時刻根拠として扱わない。
-11. 第2復号を採用するには、run内全Lyricsと直後Lyricsが入力順に解決し、各run内Lyricsの時間範囲が第1復号のtimestamp付きwordと重なることを必須とする。第1復号に音声時刻の根拠がない場合、又は直後Lyricsを独立に再確認できない場合は、第2復号結果を採用してはならない。
-12. 手順11を満たす場合に限り、直後Lyricsの開始を従来値より後方へ移動できる。新しい開始は、第2復号で得た直後Lyrics開始と未解決run末尾の終了の遅い方とし、直後Lyricsの既存`end_ms`以上へ達する場合は全変更を棄却する。直後Lyricsの本文、終了、照合方法及びそれ以外の解決済みLyricsは変更しない。
-13. `lyrics_match_threshold`又は前後アンカー限定の`lyrics_neighbor_threshold`を満たした実在word範囲だけを採用し、局所時刻へPCM開始時刻を加算する。Lyrics本文から時刻を推測したり、窓又はrunへ均等な時刻を割り当てたりしてはならない。
-14. 回収行の開始を前アンカー以後、終了を確定した後アンカー以前へ収め、`end_ms <= start_ms`となる結果は採用しない。回収行の`match_method`を`targeted`とする。未回収行は従来の診断情報を保持して未解決のまま返す。
-15. 局所再認識の完了後、整列方法を問わず、すべての解決済みLyricsの実word timestampと時間的に重なるSceneを確認する。全尺VADがそのSceneを無音としていた場合は有声へ昇格し、Source Vocalリップシンクを有効にする。Whisper wordのVAD採用判定は単語の中点を使う一方、歌詞区間の開始時刻が整数秒Scene境界の直前になる場合があるため、解決済みLyricsの実時刻をVADより強い発声根拠として扱う。`detected_intervals`とVAD統計自体は比較可能性のため元の判定を保持する。
-16. 局所再認識の失敗はWARNINGとして扱い、第1復号又は最初の全尺推論で得た部分出力を失わない。
+9. 第1復号でrun全行を解決し、各終了時刻が後アンカー以前に収まる場合は、その結果を採用する。一部が未解決又は後アンカーを越える場合だけ、第2の歌詞ヒント付き復号を同じPCMへ行う。
+10. 第2復号の`initial_prompt`には、直前Lyricsと未解決run全体が最大12行・160文字へ収まる場合はその全体を含める。収まらない場合は窓の推定位置に対応する未解決Lyricsを含める。これは日本語歌唱を音として認識しながら異なる漢字を選んだ場合の表記ヒントであり、単独では時刻根拠として扱わない。
+11. 前後アンカーを持つrunで第2復号を採用するには、run内全Lyricsと直後Lyricsが入力順に解決し、各run内Lyricsの時間範囲が第1復号のtimestamp付きwordと重なることを必須とする。第1復号に音声時刻の根拠がない場合、又は直後Lyricsを独立に再確認できない場合は、第2復号結果を採用してはならない。
+12. 末尾runでは、第1復号で既に解決した行の結果を保持し、第2復号は残る未解決行だけを補う。補完する各行が入力順に解決し、その時間範囲が第1復号のtimestamp付きwordと重なり、直前の回収済み行以後かつ次の回収済み行又は実PCM終端以前に収まる場合だけ採用する。
+13. 手順11を満たす場合に限り、直後Lyricsの開始を従来値より後方へ移動できる。新しい開始は、第2復号で得た直後Lyrics開始と未解決run末尾の終了の遅い方とし、直後Lyricsの既存`end_ms`以上へ達する場合は全変更を棄却する。直後Lyricsの本文、終了、照合方法及びそれ以外の解決済みLyricsは変更しない。
+14. `lyrics_match_threshold`又は前後アンカー限定の`lyrics_neighbor_threshold`を満たした実在word範囲だけを採用し、局所時刻へPCM開始時刻を加算する。Lyrics本文から時刻を推測したり、窓又はrunへ均等な時刻を割り当てたりしてはならない。
+15. 回収行の開始を前アンカー以後、終了を後アンカー以前へ収め、`end_ms <= start_ms`となる結果は採用しない。末尾runの後アンカーは実PCM終端である。回収行の`match_method`を`targeted`とする。未回収行は従来の診断情報を保持して未解決のまま返す。
+16. 局所再認識の完了後、整列方法を問わず、すべての解決済みLyricsの実word timestampと時間的に重なるSceneを確認する。全尺VADがそのSceneを無音としていた場合は有声へ昇格し、Source Vocalリップシンクを有効にする。Whisper wordのVAD採用判定は単語の中点を使う一方、歌詞区間の開始時刻が整数秒Scene境界の直前になる場合があるため、解決済みLyricsの実時刻をVADより強い発声根拠として扱う。`detected_intervals`とVAD統計自体は比較可能性のため元の判定を保持する。
+17. 個々の局所再認識の不採用はWARNINGとして扱い、第1復号又は最初の全尺推論で得た内部の部分状態を維持する。ただし全処理後も未解決Lyricsが1行以上残ればself-testが失敗し、出力を返さず実行を停止する。
 
-この再認識は、長尺推論でWhisperがBridgeやグロウル等の連続区間を過大な1 segmentとして脱落させた場合に、その約数十秒だけを短い窓で復号し直すためのものである。特に、直後行の開始が早く推定されたため欠落行の語尾が従来の切り出し範囲外になった場合は、音声根拠のない時刻補間を行わず、前後行を含む局所音声によって境界を再固定する。
+この再認識は、長尺推論でWhisperがBridgeやグロウル等の連続区間を過大な1 segmentとして脱落させた場合、又は音声途中で転写を終了した場合に、その残区間だけを短い窓で復号し直すためのものである。直後行の開始が早く推定されたため欠落行の語尾が切り出し範囲外になった場合も、音声根拠のない時刻補間を行わず、前後行又は実PCM終端を含む局所音声によって境界を再固定する。
 
 ### 8.6 確定歌詞時刻
 
@@ -592,7 +598,7 @@ statusは1行の英数字中心の文字列とし、少なくとも次を含む�
 例:
 
 ```text
-analyzed 12470400 samples at 48000 Hz (259.800000s); whisper=large-v3.pt on cuda language=ja; lyrics=42 resolved (2 neighbor-recovered, 1 resynchronized, 4 targeted-recovered in 1 run(s)), 3 unresolved; self_test=failed; srt_time_offset=0ms; lyrics_comments=enabled; detected 14 voiced interval(s); generated 28 scene(s): 22 voiced, 6 silent; timeline=260s; end padding required=0.200000s
+analyzed 12470400 samples at 48000 Hz (259.800000s); whisper=large-v3.pt on cuda language=ja; lyrics=45 resolved (2 neighbor-recovered, 1 resynchronized, 4 targeted-recovered in 1 run(s)), 0 unresolved; self_test=passed; cache_mode=reuse; srt_time_offset=0ms; lyrics_comments=enabled; detected 14 voiced interval(s); generated 28 scene(s): 22 voiced, 6 silent; timeline=260s; end padding required=0.200000s
 ```
 
 logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする。
@@ -609,8 +615,8 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 - 有声区間長と無音区間長それぞれの最小・最大・平均
 - 採用、無効及びVAD区間外として除外したWhisper word数
 - 全Lyricsと解決済みLyricsそれぞれの類似度の最小・最大・平均、primary・neighbor・resync・targeted・未解決数及び解決率
-- 入力Lyrics本文列と出力SRT本文列が同じ件数、順序及び文字列で完全一致した場合、共通の成功ログ色と同じANSIシアン色で`self test passed`をINFO出力する。
-- 1行でも省略、追加、順序差又は文字列差がある場合、ANSI赤色で`self test failed`をERROR出力する。ただし診断を目的とする非致命エラーであり、生成済み4出力は返す。歌詞本文自体は通常ログへ出さず、総数、一致数、出力数及び最初の不一致番号だけを示す。
+- 入力Lyrics本文列と出力SRT本文列が同じ件数、順序及び文字列で完全一致した場合、出力tupleを返す直前に他ノードと同じANSIシアン色の`[cl_vocal2promptseg] success: self test passed: ...`をINFO出力する。
+- 1行でも省略、追加、順序差又は文字列差がある場合、`self test failed`をERROR出力して`VocalPromptError`で実行を停止する。生成済み途中データを出力せず、失敗結果を正常キャッシュへ登録しない。歌詞本文自体は通常ログへ出さず、総数、一致数、出力数及び最初の不一致番号だけを示す。
 
 ## 14. エラーと警告
 
@@ -632,6 +638,7 @@ logger名及びユーザー可視ログ接頭辞は`cl_vocal2promptseg`とする
 - 生成Markdownを既存字句解析規則で自己検証できない
 - 非空SRTの番号、時刻形式、時刻順又は空行区切りが不正
 - `segments_json`を`json.loads()`できない
+- Lyrics入力本文列とSRT本文列のself-test不一致
 
 ### 14.2 警告
 

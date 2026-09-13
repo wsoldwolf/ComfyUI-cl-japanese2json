@@ -15,7 +15,7 @@ import time
 import unicodedata
 from typing import Any, Iterable
 
-from ..common.logging import ANSI_RESET, log_cyan
+from ..common.logging import log_node_success
 from ..common.suno import SECTION_HEADING_RE, classify_suno_section
 from .errors import VocalPromptError
 from ..node_japanese_to_json.compiler.llmj2e import lex_japanese_markdown
@@ -47,7 +47,8 @@ _TARGETED_RETRY_CONTEXT_AFTER_SECONDS = 1.0
 _MIN_CHAINABLE_SCENE_SECONDS = 2
 _SRT_TIME_OFFSET_MIN = -(2**31)
 _SRT_TIME_OFFSET_MAX = 2**31 - 1
-_ANSI_RED = "\x1b[91m"
+_CACHE_MODES = ("reuse", "refresh", "disabled")
+_NODE_CACHE_VERSION = "vocal-prompt-segments-v6"
 
 try:  # Available only when loaded by ComfyUI.
     from comfy.utils import ProgressBar as _ComfyProgressBar  # type: ignore
@@ -1110,9 +1111,18 @@ def _targeted_guided_window_prompt(
 
     Whisper can decode sung Japanese phonetically while choosing unrelated
     kanji.  This second-pass prompt is used only after an unguided decode has
-    returned timestamped words, and its result is accepted only when the next
-    resolved Lyrics line is independently recovered in order.
+    returned timestamped words. Its result is accepted only where those
+    unguided words provide overlapping acoustic evidence; a bounded run must
+    also recover its following Lyrics anchor in order.
     """
+
+    complete_context = [preceding_line, *lyrics]
+    complete_prompt = "\n".join(line.text for line in complete_context)
+    if (
+        len(complete_context) <= _WHISPER_INITIAL_PROMPT_MAX_LINES
+        and len(complete_prompt) <= _WHISPER_INITIAL_PROMPT_MAX_CHARACTERS
+    ):
+        return complete_prompt
 
     fraction = min(1.0, max(0.0, window_start_seconds / total_seconds))
     approximate_index = min(
@@ -1181,33 +1191,41 @@ def targeted_retry_unresolved_lyrics(
     match_threshold: float,
     neighbor_match_threshold: float,
 ) -> tuple[list[LyricAlignment], int, int, int]:
-    """Retry only unresolved Lyrics runs bounded by reliable time anchors."""
+    """Retry unresolved Lyrics runs bounded by reliable timeline edges."""
 
     updated = list(alignments)
     attempted_runs = 0
     recovered_lines = 0
     invalid_words = 0
+    audio_duration_ms = math.ceil(
+        len(whisper_audio) * 1000 / _WHISPER_SAMPLE_RATE
+    )
     for run_start, run_end in _unresolved_runs(alignments):
-        # An unbounded run has no safe PCM window. Keep it unresolved rather
-        # than re-running the full recording or inventing a time range.
-        if run_start == 0 or run_end >= len(alignments):
+        # A leading run has no preceding Lyrics anchor and remains too
+        # ambiguous to retry safely. A trailing run is bounded by the last
+        # resolved Lyrics line and the real PCM end, so it can be retried
+        # without inventing a time range.
+        if run_start == 0:
             continue
         previous = updated[run_start - 1]
-        following = updated[run_end]
-        if (
-            previous.end_ms is None
-            or following.start_ms is None
-            or following.end_ms is None
+        following = updated[run_end] if run_end < len(updated) else None
+        if previous.end_ms is None:
+            continue
+        if following is not None and (
+            following.start_ms is None or following.end_ms is None
         ):
             continue
         anchor_start_ms = previous.end_ms
-        anchor_end_ms = following.start_ms
+        anchor_end_ms = (
+            following.start_ms
+            if following is not None
+            else audio_duration_ms
+        )
+        if anchor_end_ms is None:  # pragma: no cover - narrowed above
+            continue
         anchor_gap_seconds = (anchor_end_ms - anchor_start_ms) / 1000.0
         if anchor_gap_seconds < _TARGETED_RETRY_MINIMUM_SECONDS:
             continue
-        audio_duration_ms = math.ceil(
-            len(whisper_audio) * 1000 / _WHISPER_SAMPLE_RATE
-        )
         slice_start_ms = max(
             0,
             anchor_start_ms
@@ -1215,8 +1233,12 @@ def targeted_retry_unresolved_lyrics(
         )
         slice_end_ms = min(
             audio_duration_ms,
-            following.end_ms
-            + round(_TARGETED_RETRY_CONTEXT_AFTER_SECONDS * 1000),
+            (
+                following.end_ms
+                + round(_TARGETED_RETRY_CONTEXT_AFTER_SECONDS * 1000)
+                if following is not None
+                else audio_duration_ms
+            ),
         )
         slice_seconds = (slice_end_ms - slice_start_ms) / 1000.0
         first_sample = max(
@@ -1381,7 +1403,7 @@ def targeted_retry_unresolved_lyrics(
             len(normal_proposals) < len(run_lyrics)
             or crossed_following_anchor
         )
-        if needs_guided_retry:
+        if needs_guided_retry and following is None:
             try:
                 guided_words = decode_local_words(guided=True)
                 if not guided_words:
@@ -1390,7 +1412,106 @@ def targeted_retry_unresolved_lyrics(
                         "word timestamps"
                     )
                 guided_alignments = align_lyrics(
-                    [*run_lyrics, following.line],
+                    run_lyrics,
+                    guided_words,
+                    match_threshold=match_threshold,
+                    neighbor_match_threshold=neighbor_match_threshold,
+                    search_seconds=max(slice_seconds, 1.0),
+                    audio_duration_seconds=local_samples / _WHISPER_SAMPLE_RATE,
+                )
+                guided_proposals = dict(normal_proposals)
+                for local_index, entry in enumerate(guided_alignments):
+                    if local_index in guided_proposals:
+                        continue
+                    if (
+                        entry.status != "resolved"
+                        or entry.start_ms is None
+                        or entry.end_ms is None
+                    ):
+                        raise VocalPromptError(
+                            "guided retry did not recover trailing Lyrics "
+                            f"{entry.line.lyrics_index}"
+                        )
+                    local_start = entry.start_ms / 1000.0
+                    local_end = entry.end_ms / 1000.0
+                    if not any(
+                        word.start < local_end and word.end > local_start
+                        for word in local_words
+                    ):
+                        raise VocalPromptError(
+                            "guided retry lacks timestamped acoustic evidence "
+                            f"for Lyrics {entry.line.lyrics_index}"
+                        )
+                    previous_target_end = max(
+                        [anchor_start_ms]
+                        + [
+                            proposal.end_ms
+                            for proposal_index, proposal in guided_proposals.items()
+                            if proposal_index < local_index
+                            and proposal.end_ms is not None
+                        ]
+                    )
+                    next_target_start = min(
+                        [anchor_end_ms]
+                        + [
+                            proposal.start_ms
+                            for proposal_index, proposal in guided_proposals.items()
+                            if proposal_index > local_index
+                            and proposal.start_ms is not None
+                        ]
+                    )
+                    absolute_start = max(
+                        previous_target_end,
+                        offset_ms + entry.start_ms,
+                    )
+                    absolute_end = min(
+                        next_target_start,
+                        offset_ms + entry.end_ms,
+                    )
+                    if absolute_end <= absolute_start:
+                        raise VocalPromptError(
+                            "guided retry produced an empty or reversed trailing "
+                            f"interval for Lyrics {entry.line.lyrics_index}"
+                        )
+                    guided_proposals[local_index] = replace(
+                        entry,
+                        start_ms=absolute_start,
+                        end_ms=absolute_end,
+                        match_method="targeted",
+                    )
+                if len(guided_proposals) != len(run_lyrics):
+                    raise VocalPromptError(
+                        "guided retry did not recover every trailing Lyrics line"
+                    )
+                proposals = guided_proposals
+            except VocalPromptError as exc:
+                LOGGER.warning(
+                    "[cl_vocal2promptseg] Evidence-gated guided retry for "
+                    "trailing Lyrics %d-%d was not accepted: %s",
+                    run_lyrics[0].lyrics_index,
+                    run_lyrics[-1].lyrics_index,
+                    exc,
+                )
+            needs_guided_retry = False
+        if needs_guided_retry:
+            try:
+                if following is None:  # pragma: no cover - handled above
+                    raise VocalPromptError(
+                        "bounded guided retry requires a following Lyrics anchor"
+                    )
+                guided_words = decode_local_words(guided=True)
+                if not guided_words:
+                    raise VocalPromptError(
+                        "guided targeted Whisper windows returned no usable "
+                        "word timestamps"
+                    )
+                guided_lyrics = (
+                    [*run_lyrics, following.line]
+                    if following is not None
+                    else run_lyrics
+                )
+                guided_alignments = align_lyrics(
+                    guided_lyrics,
                     guided_words,
                     match_threshold=match_threshold,
                     neighbor_match_threshold=neighbor_match_threshold,
@@ -1404,12 +1525,19 @@ def targeted_retry_unresolved_lyrics(
                     for entry in guided_alignments
                 ):
                     raise VocalPromptError(
-                        "guided retry did not recover every unresolved Lyrics "
-                        "line and the following anchor"
+                        "guided retry did not recover every required Lyrics line"
                     )
 
-                guided_targets = guided_alignments[:-1]
-                guided_following = guided_alignments[-1]
+                guided_targets = (
+                    guided_alignments[:-1]
+                    if following is not None
+                    else guided_alignments
+                )
+                guided_following = (
+                    guided_alignments[-1]
+                    if following is not None
+                    else None
+                )
                 for entry in guided_targets:
                     local_start = entry.start_ms / 1000.0
                     local_end = entry.end_ms / 1000.0
@@ -1422,17 +1550,33 @@ def targeted_retry_unresolved_lyrics(
                             f"for Lyrics {entry.line.lyrics_index}"
                         )
 
-                guided_following_start = offset_ms + guided_following.start_ms
-                guided_target_end = offset_ms + guided_targets[-1].end_ms
-                replacement_following_start = max(
-                    anchor_end_ms,
-                    guided_following_start,
-                    guided_target_end,
-                )
-                if replacement_following_start >= following.end_ms:
-                    raise VocalPromptError(
-                        "guided retry would consume the following Lyrics anchor"
+                replacement_following_start = anchor_end_ms
+                if following is not None:
+                    if (
+                        guided_following is None
+                        or guided_following.start_ms is None
+                        or guided_targets[-1].end_ms is None
+                    ):  # pragma: no cover - narrowed above
+                        raise VocalPromptError(
+                            "guided retry lost the following Lyrics anchor"
+                        )
+                    guided_following_start = (
+                        offset_ms + guided_following.start_ms
                     )
+                    guided_target_end = offset_ms + guided_targets[-1].end_ms
+                    replacement_following_start = max(
+                        anchor_end_ms,
+                        guided_following_start,
+                        guided_target_end,
+                    )
+                    if (
+                        following.end_ms is None
+                        or replacement_following_start >= following.end_ms
+                    ):
+                        raise VocalPromptError(
+                            "guided retry would consume the following Lyrics "
+                            "anchor"
+                        )
 
                 guided_proposals: dict[int, LyricAlignment] = {}
                 previous_target_end = anchor_start_ms
@@ -1459,20 +1603,21 @@ def targeted_retry_unresolved_lyrics(
                     previous_target_end = absolute_end
 
                 proposals = guided_proposals
-                following_replacement = replace(
-                    following,
-                    start_ms=replacement_following_start,
-                )
-                LOGGER.info(
-                    "[cl_vocal2promptseg] Targeted Whisper retry moved the "
-                    "following Lyrics %d start from %.3fs to %.3fs after "
-                    "recovering Lyrics %d-%d with acoustic evidence",
-                    following.line.lyrics_index,
-                    anchor_end_ms / 1000.0,
-                    replacement_following_start / 1000.0,
-                    run_lyrics[0].lyrics_index,
-                    run_lyrics[-1].lyrics_index,
-                )
+                if following is not None:
+                    following_replacement = replace(
+                        following,
+                        start_ms=replacement_following_start,
+                    )
+                    LOGGER.info(
+                        "[cl_vocal2promptseg] Targeted Whisper retry moved the "
+                        "following Lyrics %d start from %.3fs to %.3fs after "
+                        "recovering Lyrics %d-%d with acoustic evidence",
+                        following.line.lyrics_index,
+                        anchor_end_ms / 1000.0,
+                        replacement_following_start / 1000.0,
+                        run_lyrics[0].lyrics_index,
+                        run_lyrics[-1].lyrics_index,
+                    )
             except VocalPromptError as exc:
                 LOGGER.warning(
                     "[cl_vocal2promptseg] Evidence-gated guided retry for "
@@ -2127,24 +2272,14 @@ def log_quality_diagnostics(
     )
 
     result = lyrics_srt_self_test(lyrics, srt_text)
-    if result["passed"]:
-        log_cyan(
-            LOGGER,
-            "[cl_vocal2promptseg] self test passed: input Lyrics and output "
-            "SRT lyrics match exactly (%d/%d)",
-            result["actual_count"],
-            result["expected_count"],
-        )
-    else:
+    if not result["passed"]:
         LOGGER.error(
-            "%s[cl_vocal2promptseg] self test failed: input Lyrics and output "
-            "SRT lyrics differ (matched=%d/%d, output=%d, first_mismatch=%s)%s",
-            _ANSI_RED,
+            "[cl_vocal2promptseg] self test failed: input Lyrics and output "
+            "SRT lyrics differ (matched=%d/%d, output=%d, first_mismatch=%s)",
             result["matched_count"],
             result["expected_count"],
             result["actual_count"],
             result["first_mismatch"],
-            ANSI_RESET,
         )
     return result
 
@@ -2394,15 +2529,38 @@ class CLVocalToPromptSegments:
                         ),
                     },
                 ),
+                "cache_mode": (
+                    list(_CACHE_MODES),
+                    {
+                        "default": "reuse",
+                        "tooltip": (
+                            "reuse allows ComfyUI to reuse a previous successful "
+                            "result. refresh and disabled force this node to run "
+                            "again. Failed self-tests never return a cacheable result."
+                        ),
+                    },
+                ),
             },
         }
 
     @classmethod
-    def IS_CHANGED(cls, whisper_model: str, **_: Any) -> tuple[Any, ...]:
+    def IS_CHANGED(
+        cls,
+        whisper_model: str,
+        cache_mode: str = "reuse",
+        **_: Any,
+    ) -> Any:
+        if cache_mode != "reuse":
+            return float("nan")
         try:
             path = resolve_whisper_model_name(whisper_model)
             stat = path.stat()
-            return (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+            return (
+                _NODE_CACHE_VERSION,
+                str(path.resolve()),
+                stat.st_size,
+                stat.st_mtime_ns,
+            )
         except Exception as exc:
             digest = hashlib.sha256(
                 f"{whisper_model}|{type(exc).__name__}|{exc}".encode(
@@ -2434,6 +2592,7 @@ class CLVocalToPromptSegments:
         condition_on_previous_text: bool = True,
         srt_time_offset: int = 0,
         include_lyrics_comments: bool = True,
+        cache_mode: str = "reuse",
     ) -> tuple[str, str, str, str]:
         with self._lock:
             _validate_bool(
@@ -2443,6 +2602,10 @@ class CLVocalToPromptSegments:
                 include_lyrics_comments, "include_lyrics_comments"
             )
             _validate_bool(keep_whisper_loaded, "keep_whisper_loaded")
+            if cache_mode not in _CACHE_MODES:
+                raise VocalPromptError(
+                    "cache_mode must be reuse, refresh, or disabled"
+                )
             srt_time_offset = _validate_int(
                 srt_time_offset,
                 "srt_time_offset",
@@ -2653,6 +2816,7 @@ class CLVocalToPromptSegments:
                     "condition_on_previous_text": condition_on_previous_text,
                     "srt_time_offset": srt_time_offset,
                     "include_lyrics_comments": include_lyrics_comments,
+                    "cache_mode": cache_mode,
                     "whisper_initial_prompt_lines": (
                         initial_prompt.count("\n") + 1 if initial_prompt else 0
                     ),
@@ -2720,20 +2884,30 @@ class CLVocalToPromptSegments:
                 if unresolved_count:
                     LOGGER.warning(
                         "[cl_vocal2promptseg] Could not align %d/%d Lyrics line(s); "
-                        "unresolved lines were omitted from comments and SRT",
+                        "the incomplete output will be rejected by the self test",
                         unresolved_count,
                         len(alignments),
                     )
                 if resolved_count == 0:
                     LOGGER.warning(
                         "[cl_vocal2promptseg] No Lyrics lines were resolved; "
-                        "returning an empty SRT"
+                        "the self test will stop execution"
                     )
                 if trailing_padding > 1e-9:
                     LOGGER.warning(
                         "[cl_vocal2promptseg] Timeline requires %.6fs of end "
                         "padding; use CL Audio Pad with pad_position=end",
                         trailing_padding,
+                    )
+                if not self_test["passed"]:
+                    raise VocalPromptError(
+                        "self test failed: input Lyrics and output SRT lyrics "
+                        "differ "
+                        f"(matched={self_test['matched_count']}/"
+                        f"{self_test['expected_count']}, "
+                        f"output={self_test['actual_count']}, "
+                        f"first_mismatch={self_test['first_mismatch']}); "
+                        "execution stopped and no outputs were returned or cached"
                     )
                 status = (
                     f"analyzed {total_samples} samples at {sample_rate} Hz "
@@ -2748,6 +2922,7 @@ class CLVocalToPromptSegments:
                     f"{promoted_scene_count} scene(s) promoted), "
                     f"{unresolved_count} unresolved; "
                     f"self_test={'passed' if self_test['passed'] else 'failed'}; "
+                    f"cache_mode={cache_mode}; "
                     f"srt_time_offset={srt_time_offset}ms; "
                     f"lyrics_comments="
                     f"{'enabled' if include_lyrics_comments else 'disabled'}; "
@@ -2760,6 +2935,15 @@ class CLVocalToPromptSegments:
                 LOGGER.info("[cl_vocal2promptseg] %s", status)
                 if progress is not None:
                     progress.update_absolute(5, 5)
+                log_node_success(
+                    LOGGER,
+                    "cl_vocal2promptseg",
+                    "self test passed: input Lyrics and output SRT lyrics "
+                    "match exactly (%d/%d); generated %d scene(s)",
+                    self_test["actual_count"],
+                    self_test["expected_count"],
+                    len(scenes),
+                )
                 return prompt_text, srt_text, segments_json, status
             except Exception:
                 self.clear_model()

@@ -31,6 +31,42 @@ _COMPOSITION_FIELDS = (
 )
 _STYLE_FIELDS = ("medium", "rendering", "palette")
 _VISIBILITY_ALIASES = {"visible": "clear"}
+_FEATURE_CATEGORY_ALIASES = {
+    "eye": "eyes",
+    "brow": "eyebrows",
+    "brows": "eyebrows",
+    "eyebrow": "eyebrows",
+    "ear": "ears",
+    "fox_ear": "ears",
+    "fox_ears": "ears",
+    "clothes": "clothing",
+    "costume": "clothing",
+    "dress": "clothing",
+    "footwear": "clothing",
+    "outfit": "clothing",
+    "shoe": "clothing",
+    "shoes": "clothing",
+    "sock": "clothing",
+    "socks": "clothing",
+    "stocking": "clothing",
+    "stockings": "clothing",
+    "accessories": "accessory",
+    "jewellery": "accessory",
+    "jewelry": "accessory",
+    "ornament": "accessory",
+    "ornaments": "accessory",
+    "tails": "tail",
+    "marking": "distinctive_feature",
+    "markings": "distinctive_feature",
+}
+_DESCRIPTION_TERM_ALIASES = (
+    (re.compile(r"(?<![A-Za-z])fox[ _-]+ears?(?![A-Za-z])", re.IGNORECASE), "狐耳"),
+    (re.compile(r"(?<![A-Za-z])fox[ _-]+tails?(?![A-Za-z])", re.IGNORECASE), "狐尻尾"),
+)
+_ALL_VISIBILITY_TOKENS = {
+    *(value.casefold() for value in VISIBILITIES),
+    *(value.casefold() for value in _VISIBILITY_ALIASES),
+}
 _GLUED_VISIBILITY_RE = re.compile(
     r"^(.*?)(?:[. ]?)(clear|partial|uncertain|visible)\s*$",
     re.IGNORECASE,
@@ -43,6 +79,46 @@ _GENERIC_FEATURE_RE = re.compile(
     r"^(?:顔|髪(?:の毛)?|目|瞳|眉(?:毛)?|耳|身体|体|全身|衣装|服|装飾|"
     r"アクセサリー|尾|尻尾)(?:が|を)?(?:見える|確認できる|写っている|映っている)$"
 )
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)?")
+
+
+def _normalize_feature_category(value: str) -> str:
+    category = value.strip()
+    folded = category.casefold().replace("-", "_").replace(" ", "_")
+    return _FEATURE_CATEGORY_ALIASES.get(folded, category)
+
+
+def _normalize_known_description_terms(value: str) -> str:
+    normalized = value
+    for pattern, replacement in _DESCRIPTION_TERM_ALIASES:
+        normalized = pattern.sub(replacement, normalized)
+    return normalized
+
+
+def _reject_untranslated_english_prose(text: str, context: str) -> None:
+    """Reject descriptive English copied by small Vision models.
+
+    Protocol identifiers and image text are handled outside this function.
+    Single-letter notation and uppercase technical abbreviations remain valid,
+    so Japanese values such as ``2Dイラスト`` and ``PBR調`` are not rejected.
+    """
+
+    if context == "VISIBLE_TEXT":
+        return
+    if context == "PRIMARY_SUBJECT" and _GENERIC_IDENTITY_RE.fullmatch(text):
+        # Keep the more specific generic-identity diagnostic in the caller.
+        return
+    english_words = [
+        word
+        for word in _LATIN_WORD_RE.findall(text)
+        if len(word) > 1 and not (word.isupper() and len(word) <= 8)
+    ]
+    if english_words:
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        raise VisionObservationError(
+            f"{context} contains untranslated English prose {preview!r}; "
+            "use concise natural Japanese for every descriptive value"
+        )
 
 
 def _clean_lines(content: str) -> list[str]:
@@ -79,6 +155,7 @@ def _value(value: str, context: str, *, allow_empty: bool = True) -> str:
         raise VisionObservationError(f"{context} contains a Markdown heading")
     if text in {"OBSERVATION_V2", "END_OBSERVATION"}:
         raise VisionObservationError(f"{context} contains a protocol marker")
+    _reject_untranslated_english_prose(text, context)
     return text
 
 
@@ -97,11 +174,41 @@ def parse_observation_response(
     cursor = 1
     warnings: list[str] = []
 
+    def strip_unexpected_visibility(
+        parts: list[str],
+        *,
+        expected_fields: int,
+        context: str,
+    ) -> list[str]:
+        """Drop a SUBJECT_FEATURE-only enum leaked into another record.
+
+        A natural-language value equal to ``visible`` remains valid when it is
+        the record's only value.  Removal is limited to an additional final
+        TAB field, which is structurally impossible for scalar/keyed records.
+        """
+
+        if (
+            len(parts) > expected_fields
+            and parts[-1].strip().casefold() in _ALL_VISIBILITY_TOKENS
+        ):
+            marker = parts[-1].strip()
+            warnings.append(
+                f"Removed unexpected trailing visibility marker {marker!r} "
+                f"from {context} at line {cursor + 1}"
+            )
+            return parts[:-1]
+        return parts
+
     def take(prefix: str, *, allow_empty: bool = True) -> str:
         nonlocal cursor
         if cursor >= len(lines):
             raise VisionObservationError(f"Observation expected {prefix}")
         parts = lines[cursor].split("\t")
+        parts = strip_unexpected_visibility(
+            parts,
+            expected_fields=2,
+            context=prefix,
+        )
         if (
             parts
             and parts[0] == prefix
@@ -151,6 +258,11 @@ def parse_observation_response(
         if cursor >= len(lines):
             raise VisionObservationError(f"Observation expected {context}")
         parts = lines[cursor].split("\t")
+        parts = strip_unexpected_visibility(
+            parts,
+            expected_fields=3,
+            context=context,
+        )
         if len(parts) < 2 or parts[:2] != [prefix, key]:
             found = "\t".join(parts[:2]) if parts else lines[cursor]
             raise VisionObservationError(
@@ -176,6 +288,11 @@ def parse_observation_response(
     if cursor >= len(lines):
         raise VisionObservationError("Observation expected HINT_ASSESSMENT")
     hint_parts = lines[cursor].split("\t")
+    hint_parts = strip_unexpected_visibility(
+        hint_parts,
+        expected_fields=3,
+        context="HINT_ASSESSMENT",
+    )
     if len(hint_parts) < 2 or hint_parts[0] != "HINT_ASSESSMENT":
         found = hint_parts[0] if hint_parts else lines[cursor]
         raise VisionObservationError(
@@ -216,10 +333,16 @@ def parse_observation_response(
             raise VisionObservationError(
                 f"SUBJECT_FEATURE at line {cursor + 1} has too few TAB fields"
             )
-        category = parts[1].strip()
+        raw_category = parts[1].strip()
+        category = _normalize_feature_category(raw_category)
         if category not in FEATURE_CATEGORIES:
             raise VisionObservationError(
                 f"SUBJECT_FEATURE uses unknown category {category!r}"
+            )
+        if category != raw_category:
+            warnings.append(
+                f"Normalized SUBJECT_FEATURE category {raw_category!r} "
+                f"to {category!r} at line {cursor + 1}"
             )
         description_parts = [part.strip() for part in parts[2:-1]]
         raw_visibility = parts[-1]
@@ -269,6 +392,13 @@ def parse_observation_response(
         description = "、".join(
             part for part in description_parts if part
         )
+        normalized_description = _normalize_known_description_terms(description)
+        if normalized_description != description:
+            warnings.append(
+                "Translated a known SUBJECT_FEATURE term to Japanese at line "
+                f"{cursor + 1}"
+            )
+            description = normalized_description
         if not description:
             raise VisionObservationError(
                 f"SUBJECT_FEATURE at line {cursor + 1} has no description"

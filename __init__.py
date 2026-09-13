@@ -1,8 +1,10 @@
 """ComfyUI custom-node registration."""
 
 from .node_audio_pad.node import CLAudioPad, CLAudioPadPair
+from .node_connected_combo.node import CLConnectedCombo
 from .node_japanese_to_json.node import CLJapaneseToJSONGGUF
 from .node_mv_prompt_planner.node import CLMVPromptPlannerGGUF
+from .node_prompt_enhancer.node import CLPromptEnhancerGGUF
 from .node_prompt_merger.node import CLPromptMerger
 from .node_scene_limiter.node import CLSceneLimiter
 from .node_string_combo.node import CLStringCombo
@@ -14,9 +16,11 @@ from .node_vision_analyzer.node import CLImageAnalyzerVisionGGUF
 NODE_CLASS_MAPPINGS = {
     "CLJapaneseToJSONGGUF": CLJapaneseToJSONGGUF,
     "CLMVPromptPlannerGGUF": CLMVPromptPlannerGGUF,
+    "CLPromptEnhancerGGUF": CLPromptEnhancerGGUF,
     "CLPromptMerger": CLPromptMerger,
     "CLSceneLimiter": CLSceneLimiter,
     "CLStringCombo": CLStringCombo,
+    "CLConnectedCombo": CLConnectedCombo,
     "CLAudioPad": CLAudioPad,
     "CLAudioPadPair": CLAudioPadPair,
     "CLVocalToPromptSegments": CLVocalToPromptSegments,
@@ -27,9 +31,11 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLJapaneseToJSONGGUF": "CL Japanese to JSON (GGUF)",
     "CLMVPromptPlannerGGUF": "CL MV Prompt Planner (GGUF)",
+    "CLPromptEnhancerGGUF": "CL Prompt Enhancer (GGUF)",
     "CLPromptMerger": "CL Prompt Merger (Reduced Markdown)",
     "CLSceneLimiter": "CL Scene Limiter (Reduced Markdown)",
     "CLStringCombo": "CL String Combo",
+    "CLConnectedCombo": "CL Connected Combo",
     "CLAudioPad": "CL Audio Pad (PCM Silence)",
     "CLAudioPadPair": "CL Audio Pad Pair (PCM Silence)",
     "CLVocalToPromptSegments": "CL Vocal to Prompt Segments",

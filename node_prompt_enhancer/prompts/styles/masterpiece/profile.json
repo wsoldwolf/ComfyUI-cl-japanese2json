@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "masterpiece",
+  "display_name": "マスターピース",
+  "description": "媒体を限定せず構図、質感、光、仕上げを最高密度へ整える。",
+  "ui_order": 120,
+  "directives": [
+    "映像は、主題が明確な構図、精密な形状、豊かな質感、統一された色彩設計及び緻密に制御された光を持つ最高品質の完成表現とする。",
+    "画面内の全要素を同じ美術方針で統合し、未完成部分、安価な素材感、破綻した遠近又は無目的な装飾を残さない。"
+  ],
+  "system_instruction": "Replace only source sentences solely expressing generic quality or rendering finish. Do not classify a concrete character, environment, lighting, motion, or camera constraint as style."
+}

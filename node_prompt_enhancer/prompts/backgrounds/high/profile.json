@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profile_id": "high",
+  "display_name": "高",
+  "description": "背景の空間、材質、照明、環境運動を詳細化する。",
+  "ui_order": 40,
+  "minimum_lines": 4,
+  "maximum_lines": 6,
+  "system_instruction": "Write four to six precise Japanese background sentences covering spatial layers, material response, lighting, atmosphere, environmental motion, and continuity. Derive detail from supplied facts and never contradict user_prompt."
+}

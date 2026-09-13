@@ -1,0 +1,283 @@
+# CL Prompt Enhancer（GGUF）仕様
+
+## 1. 目的
+
+`CL Prompt Enhancer (GGUF)`は、`CL Prompt Merger (Reduced Markdown)`等が出力したグローバル縮小Markdownへ、選択式の画風と背景密度を適用するComfyUIノードである。
+
+本ノードは完成MarkdownをLLMへ自由生成させない。Pythonが入力構造、Subject、保持分析、Commonの順序及び最終組み立てを所有し、LLMは次の二つだけを担当する。
+
+- source側Commonバレットを`keep`、`style`又は`background`へ分類する。
+- 選択した背景密度の範囲内で、既存事実を補足する日本語Common文を生成する。
+
+画風文は外部プロファイルから決定的に挿入する。別入力`user_prompt`はLLMへ変更対象として渡さず、source側の拡張後に既存Prompt Mergerで機械的に統合する。これにより、ユーザーが明示したSubject、保持条件、世界設定及び禁止事項を保護しながら、プリセットだけを切り替えられるようにする。
+
+## 2. ノード契約
+
+| 項目 | 値 |
+|---|---|
+| ノード型名 | `CLPromptEnhancerGGUF` |
+| 表示名 | `CL Prompt Enhancer (GGUF)` |
+| カテゴリ | `MiniMax H3/Prompt Tools` |
+| 関数 | `enhance_prompt` |
+| 出力ノード | False |
+
+### 2.1 入力
+
+| 入力 | 型 | 既定値 | 用途 |
+|---|---|---:|---|
+| `source_markdown` | STRING socket | - | 拡張対象。通常はPrompt Mergerの`merged_markdown` |
+| `model_name` | COMBO | 検出先頭 | テキストGGUF |
+| `chat_format` | COMBO | `auto` | `auto`、`qwen`又は`gemma` |
+| `style_profile` | COMBO | `passthrough` | 外部画風プロファイル |
+| `background_detail` | COMBO | `passthrough` | 外部背景密度プロファイル |
+| `max_tokens` | INT | `2048` | 1回の最大生成token数 |
+| `temperature` | FLOAT | `0.1` | llama.cpp sampling temperature |
+| `top_p` | FLOAT | `0.9` | llama.cpp top-p |
+| `repetition_penalty` | FLOAT | `1.05` | llama.cpp repetition penalty |
+| `gpu_layers` | INT | `-1` | GPUへ配置するlayer数 |
+| `n_batch` | INT | `256` | llama.cpp batch size |
+| `n_ctx` | INT | `0` | context size。`0`はモデル既定 |
+| `flash_attn` | BOOLEAN | `True` | Flash Attention |
+| `kv_cache_type` | COMBO | `q8_0` | `q8_0`又は`f16` |
+| `op_offload` | BOOLEAN | `True` | 演算offload |
+| `keep_model_loaded` | BOOLEAN | `False` | 実行後もモデルを保持するか |
+| `seed` | INT | `1` | 初回seed |
+| `retry_max` | INT | `2` | 初回以外の最大再試行数 |
+
+任意入力は次のとおりである。
+
+| 入力 | 型 | 既定値 | 用途 |
+|---|---|---:|---|
+| `user_prompt` | STRING socket | 空 | LLMによる書換え対象外のユーザー指示 |
+| `additional_instruction` | STRING | 空 | 背景補足の文脈ヒント。結果へそのまま複写しない |
+| `model_name_override` | STRING socket | 空 | 非空なら`model_name`を上書き |
+| `style_profile_override` | STRING socket | 空 | 非空なら`style_profile`を上書き |
+| `background_detail_override` | STRING socket | 空 | 非空なら`background_detail`を上書き |
+| `save_debug_output` | BOOLEAN | `False` | ComfyUI output以下へ診断bundleを保存 |
+
+三つのoverrideは前後空白を除去した非空文字列だけを採用する。未知のモデル又はプロファイルは暗黙に先頭項目へ置換せず停止する。
+
+各overrideは`connected_combo_source`入力メタデータで、順に`model_name`、`style_profile`及び`background_detail`を列挙元として公開する。`CL Connected Combo`を接続すると、サブグラフ境界を含む配線から対応する候補を自動取得できる。Enhancer自身のCOMBO及びoverride優先順位は変更しない。
+
+### 2.2 出力
+
+| 出力 | 型 | 内容 |
+|---|---|---|
+| `enhanced_markdown` | STRING | 検証済みグローバル縮小Markdown |
+| `enhancement_report` | STRING | 分類、追加、除外、retry等を含むUTF-8 JSON |
+| `status` | STRING | 実効プロファイルと処理件数の短い状態文 |
+
+正常終了時だけ、ComfyUIコンソールへ`[cl_prompt_enhancer] success: ...`をANSIシアン色で出力する。
+
+## 3. 入力文法の境界
+
+`source_markdown`と`user_prompt`が扱える見出しは次の三つだけであり、すべて省略可能である。
+
+```markdown
+# サブジェクト
+* ...
+
+# 保持分析
+* ...
+
+# 共通プロンプト
+* ...
+```
+
+Scene、Shot、音響又は未知のディレクティブを含む入力は停止エラーとする。既存コア構文のコメントは保持する。構文検証と最終ユーザー統合には`node_prompt_merger`の確定済みパーサ及びマージ処理を再利用する。
+
+source側Commonバレットには出現順で`C001`、`C002`の一時IDを割り当てる。このIDはLLMとの分類protocol専用で、最終Markdownには出力しない。
+
+## 4. ユーザー指示の保護
+
+`user_prompt`はsourceと異なるprovenanceを持つ。保護契約は次のとおりである。
+
+1. LLM要求には参考文脈として含めてよいが、分類対象IDを付けない。
+2. LLM応答からSubject、Picture、保持分析又はユーザーCommonを生成、削除若しくは置換しない。
+3. source側を拡張した後、`merge_reduced_markdown(enhanced_source, user_prompt)`で統合する。
+4. user側Commonはsource側Commonより前へ置く。
+5. user側Subject及び保持分析はPrompt Mergerの既存ルールで同一Subjectへ統合する。
+6. 統合後、user側の意味本文が一つでも欠落した場合は停止エラーとする。
+7. user側Commonから`night`、`day`、`dawn`又は`dusk`のいずれか一つだけを明示的に検出できた場合、その時間帯を自動背景に対する権威値とする。複数の時間帯が同時に現れる場合は、時間遷移又はユーザー自身の矛盾を一意に判定できないため権威値を設定しない。
+8. 権威値と明白に異なるsource側Commonは、人物、参照タグ、カメラ、動作又は音響を含まない背景専用行に限って決定論的に除外する。複合行を部分的に書き換えたり、保護された人物指示を削除したりしてはならない。
+9. LLMが生成した背景補足に権威値と異なる時間帯が残った場合、その補足行だけを決定論的に除外してWARNINGとreportへ記録する。ユーザー行自体は変更しない。
+
+したがって保護は意味本文の完全保持を保証する。Subject又は保持分析の見出し、selector及び関係表記は、既存Prompt Mergerの正規化により統合表示へ変わり得るため、入力全体のbyte一致は保証しない。
+
+`background_detail=reduce`を含む全プロファイルはsource側の自動背景だけを除外対象にする。別入力`user_prompt`に書かれた背景、時間帯、天候、照明及び禁止事項を削減してはならない。例えばuser側が夜間を指定し、Vision等の自動sourceが太陽、青空又は日中を記述した場合、純粋な自動背景行と矛盾する生成背景行を除外し、夜間指定を最終Common先頭へ残す。
+
+## 5. 処理順序
+
+```text
+source_markdown ──> 構文検証・Common採番 ──> LLM分類/背景差分 ──> source Common再構成 ┐
+                                                                                  ├─> Prompt Merger ──> enhanced_markdown
+user_prompt ──────> 独立検証・変更禁止 ───────────────────────────────────────────┘
+```
+
+処理は次の順序で固定する。
+
+1. 入力型、NUL、数値範囲及びoverrideを検証する。
+2. 実効画風及び背景プロファイルを外部manifestから読み込む。
+3. sourceとuserを個別にグローバル縮小Markdownとして検証する。
+4. user Commonから一意な時間帯権威値を抽出し、矛盾するsource背景専用行を決定論的除外候補とする。
+5. 必要な場合だけLLMへsource Common分類と背景差分を要求する。時間帯権威値がある場合は`authoritative_environment.time_of_day`として構造化して渡す。
+6. `style`と分類されたsource Commonを、画風変更時だけ除外する。
+7. `background`と分類されたsource Commonを、背景変更時だけ除外する。
+8. LLM生成背景から時間帯権威値と矛盾する行を除外する。
+9. 選択画風の固定directive、次に受理したLLM生成背景文をsource Common先頭へ追加する。
+10. userを既存Prompt Mergerで最後に統合する。
+11. 最終Markdownを再検証し、user意味本文の存在を確認する。
+
+一文に画風と人物、背景と人物動作等が混在する場合、LLMは`keep`を返さなければならない。分類を安全側へ倒し、複合指示の一部だけを暗黙に破棄しない。ただし、純粋な画風だけを禁止する文は`style`、純粋な背景条件だけを禁止する文は`background`であり、禁止表現であるという理由だけで旧画風又は旧背景を残さない。`画風は...とする`、`作画は...とする`、`舞台は...とする`、`背景は...とする`、`時間帯は...とする`、`天候は...とする`及び`照明は...とする`の単一責務文を、小型モデル向けの意味アンカーとしてシステムプロンプトへ明記する。
+
+## 6. 画風プロファイル
+
+画風は`node_prompt_enhancer/prompts/styles/<profile_id>/profile.json`から自動検出する。初期同梱IDは次のとおりである。
+
+- `passthrough`
+- `anime_2020s`
+- `anime_2010s`
+- `anime_2000s`
+- `anime_1990s`
+- `anime_1980s`
+- `cinematic_live_action`
+- `photographic_live_action`
+- `rough_sketch`
+- `aggressive_sketch`
+- `watercolor`
+- `illustration`
+- `masterpiece`
+
+各manifestのschemaは次である。
+
+```json
+{
+  "schema_version": 1,
+  "profile_id": "anime_2020s",
+  "display_name": "2020年代アニメ",
+  "description": "説明",
+  "ui_order": 10,
+  "directives": ["共通プロンプトへ追加する一文。"],
+  "system_instruction": "LLM分類時にだけ加える制約"
+}
+```
+
+`directives`はMarkdown記号を含まない一行の日本語Common本文である。画風の実体はLLMに再生成させず、この配列をそのままバレット化する。`passthrough`だけは空配列を要求する。
+
+`anime_2020s`から`anime_1980s`までの全アニメ年代プロファイルは、特にキャラクターの動作を明確なキーポーズ、ポーズ・トゥ・ポーズ、止め絵、二コマ又は三コマ打ち及び限定的な中割りによる手描きリミテッドアニメーションへ拘束する。同時に、キャラクターを3DCGアニメーション、フルアニメーション、Live2D、ボーンリグ、パペット、ベクタートゥイーン又は連続モーフィングのように滑らかに動かすことを禁止する。この拘束はキャラクター作画へ適用し、映画的なカメラ移動までコマ打ちへ強制しない。
+
+新しい画風は新規ディレクトリとmanifestを追加するだけでUIへ現れる。Pythonの条件分岐追加を必要としない。
+
+## 7. 背景密度プロファイル
+
+背景密度は`node_prompt_enhancer/prompts/backgrounds/<profile_id>/profile.json`から自動検出する。初期同梱IDは次のとおりである。
+
+| ID | 表示 | 生成行数 |
+|---|---|---:|
+| `passthrough` | パススルー | 0 |
+| `reduce` | 削減 | 1 |
+| `low` | 少 | 1～2 |
+| `medium` | 中 | 2～4 |
+| `high` | 高 | 4～6 |
+| `ultra` | 極高 | 6～8 |
+
+manifest schemaは次である。
+
+```json
+{
+  "schema_version": 1,
+  "profile_id": "medium",
+  "display_name": "中",
+  "description": "説明",
+  "ui_order": 30,
+  "minimum_lines": 2,
+  "maximum_lines": 4,
+  "system_instruction": "背景生成時にだけ加える制約"
+}
+```
+
+生成行数は`0 <= minimum_lines <= maximum_lines <= 12`とする。`passthrough`は両方0、それ以外は最低1行を要求する。生成背景は入力の場所、時間、天候、色、光源、連続性及び禁止事項を保持し、新しい人物、物語上の出来事、台詞又は可読文字を導入してはならない。LLM応答時点ではmanifestの行数範囲を検証する。その後、ユーザー時間帯との矛盾行を安全側で除外した結果が最低行数を下回っても、密度よりユーザー権威を優先して処理を継続し、除外数をWARNINGとreportへ記録する。
+
+## 8. LLM protocol
+
+LLM入力は内部JSONであり、sourceのSubject、保持分析、採番済みCommon、変更禁止のuser prompt、実効プロファイル、追加ヒント、任意の`authoritative_environment.time_of_day`及び前回検証エラーを構造化して渡す。これは入力理解を安定させるための内部形式であり、LLMへJSON出力を要求しない。
+
+出力は次のTAB区切りprotocolだけを受理する。システムプロンプトでは、固定IDと固定classを対応付けた完成例を提示しない。小型モデルが例のclass配列を実入力へコピーすることを防ぎ、各source文の意味から分類させる。
+
+```text
+ENHANCEMENT_V1
+SOURCE	C001	keep
+SOURCE	C002	style
+SOURCE	C003	background
+BACKGROUND	背景を補足する日本語の一文
+END_ENHANCEMENT
+```
+
+- source Commonごとに、同じ順序で正確に一件の`SOURCE`が必要である。
+- classは`keep`、`style`、`background`だけである。
+- `BACKGROUND`件数は選択背景プロファイルの範囲内でなければならない。
+- Markdown、JSON、コードフェンス、説明、直接話法、`<Subject N>`、`<Picture N>`又は内部保護tokenを応答へ含めてはならない。
+- 正規区切りはU+0009の実TABである。小型モデルが区切り記号を文字列`<TAB>`又は`\t`として出した場合だけ、Pythonが実TABへ正規化してWARNINGを記録する。
+- `BACKGROUND`の余分なTAB fieldは自然文の一部として読点で結合し、WARNINGを記録する。
+- 欠落ID、余分なID、重複ID、未知class及び規定外行は再試行対象である。
+
+参照タグはLLM要求内で一時tokenへ保護する。LLMは新しい参照タグを導入できず、最終構造へタグを復元する処理もPythonが所有する。
+
+## 9. パススルーとモデルライフサイクル
+
+次の場合はGGUFを解決又はロードしない。
+
+- 画風と背景がともに`passthrough`。
+- 背景が`passthrough`、画風だけが有効、かつsourceにCommonバレットがない。
+
+前者でも`user_prompt`があれば決定論的なPrompt Mergerだけを実行する。`keep_model_loaded=False`では成功又は失敗にかかわらずfinallyでモデルを解放する。これを既定とし、後段のMiniMax H3がComfyUI管理外GGUFのVRAMを引き継がないようにする。
+
+## 10. 再試行、停止及び割込み
+
+初回を含む最大要求数は`retry_max + 1`であり、無限再試行を行わない。各再試行では検証エラーを次の要求へ含め、seedを一つ進める。
+
+llama.cppのstreaming応答は10秒ごとにheartbeatを出す。最初のchunkが90秒以内に到着しない場合、又は一度出力された後60秒間新しいchunkがない場合はstallとして停止する。ComfyUI interruptはchunk境界とheartbeat監視中に反映する。
+
+`finish_reason=length`、空応答、protocol不正及び背景行数不正は検証失敗とする。規定回数で解決しない場合は最後の理由を含む`PromptEnhancerError`で停止し、部分的なMarkdownを正常出力しない。
+
+## 11. デバッグ出力
+
+`save_debug_output=True`では`ComfyUI/output/cl_prompt_enhancer_debug/`へ、入力、実効設定、各要求、保護済みLLM入力、生応答、validation結果、最終Markdown、report又は例外を保存する。ユーザーのSubject、保持情報及び世界設定を含むため、共有前に内容を確認する。
+
+## 12. 推奨接続
+
+```text
+Vision等の自動Brief ─┐
+                      ├─> CL Prompt Merger.merged_markdown ─> CL Prompt Enhancer.source_markdown
+基礎PlanningBrief ────┘                                      │
+                                                             ├─> enhanced_markdown ─> CL MV Prompt Planner.planning_markdown
+ユーザー最終指示 ─────────────────────────────────────────────> user_prompt
+CL String Combo ─────────────────────────────────────────────> style_profile_override / background_detail_override
+```
+
+自動生成されたBriefは`source_markdown`へ、変更を避けたい最終的な人間の指示は`user_prompt`へ接続する。既にPrompt Mergerへ含めた同じユーザー断片を再度`user_prompt`へ接続すると重複するため、provenanceを二重投入しない。
+
+## 13. テスト要件
+
+- 全profileの検出順、schema及び未知IDエラー。
+- 選択profileだけをsystem promptへ合成すること。
+- protocolのID完全性、class、背景行数、参照タグ及び余分なTAB field。
+- source Commonだけが狭く除外され、コメントと非対象文が残ること。
+- Scene等のグローバル範囲外入力を拒否すること。
+- 完全パススルー時にGGUFをロードしないこと。
+- `reduce`でもuser背景を保持すること。
+- userが一意に夜間を指定した場合、LLMがsource日中行を`keep`にしても最終出力から除外すること。
+- user時間帯と矛盾するLLM生成背景だけを除外し、互換する背景とuser本文を維持すること。
+- 時間帯を複数指定したuser promptを一つの権威値へ誤って縮約しないこと。
+- retryが有限で、エラー文と新seedを次要求へ渡すこと。
+- 外部model、style及びbackground overrideが実効値へ反映されること。
+- ノード登録、入出力順、既定値、シアン成功ログ及びモデル解放。
+
+## 14. 非対象
+
+- Scene、Shot、歌詞、カメラ、音響又はH3 JSONの生成。
+- Subject identity又は保持分析の創作。
+- user prompt内の矛盾解決、要約又は自動削除。一意な時間帯の抽出はuser本文を変更せず、自動source及び生成背景との優先順位付けにだけ使用する。
+- 画像解析。
+- モデル又は`llama-cpp-python`の自動導入。
+- 自由形式のMarkdown全文生成。

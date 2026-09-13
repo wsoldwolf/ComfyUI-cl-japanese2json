@@ -417,11 +417,15 @@ END_OBSERVATION
 
 `PRIMARY_SUBJECT`へ`image`、`picture`、`photo`、`画像`又は`写真`だけを記述してはならない。`SUBJECT_FEATURE`は色、形、数、材質、模様、長さ又は状態等の具体的な視覚属性を含める。`顔が見える`、`髪が見える`、`目が見える`、`全身が見える`等、可視性しか表さない記述は検証エラーとし再試行する。瞳を観測できる場合は虹彩中心部の主色を先に記述し、赤いアイライン、睫毛、瞼の影、反射光及び周囲の衣装色と区別する。虹彩の縁だけが別色なら主色の後に縁色を記述する。
 
+自然言語の観測値は簡潔な日本語とする。小型Visionモデルで反復して確認された単義的な特徴語`fox ears`及び`fox tail`は、Pythonがそれぞれ`狐耳`及び`狐尻尾`へ正規化して警告を残す。それ以外の未翻訳英語説明は検証エラーとして再試行し、日本語による全観測を要求する。既知語を含んでいても、残りに未翻訳英語があれば受理しない。`VISIBLE_TEXT`は画像内で実際に読める文字の転記であるためこの言語検証から除外する。`2D`及び`PBR`等の短い技術表記、単一英字並びに大文字略語は未翻訳英文として扱わない。
+
+小型Visionモデルがcategoryへ複数形又は対象物名を返す場合、意味が一意な既知aliasだけをPythonで正規化し、警告を残す。例として`eye`を`eyes`、`eyebrow`を`eyebrows`、`ear`及び`fox ears`を`ears`、`stocking`、`stockings`、`socks`、`footwear`、`shoes`、`dress`、`outfit`及び`costume`を`clothing`へ変換する。辞書にないcategoryは従来どおり検証エラーとし、任意の未知categoryを`distinctive_feature`へ退避してはならない。
+
 小型Visionモデルが`clear`と同じ意味で返す既知の`visible`だけは、Pythonが`clear`へ正規化して警告を残す。また、visibility前後の空白、既知categoryの不要な補助列、又は説明末尾へ連結された許可visibilityは、categoryと行末visibilityが一意に確定できる場合だけ正規の四列へ修復する。`SUBJECT_FEATURE`が`category`と具体的な説明だけの三列で、末尾visibilityだけが欠落した場合も解釈は一意であるため、説明を保持したまま保守的な`partial`を補完し警告する。同じ内容でLLM再試行を消費しない。明示された未知visibility、空の説明又は一意に分離できないその他の列崩れを推測で変換せず、検証エラーとして再試行する。
 
 小型Visionモデルが`SUBJECT_FEATURE`を`category, visibility, description`の順で返した場合、第三列が既知visibilityで最終列が未知visibilityであることを条件に、Pythonは`category, description, visibility`へ決定論的に入れ替える。説明本文を破棄せず、一意に確定するこの列反転だけでLLMを再試行してはならない。
 
-`SUBJECT_POSE`は空値を許す必須レコードである。小型Visionモデルが空値の末尾TABを除去し、`SUBJECT_POSE`のレコード名だけ、又は空の余分な列だけを返した場合、Pythonは正規の空値へ変換して警告する。自然言語値の途中にTABが混入した場合、単一値レコードと`SCENE_ELEMENT`、`VISIBLE_TEXT`、`UNCERTAINTY`ではレコード名以降、`COMPOSITION`と`STYLE`では固定key以降、`HINT_ASSESSMENT`では固定alignment以降の非空断片を順序どおり読点で結合し、情報を削除せず警告する。小型Visionモデルが`SUBJECT_POSE`レコード自体を省略し、複数の`SUBJECT_FEATURE`直後に正規の`SCENE_SETTING`が現れた場合も、欠落位置は一意であり復元できる視覚情報も存在しないため、Pythonは空の`SUBJECT_POSE`を挿入して警告する。いずれもLLM再試行を消費しない。未知レコード、固定key又は列順の違反、及びその他の必須レコード欠落には適用しない。
+`SUBJECT_POSE`は空値を許す必須レコードである。小型Visionモデルが空値の末尾TABを除去し、`SUBJECT_POSE`のレコード名だけ、又は空の余分な列だけを返した場合、Pythonは正規の空値へ変換して警告する。自然言語値の途中にTABが混入した場合、単一値レコードと`SCENE_ELEMENT`、`VISIBLE_TEXT`、`UNCERTAINTY`ではレコード名以降、`COMPOSITION`と`STYLE`では固定key以降、`HINT_ASSESSMENT`では固定alignment以降の非空断片を順序どおり読点で結合し、情報を削除せず警告する。ただし`SUBJECT_FEATURE`以外のレコードへ、追加の最終TAB列として`clear`、`partial`、`uncertain`又は既知aliasの`visible`が付加された場合、その列は自然文ではなくvisibility列の漏出と一意に判定できるため、Pythonが除去して警告する。値が一列だけで値自身が`visible`の場合は除去しない。小型Visionモデルが`SUBJECT_POSE`レコード自体を省略し、複数の`SUBJECT_FEATURE`直後に正規の`SCENE_SETTING`が現れた場合も、欠落位置は一意であり復元できる視覚情報も存在しないため、Pythonは空の`SUBJECT_POSE`を挿入して警告する。いずれもLLM再試行を消費しない。未知レコード、固定key又は列順の違反、及びその他の必須レコード欠落には適用しない。
 
 値は単一物理行とし、TAB、NUL、参照タグ、Markdown見出し、コードフェンス又はプロトコル終端語を含めない。フィールド順、必須フィールド及び許可レコードは正規観測schemaとして共通に検証する。未知レコード、重複単一フィールド、不正visibility、不正category又は終端欠落は検証エラーとする。
 

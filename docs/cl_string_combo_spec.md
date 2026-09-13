@@ -6,6 +6,8 @@
 
 出力は`CL MV Prompt Planner (GGUF)`の`model_name_override`及び`visual_enrichment_profile_override`へ接続できる。Planner側では空文字列を既存COMBOへのフォールバックとして扱う。
 
+接続先COMBOの候補へ自動追従したい場合は、別ノード`CL Connected Combo`を使用する。本ノードは任意一覧をユーザーが明示する用途に限定し、配線又はサブグラフを走査しない。
+
 ## 2. 公開契約
 
 - ノード型名: `CLStringCombo`

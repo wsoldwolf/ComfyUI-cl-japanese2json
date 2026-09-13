@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "rough_sketch",
+  "display_name": "ラフスケッチ",
+  "description": "探索線を残した手描きラフスケッチ。",
+  "ui_order": 80,
+  "directives": [
+    "画風は、鉛筆と木炭による不均一な線、残された探索線、部分的な陰影及び紙の質感を持つ手描きラフスケッチとする。",
+    "輪郭を完全に清書せず、3DCG、ベクター線、写真実写又は滑らかなデジタル塗りを使用しない。"
+  ],
+  "system_instruction": "Replace only source sentences solely defining medium, line finish, painting method, or overall style. Keep every represented object and motion requirement."
+}

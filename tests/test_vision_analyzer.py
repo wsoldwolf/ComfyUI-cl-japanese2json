@@ -363,6 +363,119 @@ class VisionAnalyzerTests(unittest.TestCase):
         )
         self.assertGreaterEqual(len(warnings), 6)
 
+    def test_protocol_removes_visibility_column_leaked_into_non_feature_records(self):
+        leaked_lines = []
+        scalar_records = {
+            "OVERVIEW",
+            "PRIMARY_SUBJECT",
+            "HINT_ASSESSMENT",
+            "SUBJECT_POSE",
+            "SCENE_SETTING",
+            "SCENE_ELEMENT",
+            "LIGHTING",
+            "TIME_WEATHER",
+            "COMPOSITION",
+            "STYLE",
+            "VISIBLE_TEXT",
+            "UNCERTAINTY",
+        }
+        for line in VALID_RESPONSE.splitlines():
+            record = line.split("\t", 1)[0]
+            if record in scalar_records:
+                leaked_lines.append(line + "\tvisible")
+            else:
+                leaked_lines.append(line)
+
+        repaired, warnings = validation.parse_observation_response(
+            "\n".join(leaked_lines)
+        )
+        self.assertEqual(repaired.scene.setting, "深い森の神社参道")
+        self.assertEqual(repaired.scene.elements[0], "朱色の鳥居")
+        self.assertEqual(repaired.composition.shot_size, "全身ショット")
+        self.assertEqual(repaired.style.medium, "2Dイラスト")
+        self.assertTrue(
+            any("Removed unexpected trailing visibility marker" in value for value in warnings)
+        )
+
+        planned, _ = renderer.render_observation(
+            repaired,
+            profile="planner_brief",
+            subject_index=1,
+            picture_index=1,
+        )
+        self.assertNotIn("visible", planned)
+
+    def test_protocol_keeps_visible_when_it_is_the_only_scalar_value(self):
+        response = VALID_RESPONSE.replace(
+            "SCENE_SETTING\t深い森の神社参道",
+            "SCENE_SETTING\tvisible",
+        )
+        with self.assertRaisesRegex(Exception, "untranslated English prose"):
+            validation.parse_observation_response(response)
+
+    def test_protocol_rejects_english_descriptions_but_keeps_visible_text(self):
+        english_feature = VALID_RESPONSE.replace(
+            "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
+            "SUBJECT_FEATURE\thair\tlong pale blonde hair\tclear",
+        )
+        with self.assertRaisesRegex(Exception, "untranslated English prose"):
+            validation.parse_observation_response(english_feature)
+
+        english_scene = VALID_RESPONSE.replace(
+            "SCENE_ELEMENT\t朱色の鳥居",
+            "SCENE_ELEMENT\tfox ears, pointed and upright",
+        )
+        with self.assertRaisesRegex(Exception, "untranslated English prose"):
+            validation.parse_observation_response(english_scene)
+
+        readable_image_text = VALID_RESPONSE.replace(
+            "VISIBLE_TEXT\t神社の額に文字がある",
+            "VISIBLE_TEXT\tOPEN 24 HOURS",
+        )
+        observation, _ = validation.parse_observation_response(
+            readable_image_text
+        )
+        self.assertEqual(observation.visible_text, ("OPEN 24 HOURS",))
+
+    def test_protocol_normalizes_known_small_model_feature_aliases(self):
+        response = VALID_RESPONSE.replace(
+            "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
+            "SUBJECT_FEATURE\tstockings\t白い脚衣\tclear",
+        ).replace(
+            "SUBJECT_FEATURE\tface\t少し吊り目の顔\tclear",
+            "SUBJECT_FEATURE\tears\tfox ears、耳の先端に赤い花飾り付き\tclear",
+        )
+        observation, warnings = validation.parse_observation_response(response)
+        features = observation.primary_subject.features
+        self.assertEqual(features[0].category, "ears")
+        self.assertEqual(
+            features[0].description,
+            "狐耳、耳の先端に赤い花飾り付き",
+        )
+        self.assertEqual(features[1].category, "clothing")
+        self.assertEqual(features[1].description, "白い脚衣")
+        self.assertTrue(
+            any("Translated a known SUBJECT_FEATURE term" in item for item in warnings)
+        )
+        self.assertTrue(
+            any("category 'stockings' to 'clothing'" in item for item in warnings)
+        )
+
+    def test_protocol_keeps_rejecting_unknown_english_feature_prose(self):
+        response = VALID_RESPONSE.replace(
+            "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
+            "SUBJECT_FEATURE\tears\tfox ears, pointed and upright\tclear",
+        )
+        with self.assertRaisesRegex(Exception, "untranslated English prose"):
+            validation.parse_observation_response(response)
+
+        unknown_category = VALID_RESPONSE.replace(
+            "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
+            "SUBJECT_FEATURE\tweapon\t短い刀\tclear",
+        )
+        with self.assertRaisesRegex(Exception, "unknown category 'weapon'"):
+            validation.parse_observation_response(unknown_category)
+
     def test_legacy_upload_sentinel_is_not_used_as_subject_hint(self):
         normalized, warning = node_mod.normalize_subject_hint_compat("image")
         self.assertEqual(normalized, "")

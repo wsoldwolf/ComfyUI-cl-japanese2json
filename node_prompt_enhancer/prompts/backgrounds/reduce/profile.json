@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profile_id": "reduce",
+  "display_name": "削減",
+  "description": "自動生成された背景記述を一行へ圧縮する。",
+  "ui_order": 10,
+  "minimum_lines": 1,
+  "maximum_lines": 1,
+  "system_instruction": "Condense replaceable automatic background-only sentences into exactly one concise Japanese sentence. Preserve every concrete place, time, weather, lighting, color, continuity, and prohibition fact; user_prompt remains immutable authority."
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -122,6 +123,13 @@ class VocalPromptNodeTests(unittest.TestCase):
         )
         self.assertTrue(
             input_types["optional"]["include_lyrics_comments"][1]["default"]
+        )
+        self.assertEqual(
+            input_types["optional"]["cache_mode"][0],
+            ["reuse", "refresh", "disabled"],
+        )
+        self.assertEqual(
+            input_types["optional"]["cache_mode"][1]["default"], "reuse"
         )
         self.assertEqual(
             required["lyrics_neighbor_threshold"][1]["default"], 0.45
@@ -500,6 +508,128 @@ class VocalPromptNodeTests(unittest.TestCase):
         ]
         self.assertEqual(vocal.promote_resolved_lyrics_scenes(scenes, updated), 1)
         self.assertEqual([scene["state"] for scene in scenes], ["voiced"] * 3)
+
+    def test_targeted_retry_uses_pcm_end_for_trailing_unresolved_run(self) -> None:
+        lyrics = [
+            lyric(1, "opening anchor"),
+            lyric(2, "trailing lyric one"),
+            lyric(3, "trailing lyric two"),
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                lyrics[0], "resolved", 1.0, "opening anchor", 0, 1000,
+                match_method="primary",
+            ),
+            vocal.LyricAlignment(lyrics[1], "unresolved", 0.0, "", None, None),
+            vocal.LyricAlignment(lyrics[2], "unresolved", 0.0, "", None, None),
+        ]
+        backend = FakeBackend(
+            {
+                "segments": [{
+                    "text": "trailing lyric one trailing lyric two",
+                    "words": [
+                        {
+                            "word": "trailing lyric one",
+                            "start": 2.0,
+                            "end": 3.0,
+                        },
+                        {
+                            "word": "trailing lyric two",
+                            "start": 3.1,
+                            "end": 4.0,
+                        },
+                    ],
+                }],
+            }
+        )
+
+        updated, attempts, recovered, invalid = (
+            vocal.targeted_retry_unresolved_lyrics(
+                alignments,
+                list(range(5 * 16000)),
+                backend,
+                language="en",
+                device="cpu",
+                condition_on_previous_text=True,
+                match_threshold=0.55,
+                neighbor_match_threshold=0.45,
+            )
+        )
+
+        self.assertEqual((attempts, recovered, invalid), (1, 2, 0))
+        self.assertEqual(
+            [entry.status for entry in updated],
+            ["resolved", "resolved", "resolved"],
+        )
+        self.assertEqual(
+            [(entry.start_ms, entry.end_ms) for entry in updated[1:]],
+            [(2000, 3000), (3100, 4000)],
+        )
+        self.assertEqual(
+            [entry.match_method for entry in updated[1:]],
+            ["targeted", "targeted"],
+        )
+        self.assertEqual(len(backend.transcribe_calls), 1)
+        self.assertEqual(
+            backend.transcribe_calls[0]["initial_prompt"],
+            "opening anchor",
+        )
+
+    def test_guided_retry_accepts_trailing_run_with_acoustic_evidence(self) -> None:
+        lyrics = [
+            lyric(1, "opening anchor"),
+            lyric(2, "missing sung lyric"),
+        ]
+        alignments = [
+            vocal.LyricAlignment(
+                lyrics[0], "resolved", 1.0, "opening anchor", 0, 1000,
+                match_method="primary",
+            ),
+            vocal.LyricAlignment(lyrics[1], "unresolved", 0.0, "", None, None),
+        ]
+        backend = FakeBackend(
+            [
+                {
+                    "segments": [{
+                        "text": "indistinct phonetic vocal",
+                        "words": [{
+                            "word": "indistinct phonetic vocal",
+                            "start": 2.0,
+                            "end": 4.0,
+                        }],
+                    }],
+                },
+                {
+                    "segments": [{
+                        "text": "missing sung lyric",
+                        "words": [{
+                            "word": "missing sung lyric",
+                            "start": 2.1,
+                            "end": 3.9,
+                        }],
+                    }],
+                },
+            ]
+        )
+
+        updated, attempts, recovered, invalid = (
+            vocal.targeted_retry_unresolved_lyrics(
+                alignments,
+                list(range(5 * 16000)),
+                backend,
+                language="en",
+                device="cpu",
+                condition_on_previous_text=True,
+                match_threshold=0.55,
+                neighbor_match_threshold=0.45,
+            )
+        )
+
+        self.assertEqual((attempts, recovered, invalid), (1, 1, 0))
+        self.assertEqual(updated[1].status, "resolved")
+        self.assertEqual(updated[1].match_method, "targeted")
+        self.assertEqual((updated[1].start_ms, updated[1].end_ms), (2100, 3900))
+        self.assertEqual(len(backend.transcribe_calls), 2)
 
     def test_resolved_primary_lyric_promotes_vad_boundary_scene(self) -> None:
         scenes = [
@@ -1097,7 +1227,9 @@ class VocalPromptNodeTests(unittest.TestCase):
                 vocal, "analyze_vocal_audio", return_value=intervals
             ), patch.object(
                 vocal, "_prepare_whisper_audio", return_value="whisper-pcm"
-            ):
+            ), self.assertLogs(
+                "cl_vocal2promptseg", level="INFO"
+            ) as captured:
                 prompt, srt, segments_text, status = node.build_prompt_segments(
                     vocal_audio=audio,
                     lyrics_text="[Verse]\nこんにちは\n世界\n",
@@ -1139,9 +1271,14 @@ class VocalPromptNodeTests(unittest.TestCase):
             backend.transcribe_calls[0]["condition_on_previous_text"]
         )
         self.assertIn("self_test=passed", status)
+        self.assertIn("cache_mode=reuse", status)
         self.assertIn("srt_time_offset=100ms", status)
         self.assertIn("lyrics_comments=enabled", status)
         self.assertGreaterEqual(backend.clear_count, 1)
+        self.assertIn(
+            "\x1b[96m[cl_vocal2promptseg] success: self test passed:",
+            "\n".join(captured.output),
+        )
 
     def test_quality_diagnostics_log_vad_similarity_and_colored_self_test(self) -> None:
         lyrics = [lyric(1, "one"), lyric(2, "two")]
@@ -1179,8 +1316,7 @@ class VocalPromptNodeTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertIn("VAD interval duration stats", output)
         self.assertIn("all similarity min=0.8000 max=1.0000 avg=0.9000", output)
-        self.assertIn("\x1b[96m", output)
-        self.assertIn("self test passed", output)
+        self.assertNotIn("success:", output)
 
         with self.assertLogs("cl_vocal2promptseg", level="ERROR") as captured:
             failed = vocal.log_quality_diagnostics(
@@ -1202,8 +1338,86 @@ class VocalPromptNodeTests(unittest.TestCase):
                 outside_voiced_words=0,
             )
         self.assertFalse(failed["passed"])
-        self.assertIn("\x1b[91m", "\n".join(captured.output))
         self.assertIn("self test failed", "\n".join(captured.output))
+
+    def test_cache_mode_controls_comfy_execution_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "base.pt"
+            model.write_bytes(b"checkpoint")
+            with patch.object(
+                vocal, "resolve_whisper_model_name", return_value=model
+            ):
+                first = vocal.CLVocalToPromptSegments.IS_CHANGED(
+                    "base.pt", cache_mode="reuse"
+                )
+                second = vocal.CLVocalToPromptSegments.IS_CHANGED(
+                    "base.pt", cache_mode="reuse"
+                )
+        self.assertEqual(first, second)
+        self.assertEqual(first[0], vocal._NODE_CACHE_VERSION)
+        self.assertTrue(
+            math.isnan(
+                vocal.CLVocalToPromptSegments.IS_CHANGED(
+                    "base.pt", cache_mode="refresh"
+                )
+            )
+        )
+        self.assertTrue(
+            math.isnan(
+                vocal.CLVocalToPromptSegments.IS_CHANGED(
+                    "base.pt", cache_mode="disabled"
+                )
+            )
+        )
+
+    def test_failed_self_test_stops_without_returning_outputs(self) -> None:
+        whisper_result = {
+            "language": "ja",
+            "segments": [{
+                "text": "一致しない",
+                "words": [{
+                    "word": "一致しない", "start": 0.2, "end": 0.8,
+                }],
+            }],
+        }
+        node = vocal.CLVocalToPromptSegments()
+        node._backend = FakeBackend(whisper_result)
+        audio = {"waveform": FakeAudioShape(), "sample_rate": 1000}
+        intervals = [vocal.DetectedInterval("voiced", 0, 4000)]
+
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "base.pt"
+            model.write_bytes(b"checkpoint")
+            with patch.object(
+                vocal, "resolve_whisper_model_name", return_value=model
+            ), patch.object(
+                vocal, "_resolve_device", return_value="cpu"
+            ), patch.object(
+                vocal, "analyze_vocal_audio", return_value=intervals
+            ), patch.object(
+                vocal, "_prepare_whisper_audio", return_value="whisper-pcm"
+            ), self.assertRaisesRegex(
+                errors.VocalPromptError,
+                "self test failed.*no outputs were returned or cached",
+            ):
+                node.build_prompt_segments(
+                    vocal_audio=audio,
+                    lyrics_text="[Verse]\n期待する歌詞\n",
+                    whisper_model="base.pt",
+                    language="ja",
+                    device="auto",
+                    keep_whisper_loaded=False,
+                    max_scene_seconds=10,
+                    silence_threshold_dbfs=-45.0,
+                    analysis_window_ms=20,
+                    min_voiced_ms=120,
+                    min_silence_ms=300,
+                    voice_padding_ms=80,
+                    lyrics_match_threshold=0.8,
+                    lyrics_neighbor_threshold=0.45,
+                    lyrics_search_seconds=60.0,
+                    cache_mode="reuse",
+                )
 
     def test_neighbor_threshold_must_not_exceed_primary_threshold(self) -> None:
         node = vocal.CLVocalToPromptSegments()

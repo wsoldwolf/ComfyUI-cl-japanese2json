@@ -86,7 +86,28 @@ node_prompt_merger/
   node.py
   merger.py
   errors.py
+node_prompt_enhancer/
+  node.py
+  engine.py
+  conflicts.py
+  markdown.py
+  protocol.py
+  profiles.py
+  prompt_loader.py
+  debug_output.py
+  errors.py
+  prompts/
+    core/
+      enhancer_system_prompt.txt
+    styles/
+      <profile_id>/profile.json
+    backgrounds/
+      <profile_id>/profile.json
 node_string_combo/
+  node.py
+  parser.py
+  errors.py
+node_connected_combo/
   node.py
   parser.py
   errors.py

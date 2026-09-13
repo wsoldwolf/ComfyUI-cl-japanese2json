@@ -220,6 +220,7 @@ class CLMVPromptPlannerGGUF:
                     "STRING",
                     {
                         "forceInput": True,
+                        "connected_combo_source": "model_name",
                         "tooltip": "Optional external model identifier. A connected non-empty STRING overrides model_name; an empty STRING falls back to the model_name combo.",
                     },
                 ),
@@ -227,6 +228,7 @@ class CLMVPromptPlannerGGUF:
                     "STRING",
                     {
                         "forceInput": True,
+                        "connected_combo_source": "visual_enrichment_profile",
                         "tooltip": "Optional external profile identifier. A connected non-empty STRING overrides visual_enrichment_profile; an empty STRING falls back to the combo.",
                     },
                 ),

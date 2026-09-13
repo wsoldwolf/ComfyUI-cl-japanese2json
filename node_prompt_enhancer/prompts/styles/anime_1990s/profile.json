@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "anime_1990s",
+  "display_name": "1990年代アニメ",
+  "description": "手塗りセル画らしい陰影とフィルム感。",
+  "ui_order": 40,
+  "directives": [
+    "画風は、力強い輪郭線、手塗りセル画らしい限られた色数、深い影及び穏やかなフィルム粒子を持つ1990年代の2Dアニメ調とする。",
+    "デジタル的な過剰発光、ベクター線又は写真実写へ変化させない。",
+    "キャラクターの動きは、明確なキーポーズ、ポーズ・トゥ・ポーズ、止め絵、二コマ打ち又は三コマ打ち及び限定的な中割りによる手描きリミテッドアニメーションとする。",
+    "キャラクターを3DCGアニメーション、フルアニメーション、Live2D、ボーンリグ、パペットアニメーション、ベクタートゥイーン又は連続的なモーフィングのように滑らかに動かさない。"
+  ],
+  "system_instruction": "Replace only source sentences solely defining the visual medium, anime decade, or rendering finish. Preserve every semantic world and character constraint."
+}

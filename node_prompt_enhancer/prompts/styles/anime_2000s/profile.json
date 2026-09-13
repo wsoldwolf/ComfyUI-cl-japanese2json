@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "anime_2000s",
+  "display_name": "2000年代アニメ",
+  "description": "輪郭の強いデジタル移行期のセルアニメ表現。",
+  "ui_order": 30,
+  "directives": [
+    "画風は、明瞭な輪郭線、簡潔な色面、硬めのセル影及びデジタル移行期らしい発色を持つ2000年代の手描き2Dアニメ調とする。",
+    "過度な写真質感、PBR表現又は2020年代風の過密なエフェクトを使用しない。",
+    "キャラクターの動きは、明確なキーポーズ、ポーズ・トゥ・ポーズ、止め絵、二コマ打ち又は三コマ打ち及び限定的な中割りによる手描きリミテッドアニメーションとする。",
+    "キャラクターを3DCGアニメーション、フルアニメーション、Live2D、ボーンリグ、パペットアニメーション、ベクタートゥイーン又は連続的なモーフィングのように滑らかに動かさない。"
+  ],
+  "system_instruction": "Replace only source sentences solely prescribing visual medium, anime era, or overall rendering style. Keep subject identity, environment facts, lighting, camera, and action."
+}

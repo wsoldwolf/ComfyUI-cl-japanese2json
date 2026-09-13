@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "profile_id": "passthrough",
+  "display_name": "パススルー",
+  "description": "既存の画風指示を変更又は追加しない。",
+  "ui_order": 0,
+  "directives": [],
+  "system_instruction": "Style replacement is disabled. Classify every existing style sentence as keep."
+}

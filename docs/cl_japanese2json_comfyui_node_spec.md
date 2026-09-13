@@ -2,15 +2,15 @@
 
 ## 1. 目的
 
-本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー、グローバルプロンプト統合、ユーザー定義文字列コンボ及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/cl_audio_pad_spec.md`、`docs/cl_text_file_spec.md`、`docs/cl_vocal2promptseg_spec.md`、`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_mv_prompt_planner_song_bible_spec.md`、`docs/cl_prompt_merger_spec.md`、`docs/cl_string_combo_spec.md`及び`docs/cl_scene_limiter_spec.md`である。
+本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー、グローバルプロンプト統合、GGUFによる保護付きプロンプト拡張、ユーザー定義文字列コンボ、接続先追従コンボ及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/cl_audio_pad_spec.md`、`docs/cl_text_file_spec.md`、`docs/cl_vocal2promptseg_spec.md`、`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_mv_prompt_planner_song_bible_spec.md`、`docs/cl_prompt_merger_spec.md`、`docs/cl_prompt_enhancer_spec.md`、`docs/cl_string_combo_spec.md`、`docs/cl_connected_combo_spec.md`及び`docs/cl_scene_limiter_spec.md`である。
 
 本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、`prompt_prefix`へ格納するCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
 ## 2. 境界と独立性
 
 - パッケージ名: `ComfyUI-cl-japanese2json`
-- ノードクラス: `CLJapaneseToJSONGGUF`, `CLMVPromptPlannerGGUF`, `CLPromptMerger`, `CLStringCombo`, `CLSceneLimiter`, `CLAudioPad`, `CLAudioPadPair`, `CLVocalToPromptSegments`, `CLLoadTextFile`, `CLImageAnalyzerVisionGGUF`
-- 表示名: `CL Japanese to JSON (GGUF)`, `CL MV Prompt Planner (GGUF)`, `CL Prompt Merger (Reduced Markdown)`, `CL String Combo`, `CL Scene Limiter (Reduced Markdown)`, `CL Audio Pad (PCM Silence)`, `CL Audio Pad Pair (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`, `CL Image Analyzer (Vision GGUF)`
+- ノードクラス: `CLJapaneseToJSONGGUF`, `CLMVPromptPlannerGGUF`, `CLPromptMerger`, `CLPromptEnhancerGGUF`, `CLStringCombo`, `CLConnectedCombo`, `CLSceneLimiter`, `CLAudioPad`, `CLAudioPadPair`, `CLVocalToPromptSegments`, `CLLoadTextFile`, `CLImageAnalyzerVisionGGUF`
+- 表示名: `CL Japanese to JSON (GGUF)`, `CL MV Prompt Planner (GGUF)`, `CL Prompt Merger (Reduced Markdown)`, `CL Prompt Enhancer (GGUF)`, `CL String Combo`, `CL Connected Combo`, `CL Scene Limiter (Reduced Markdown)`, `CL Audio Pad (PCM Silence)`, `CL Audio Pad Pair (PCM Silence)`, `CL Vocal to Prompt Segments`, `CL Load Text File (Drag & Drop)`, `CL Image Analyzer (Vision GGUF)`
 - カテゴリ: `MiniMax H3/Prompt Tools`, `MiniMax H3/Audio Tools`
 - 出力ノードではない。
 - ComfyUI本体及び他の`custom_nodes`を変更しない。
@@ -24,7 +24,7 @@
 
 `CLLoadTextFile`はバックエンドからユーザー指定パスを開かない。ComfyUIブラウザ拡張が任意のローカル場所から選択又はD&Dされたファイルを読み、シリアライズ対象の非表示入力へ内容を格納する。`ComfyUI/input`へのコピー、アップロード及び本文プレビューを行わない。
 
-登録済み各ノードは、全検証を終えて出力tupleを返す直前だけ、`common/logging.py`を介してANSIシアン色の`[cl_*] success: ...`完了ログを記録する。LLM推論開始、部分Scene確定、ファイル復号前、音声検証前等の中間状態を成功としてはならない。例外終了では成功ログを出さない。`CL Vocal to Prompt Segments`はLyricsとSRTの完全一致を表す既存のシアン色`self test passed`をこの成功表示として維持し、不一致時の赤色`self test failed`をシアンで上書きしない。
+登録済み各ノードは、全検証を終えて出力tupleを返す直前だけ、`common/logging.py`を介してANSIシアン色の`[cl_*] success: ...`完了ログを記録する。LLM推論開始、部分Scene確定、ファイル復号前、音声検証前等の中間状態を成功としてはならない。例外終了では成功ログを出さない。`CL Vocal to Prompt Segments`はLyricsとSRTの完全一致時だけ、出力tupleを返す直前に共通形式のシアン色`[cl_vocal2promptseg] success: self test passed: ...`を表示する。不一致時は`self test failed`を記録して例外終了し、途中出力を返さず正常キャッシュへ登録しない。
 
 ## 3. ノード登録
 
@@ -35,7 +35,9 @@ NODE_CLASS_MAPPINGS = {
     "CLJapaneseToJSONGGUF": CLJapaneseToJSONGGUF,
     "CLMVPromptPlannerGGUF": CLMVPromptPlannerGGUF,
     "CLPromptMerger": CLPromptMerger,
+    "CLPromptEnhancerGGUF": CLPromptEnhancerGGUF,
     "CLStringCombo": CLStringCombo,
+    "CLConnectedCombo": CLConnectedCombo,
     "CLSceneLimiter": CLSceneLimiter,
     "CLAudioPad": CLAudioPad,
     "CLAudioPadPair": CLAudioPadPair,
@@ -47,7 +49,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CLJapaneseToJSONGGUF": "CL Japanese to JSON (GGUF)",
     "CLMVPromptPlannerGGUF": "CL MV Prompt Planner (GGUF)",
     "CLPromptMerger": "CL Prompt Merger (Reduced Markdown)",
+    "CLPromptEnhancerGGUF": "CL Prompt Enhancer (GGUF)",
     "CLStringCombo": "CL String Combo",
+    "CLConnectedCombo": "CL Connected Combo",
     "CLSceneLimiter": "CL Scene Limiter (Reduced Markdown)",
     "CLAudioPad": "CL Audio Pad (PCM Silence)",
     "CLAudioPadPair": "CL Audio Pad Pair (PCM Silence)",

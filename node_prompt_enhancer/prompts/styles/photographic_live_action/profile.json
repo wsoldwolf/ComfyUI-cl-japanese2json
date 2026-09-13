@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "photographic_live_action",
+  "display_name": "写真実写",
+  "description": "自然光と光学特性を重視する写真的実写表現。",
+  "ui_order": 70,
+  "directives": [
+    "画面は、自然な光学特性、現実的な材質、精細な表面質感及び抑制された色調を持つ高解像度の写真実写表現とする。",
+    "アニメ線画、セル影、絵画的な筆触、イラスト化又は人工的なCG質感を使用しない。"
+  ],
+  "system_instruction": "Replace only source sentences whose sole function is to define visual medium or rendering style. Preserve identity, scene, lighting direction, composition, and motion facts."
+}

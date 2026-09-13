@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "illustration",
+  "display_name": "イラスト",
+  "description": "構図と色彩を整理した高品質イラスト表現。",
+  "ui_order": 110,
+  "directives": [
+    "画風は、整理された構図、明瞭な形状、調和した色彩及び丁寧な陰影を持つ高品質な手描きイラスト表現とする。",
+    "写真実写、粗雑な未完成線、3DCG又は平板な素材貼り付け表現を使用しない。"
+  ],
+  "system_instruction": "Replace only source sentences whose sole purpose is visual medium or rendering finish. Keep every user-defined subject and world fact."
+}

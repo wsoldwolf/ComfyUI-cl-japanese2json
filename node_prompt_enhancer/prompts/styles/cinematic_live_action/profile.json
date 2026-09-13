@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "cinematic_live_action",
+  "display_name": "映画実写",
+  "description": "映画撮影に基づく実写映像表現。",
+  "ui_order": 60,
+  "directives": [
+    "映像は、現実的な材質、自然な皮膚と布の質感、映画用レンズによる被写界深度及び映画照明を持つ高品質な実写映画表現とする。",
+    "アニメ線画、セル影、イラスト化、ゲームCG又は過度に静止画的な写真表現を使用しない。"
+  ],
+  "system_instruction": "Replace only source lines solely defining rendering medium or illustration style. Preserve subject design facts while translating their materials into cinematic live action."
+}

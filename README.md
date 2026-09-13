@@ -4,7 +4,7 @@
 
 ボーカル音源と歌詞、参照画像から、歌詞に同期したシーン構成、人物動作、カメラワーク及びMiniMax H3用プロンプトを生成し、ミュージックビデオ制作を自動化できます。上の動画はQwen3 8Bを使用した自動MV生成のデモです。
 
-`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Image Analyzer (Vision GGUF)`はアップロード画像をローカルVision GGUFで観測し、検証済み観測から日本語概要、Subject、情景、PlannerBrief又はJSONをPythonで生成すると同時に、元画像をRef2V用`IMAGE`として返します。`CL Prompt Merger (Reduced Markdown)`は、二つのグローバル縮小Markdown断片をSubject及び保持規則ごとに機械的に統合し、追加Commonを先頭へ配置します。`CL String Combo`は、`|`区切りでユーザー定義した候補を動的コンボから選び、選択項目をSTRINGとして返します。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownから開始番号以降の連続したScene範囲をコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
+`CL Japanese to JSON (GGUF)` は、日本語の縮小版Markdownを英語へ翻訳し、MiniMax H3 Full-Reference形式のContex-Loop Plan JSONを生成する独立したComfyUIカスタムノードです。生成BGM、番号付き既存BGM Audioの再利用、及びContex-LoopのSource TimelineフルミックスとSource Vocalステムによる歌詞なしリップシンクを構造化して指定できます。`CL Image Analyzer (Vision GGUF)`はアップロード画像をローカルVision GGUFで観測し、検証済み観測から日本語概要、Subject、情景、PlannerBrief又はJSONをPythonで生成すると同時に、元画像をRef2V用`IMAGE`として返します。`CL Prompt Merger (Reduced Markdown)`は、二つのグローバル縮小Markdown断片をSubject及び保持規則ごとに機械的に統合し、追加Commonを先頭へ配置します。`CL Prompt Enhancer (GGUF)`は、ユーザー指示を別入力として保護しながら、外部画風プロファイルと選択した背景密度をグローバル縮小Markdownへ適用します。`CL String Combo`は、`|`区切りでユーザー定義した候補を動的コンボから選びます。`CL Connected Combo`は、配線先COMBOの候補をサブグラフ越しにも取得して自動追従します。`CL Vocal to Prompt Segments`はボーカルステムの有声・無音検出とWhisperの単語時刻をSuno Lyricsへ対応付け、編集可能な日本語プロンプト、SRT及び検証JSONを生成します。`CL MV Prompt Planner (GGUF)`は、その固定タイムラインと歌詞コメントへ人物動作、情景及び公式H3カメラワークを加えます。`CL Scene Limiter (Reduced Markdown)`は、動画生成テスト用に縮小Markdownから開始番号以降の連続したScene範囲をコメントごと抽出します。`CL Load Text File (Drag & Drop)`は任意のローカル場所からUTF-8テキストを選択又はD&DしてSTRINGへ渡します。`CL Audio Pad (PCM Silence)`は単一音源を、`CL Audio Pad Pair (PCM Silence)`は2本の整列済み音源をPlan非依存のH3安全フレーム尺又はUI指定尺へ無音補完します。
 
 LLMが担当するのは箇条書き本文の日本語からUS Englishへの翻訳だけです。ディレクティブ、参照タグ、日本語台詞、シーンとショットの構造、使用するSubject、話者ID、6セクションの順序、JSON構文はPythonが決定論的に処理します。LLMに最終JSONを生成させません。
 
@@ -55,7 +55,18 @@ node_prompt_merger/
   node.py
   merger.py
   errors.py
+node_prompt_enhancer/
+  node.py
+  engine.py
+  markdown.py
+  protocol.py
+  profiles.py
+  prompts/
 node_string_combo/
+  node.py
+  parser.py
+  errors.py
+node_connected_combo/
   node.py
   parser.py
   errors.py
@@ -128,7 +139,7 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 2. テキスト生成用GGUFを`ComfyUI/models/LLM/GGUF/`以下へ配置します。Visionモデルはモデル系列ごとのサブディレクトリを作り、本体GGUFと対応する`mmproj` GGUFを同じディレクトリへ配置します。サブディレクトリは再帰探索します。追加のComfyUI `LLM`モデルパスがあれば、そのルートと`GGUF`サブディレクトリも探索します。
 3. 使用環境向けの`llama-cpp-python`がComfyUIのPythonからimportできることを確認します。
 4. Vocal区間・SRT生成を使用する場合は、OpenAI WhisperをComfyUIのPython環境へユーザー自身で導入し、任意の公式`.pt`チェックポイントを`ComfyUI/models/whisper/`以下へ配置します。モデル名指定による暗黙ダウンロードは使用しません。
-5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Image Analyzer (Vision GGUF)`、`CL Prompt Merger (Reduced Markdown)`、`CL String Combo`、`CL Vocal to Prompt Segments`、`CL MV Prompt Planner (GGUF)`、`CL Scene Limiter (Reduced Markdown)`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
+5. ComfyUIを再起動し、`MiniMax H3/Prompt Tools`から`CL Japanese to JSON (GGUF)`、`CL Image Analyzer (Vision GGUF)`、`CL Prompt Merger (Reduced Markdown)`、`CL Prompt Enhancer (GGUF)`、`CL String Combo`、`CL Connected Combo`、`CL Vocal to Prompt Segments`、`CL MV Prompt Planner (GGUF)`、`CL Scene Limiter (Reduced Markdown)`又は`CL Load Text File (Drag & Drop)`、`MiniMax H3/Audio Tools`から必要に応じて`CL Audio Pad (PCM Silence)`又は`CL Audio Pad Pair (PCM Silence)`を追加します。
 
 モデルの自動ダウンロードは行いません。
 
@@ -152,6 +163,12 @@ python -c "import llama_cpp; print(llama_cpp.__version__); print(llama_cpp.llama
 `CL String Combo`を右クリックしてプロパティーパネルを開き、`string_list`へ`day|night|rain`のような候補一覧を入力します。ノード表面には一覧定義欄を置かず、`selected_value`の動的コンボだけを表示します。出力`selected_string`は通常のSTRING入力へ接続できます。
 
 項目内に`|`を含める場合は`||`と記述します。例えば`foo|bar||baz|qux`は`foo`、`bar|baz`、`qux`の3項目です。一覧を編集して現在の選択が残っていれば維持し、なくなった場合は先頭項目へ切り替えます。空項目、改行及び重複項目は停止エラーです。詳細は[CL String Combo仕様書](docs/cl_string_combo_spec.md)を参照してください。
+
+## 接続先COMBOへ自動追従する
+
+`CL Connected Combo`の`selected_string`を、COMBOから入力へ変換したソケット、Plannerの`model_name_override`又は`visual_enrichment_profile_override`、Prompt Enhancerの各overrideへ接続します。接続先の候補がノード上のコンボへ自動的に反映され、サブグラフの入力又は出力境界とRerouteを経由する配線も追跡します。一覧を手入力する欄と左側入力ソケットはありません。
+
+複数の接続先へ分岐した場合は全候補と順序が同じときだけ利用できます。候補が異なる接続、未接続又は列挙元が宣言されていない自由STRING入力では停止エラーとなり、名前から推測しません。詳細は[CL Connected Combo仕様書](docs/cl_connected_combo_spec.md)を参照してください。
 
 ## 画像をVision GGUFで観測する
 
@@ -594,11 +611,11 @@ CL Vocal to Prompt Segments.srt_text ──────> Preview/Save Text
 
 Scene番号コメントは`// シーン 1`から出力順に連番となり、コンパイラの`Scene N`エラーと入力箇所を照合するために使用できます。歌詞コメントには固定プレフィクス`// 歌詞: `、対応するSuno見出しには`// 楽曲セクション: [Chorus]`の形式が付くため、通常の編集案内と区別できます。これらのコメントはMVプランナーの構造入力として利用でき、`cl_japanese2json`へ直接渡した場合は翻訳前に除去されるため最終JSONには入りません。
 
-冒頭歌詞の認識脱落を減らすため、セクション見出しを除く先頭Lyricsを最大12行・160文字だけWhisperの最初の復号ヒントに使用します。全文を渡したり後続窓へ初期ヒントを反復したりはしません。最初の歌詞アンカーまでは60秒探索でき、解決後はコード側の20秒上限内で最大類似度の候補を確定します。このため、現在位置のグロウル誤認識を越えて約50秒後の反復Chorusへ飛ぶ問題を抑えつつ、長いイントロを探索できます。同じ歌詞が20秒内で反復する場合は直後のLyricsも一致する候補を選び、現在候補が次行へ明らかに強く一致する場合は次行用に残すため、Chorus中間の連鎖的欠落を防ぎます。20秒内で整列を再開できない場合は、入力中で一意な8文字以上の歌詞が0.8以上で一致し、後続歌詞の順序も確認できた場合だけ広域再同期します。通常閾値で未解決になった行は、前後の歌詞が確定して検索範囲を安全に限定できる場合だけ`lyrics_neighbor_threshold`で再照合します。それでも前後アンカーに挟まれた連続未解決区間が残る場合は、そのPCM範囲だけを最大12秒・2秒重複の短い窓へ分割してWhisperへ再送します。各窓の`initial_prompt`には、Whisperが現在歌詞を既出と誤解しないよう、その窓より前の歌詞だけを直前文脈として与えます。重複窓のwordを時刻で統合してから単調整列するため、グロウルを約30秒の一つの発話へ結合する現象を抑えます。全尺を再推論せず、回収できた実word timestampだけを`targeted`として採用します。整列方法を問わず、解決済みLyricsの実時刻と重なるVAD-silent Sceneは有声へ昇格します。これにより、Whisper wordの中点は有声区間内でも歌詞開始時刻だけが整数秒Scene境界の直前になる場合に、解決済み歌詞が無声Sceneへ割り当てられることを防ぎます。
+冒頭歌詞の認識脱落を減らすため、セクション見出しを除く先頭Lyricsを最大12行・160文字だけWhisperの最初の復号ヒントに使用します。全文を渡したり後続窓へ初期ヒントを反復したりはしません。最初の歌詞アンカーまでは60秒探索でき、解決後はコード側の20秒上限内で最大類似度の候補を確定します。このため、現在位置のグロウル誤認識を越えて約50秒後の反復Chorusへ飛ぶ問題を抑えつつ、長いイントロを探索できます。同じ歌詞が20秒内で反復する場合は直後のLyricsも一致する候補を選び、現在候補が次行へ明らかに強く一致する場合は次行用に残すため、Chorus中間の連鎖的欠落を防ぎます。20秒内で整列を再開できない場合は、入力中で一意な8文字以上の歌詞が0.8以上で一致し、後続歌詞の順序も確認できた場合だけ広域再同期します。通常閾値で未解決になった行は、前後の歌詞が確定して検索範囲を安全に限定できる場合だけ`lyrics_neighbor_threshold`で再照合します。それでも前後アンカーに挟まれた連続未解決区間、又は直前アンカーから実音声終端まで続く末尾未解決区間が残る場合は、そのPCM範囲だけを最大12秒・2秒重複の短い窓へ分割してWhisperへ再送します。第1復号ではその窓より前の歌詞だけを直前文脈として与えます。日本語歌唱の音を認識しながら漢字だけを誤った場合は、実タイムスタンプ付き第1復号との時間的重なりを必須条件として歌詞ヒント付き第2復号を使います。重複窓のwordを時刻で統合してから単調整列するため、グロウルを約30秒の一つの発話へ結合する現象や、長尺Whisperが音声途中で転写を終了する現象を局所的に回復できます。全尺を再推論せず、回収できた実word timestampだけを`targeted`として採用します。整列方法を問わず、解決済みLyricsの実時刻と重なるVAD-silent Sceneは有声へ昇格します。これにより、Whisper wordの中点は有声区間内でも歌詞開始時刻だけが整数秒Scene境界の直前になる場合に、解決済み歌詞が無声Sceneへ割り当てられることを防ぎます。
 
-完了時のコンソールにはVADの有声率と区間長の最小・最大・平均、Whisper wordの採用・除外数、Lyrics類似度の最小・最大・平均及び解決率が表示されます。入力Lyrics本文と出力SRT本文が件数・順序・文字列まで完全一致すればシアン色の`self test passed`、省略又は差異があれば赤色の`self test failed`を表示します。失敗表示はステム比較用の非致命診断で、ノードは解決できた出力を返します。
+完了時のコンソールにはVADの有声率と区間長の最小・最大・平均、Whisper wordの採用・除外数、Lyrics類似度の最小・最大・平均及び解決率が表示されます。入力Lyrics本文と出力SRT本文が件数・順序・文字列まで完全一致すれば、他のCLノードと同じシアン色の成功ログとして`self test passed`を表示します。省略又は差異があれば`self test failed`をERROR出力し、途中結果を返さず実行を停止します。失敗実行はComfyUIの正常出力キャッシュへ登録されません。
 
-生成されたテンプレートのSubject、画風、背景、人物動作及びカメラワークは用途に合わせて編集してください。歌唱の母音伸長、コーラス、重唱、リバーブ及び分離残留によりWhisper時刻はずれることがあるため、SRTは行単位の初期同期データとして確認してください。未解決LyricsはコメントとSRTへ出力されませんが、`segments_json`に`unresolved`として残り、最良のWhisper候補と候補時刻も診断用に確認できます。
+生成されたテンプレートのSubject、画風、背景、人物動作及びカメラワークは用途に合わせて編集してください。歌唱の母音伸長、コーラス、重唱、リバーブ及び分離残留によりWhisper時刻はずれる可能性があるため、SRTは行単位の初期同期データとして確認してください。未解決Lyricsが残る実行はself-testで停止するため、欠落したコメント、SRT又は`segments_json`が後段へ渡ることはありません。
 
 Lyrics整列によって短いVAD-silent区間が有声へ昇格した場合は、隣接する同一状態の区間を再結合してSceneを均等分割します。後続へ映像コンテキストを渡す1秒Sceneは生成せず、標準の22フレーム継続コンテキストで必要な映像を確保できる2秒以上へ安全側に調整します。総尺及びSource Timelineは変更しません。
 
@@ -670,6 +687,23 @@ Original PlanningBrief ──> original_markdown ┐
                                               ├─> CL Prompt Merger ──> merged_markdown
 Vision等の追加Brief ─────> merge_markdown ───┘
 ```
+
+## 画風と背景密度をプロファイルで拡張
+
+`CL Prompt Enhancer (GGUF)`は通常、Prompt Mergerの`merged_markdown`を`source_markdown`へ受け、選択した画風と背景密度を適用して`enhanced_markdown`を返します。LLMに完成Markdownを自由生成させず、source側Commonの`keep/style/background`分類と背景補足文だけを行指向protocolで要求します。Subject、保持分析、Markdown構造及び画風文の挿入はPythonが決定します。
+
+`style_profile`には2020～1980年代アニメ、映画実写、写真実写、ラフスケッチ、荒々しいスケッチ、水彩画、イラスト、マスターピース及びパススルーを用意しています。アニメ年代プロファイルは、キャラクターをキーポーズ、二コマ又は三コマ打ち及び限定的な中割りによる手描きリミテッドアニメーションへ拘束し、3DCGアニメ、フルアニメ、Live2D、ボーンリグ、パペット、トゥイーン及び連続モーフィング風の動きを除外します。カメラ移動自体はこのコマ打ち拘束の対象外です。`background_detail`は`reduce`、`low`、`medium`、`high`、`ultra`及び`passthrough`から選択できます。両者は`node_prompt_enhancer/prompts/`以下のmanifestから自動検出されるため、プロファイル追加時にPythonへ個別条件を増やす必要はありません。
+
+人間が最後に指定した内容は、Prompt Mergerへ混ぜず任意入力`user_prompt`へ接続できます。この入力はLLMの分類対象にならず、source拡張後に機械的にマージされます。`reduce`を選んでもuser側の背景、時間帯、照明及び禁止事項は削除しません。user側が夜間、日中、明け方又は夕方のいずれか一つを明示した場合は、その時間帯を自動背景に対する権威値としてLLMへ構造化して渡します。それでもVision等のsource又はLLM背景補足に太陽、青空、日中、月光等の明白な反対条件が残った場合は、人物・動作・カメラ・音響を含まない自動背景行だけをPythonで除外し、件数をWARNINGと`enhancement_report`へ記録します。Subjectと保持分析は既存Prompt Mergerの規則で統合されるため表示形式は正規化され得ますが、ユーザー本文が欠落した場合は停止します。
+
+```text
+CL Prompt Merger.merged_markdown ──> CL Prompt Enhancer.source_markdown ┐
+ユーザー最終指示 ──────────────────> CL Prompt Enhancer.user_prompt     ├─> enhanced_markdown ─> CL MV Prompt Planner.planning_markdown
+CL String Combo.selected_string ───> style_profile_override             │
+CL String Combo.selected_string ───> background_detail_override ────────┘
+```
+
+画風と背景をともに`passthrough`へするとGGUFをロードせず、検証とユーザー指示の決定的マージだけを行います。`keep_model_loaded=False`が既定で、後段のH3実行前にGGUFを解放します。詳細は[CL Prompt Enhancer仕様書](docs/cl_prompt_enhancer_spec.md)を参照してください。
 
 ## テスト生成用にScene数を制限
 

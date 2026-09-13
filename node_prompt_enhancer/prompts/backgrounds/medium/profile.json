@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profile_id": "medium",
+  "display_name": "中",
+  "description": "背景へ適度な奥行き、照明、空気感を加える。",
+  "ui_order": 30,
+  "minimum_lines": 2,
+  "maximum_lines": 4,
+  "system_instruction": "Write two to four Japanese background sentences that establish foreground, middle distance, far distance, lighting, and restrained atmospheric motion. Elaborate supplied facts without changing them or adding plot events."
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "anime_1980s",
+  "display_name": "1980年代アニメ",
+  "description": "太い線と手塗りセルのレトロな映画的表現。",
+  "ui_order": 50,
+  "directives": [
+    "画風は、太く表情的な輪郭線、手塗りセルの限定色、強い明暗差及びアナログフィルムの質感を持つ1980年代の2Dアニメ調とする。",
+    "現代的なデジタルグラデーション、PBR又は写真実写を使用しない。",
+    "キャラクターの動きは、明確なキーポーズ、ポーズ・トゥ・ポーズ、止め絵、二コマ打ち又は三コマ打ち及び限定的な中割りによる手描きリミテッドアニメーションとする。",
+    "キャラクターを3DCGアニメーション、フルアニメーション、Live2D、ボーンリグ、パペットアニメーション、ベクタートゥイーン又は連続的なモーフィングのように滑らかに動かさない。"
+  ],
+  "system_instruction": "Replace only source sentences exclusively prescribing visual medium, anime decade, or rendering technique. Keep all identity, setting, action, and camera facts."
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "aggressive_sketch",
+  "display_name": "荒々しいスケッチ",
+  "description": "激しい筆圧と多数の探索線による荒々しい描写。",
+  "ui_order": 90,
+  "directives": [
+    "画風は、激しい筆圧、途切れた木炭線、何重にも交差する探索線、擦れ及び大胆な黒い面を持つ荒々しい手描きスケッチとする。",
+    "主線を過度に整理せず、清潔なアニメ線画、ベクター描画、3DCG又は写真実写を使用しない。"
+  ],
+  "system_instruction": "Replace only source lines solely devoted to visual medium, line quality, or rendering finish. Preserve subject, setting, lighting, action, and camera semantics."
+}

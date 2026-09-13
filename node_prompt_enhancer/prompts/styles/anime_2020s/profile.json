@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "anime_2020s",
+  "display_name": "2020年代アニメ",
+  "description": "現代的で精密な手描き2Dセルアニメ表現。",
+  "ui_order": 10,
+  "directives": [
+    "画風は、精密で整理された線画、鮮やかな色彩、明確なセル影及び繊細な光の処理を持つ2020年代の高品質な手描き2Dアニメ調とする。",
+    "人物と背景は現代的な作画密度を保ち、写真実写へ変化させない。",
+    "キャラクターの動きは、明確なキーポーズ、ポーズ・トゥ・ポーズ、止め絵、二コマ打ち又は三コマ打ち及び限定的な中割りによる手描きリミテッドアニメーションとする。",
+    "キャラクターを3DCGアニメーション、フルアニメーション、Live2D、ボーンリグ、パペットアニメーション、ベクタートゥイーン又は連続的なモーフィングのように滑らかに動かさない。"
+  ],
+  "system_instruction": "Replace only source sentences whose sole purpose is to prescribe a visual medium, anime era, rendering technique, or overall drawing style. Preserve character, world, lighting, motion, camera, anatomy, and continuity facts."
+}

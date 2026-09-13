@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profile_id": "low",
+  "display_name": "少",
+  "description": "背景を一から二行で簡潔に補足する。",
+  "ui_order": 20,
+  "minimum_lines": 1,
+  "maximum_lines": 2,
+  "system_instruction": "Write one or two concise Japanese background sentences covering only the essential setting and lighting. Preserve all supplied facts and do not invent a new location, time, weather, or story event."
+}

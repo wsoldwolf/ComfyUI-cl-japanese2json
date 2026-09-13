@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "watercolor",
+  "display_name": "水彩画",
+  "description": "透明水彩のにじみと紙の質感。",
+  "ui_order": 100,
+  "directives": [
+    "画風は、透明水彩の淡い色層、湿った紙上のにじみ、柔らかな色境界及び紙目を持つ手描き水彩画とする。",
+    "不透明なデジタル厚塗り、硬いセル影、3DCG又は写真実写を使用しない。"
+  ],
+  "system_instruction": "Replace only source sentences solely prescribing medium, paint behavior, or overall rendering style. Preserve all concrete visual facts and motion."
+}

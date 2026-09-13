@@ -41,6 +41,8 @@
 
 2個のoverrideは接続専用の`forceInput`ソケットとする。前後空白を除いた外部文字列が空でなければ対応するCOMBOより優先し、未接続又は空文字列ならCOMBOへフォールバックする。`model_name_override`はモデルCOMBOに表示される、モデルルートからの相対検出IDと一致させる。外部STRINGノードとの接続性のため、前後空白、先頭の`/`または`\\`及びWindows形式の`\\`区切りは、ファイルシステムパスとして解釈せず相対検出IDの`/`区切りへ正規化する。正規化後に存在しない値なら停止エラーとする。`visual_enrichment_profile_override`はインストール済みプロファイルIDとの完全一致を要求し、未知値なら停止エラーとする。実効値は8B警告判定、モデルロード、プロファイルロード、デバッグmanifest、status及びComfyUIキャッシュ判定で一貫して使用する。
 
+`model_name_override`は`connected_combo_source=model_name`、`visual_enrichment_profile_override`は`connected_combo_source=visual_enrichment_profile`を入力メタデータとして公開する。これにより`CL Connected Combo`は通常配線又はサブグラフ境界を越えても、自由STRING overrideに対応する内部COMBOの現在候補を明示的に取得できる。値の採用と最終検証は従来どおりPlannerが行う。
+
 既存のCOMBOをSTRINGソケットへ置換してはならない。overrideソケットはoptional入力の末尾へ追加し、既存ワークフローの`widgets_values`位置と手動選択UIを維持する。
 
 `chat_format=auto`では`llama-cpp-python`へchat formatを明示せずGGUF metadata/templateへ委ねる。Qwen系、Gemma系及び将来の互換モデルを同じモデル選択欄で切り替えられる。明示値はメタデータ不備のGGUF用である。
