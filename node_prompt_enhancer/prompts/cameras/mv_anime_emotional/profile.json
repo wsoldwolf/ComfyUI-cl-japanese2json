@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "mv_anime_emotional",
+  "display_name": "MVアニメ・エモーショナル",
+  "description": "人物の感情と全身演技を立体的に見せる映画的MV撮影。",
+  "ui_order": 45,
+  "directives": [
+    "カメラ移動は映画的かつ滑らかにし、主要人物の感情、顔、身体演技及び周囲との接触を同時に読み取れるよう追跡する。",
+    "カメラは正面の固定構図を反復せず、低い斜め前方からの接近、環境構造物を前景に使う横移動、人物の側面を通る広いアーク移動、背後から肩越しに奥行きを見せる追従、足元から顔へ上昇する垂直移動及び遠景側から手前へ後退する構図をSceneごとに使い分ける。",
+    "移動カメラは開始視点、被写体の周囲を通る軌道及び終了視点を明瞭に変化させる。周囲の構造物、樹木、装飾物又は舞う粒子を前景として横切らせ、主要人物、中景及び遠景の間に強い視差と奥行きを作る。",
+    "カメラの角度が変化しても主要人物を同一人物として維持し、遮蔽、後ろ姿及びScene境界を外観の再設計として扱わない。"
+  ],
+  "system_instruction": "Camera directives are deterministic profile output. Do not classify or rewrite source camera instructions."
+}

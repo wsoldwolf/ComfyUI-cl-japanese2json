@@ -34,13 +34,23 @@ def verdict(kwargs, rejected=None):
 
 
 class SemanticProtocolTests(unittest.TestCase):
-    def test_new_node_defaults_preserve_widget_order_and_safe_review_modes(self):
+    def test_new_node_defaults_preserve_safe_review_modes(self):
         compiler_node = module("node_japanese_to_json.node").CLJapaneseToJSONGGUF
         enhancer_node = module("node_prompt_enhancer.node").CLPromptEnhancerGGUF
-        for node, default in ((compiler_node, "global"), (enhancer_node, False)):
-            options = node.INPUT_TYPES()["optional"]
-            self.assertEqual(list(options)[-1], "semantic_guard")
-            self.assertEqual(options["semantic_guard"][1]["default"], default)
+        compiler_options = compiler_node.INPUT_TYPES()["optional"]
+        self.assertEqual(list(compiler_options)[-1], "semantic_guard")
+        self.assertEqual(compiler_options["semantic_guard"][1]["default"], "global")
+        enhancer_options = enhancer_node.INPUT_TYPES()["optional"]
+        self.assertEqual(enhancer_options["semantic_guard"][1]["default"], False)
+        self.assertEqual(
+            list(enhancer_options)[-4:],
+            [
+                "motion_profile",
+                "camera_profile",
+                "motion_profile_override",
+                "camera_profile_override",
+            ],
+        )
 
     def test_complete_ordered_verdicts(self):
         self.assertEqual(review.parse_review("CHECK\tR1\tPASS\nCHECK\tR2\tFAIL\tChanged the owner", ("R1", "R2")),

@@ -1,4 +1,4 @@
-"""Discover external style and background profiles for Prompt Enhancer."""
+"""Discover external Prompt Enhancer profiles."""
 
 from __future__ import annotations
 
@@ -16,10 +16,14 @@ from .errors import EnhancerProfileError
 PROFILE_SCHEMA_VERSION = 1
 DEFAULT_STYLE_PROFILE_ID = "passthrough"
 DEFAULT_BACKGROUND_PROFILE_ID = "passthrough"
+DEFAULT_MOTION_PROFILE_ID = "passthrough"
+DEFAULT_CAMERA_PROFILE_ID = "passthrough"
 _PROFILE_ID_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
 _PROMPT_ROOT = Path(__file__).resolve().parent / "prompts"
 _STYLE_ROOT = _PROMPT_ROOT / "styles"
 _BACKGROUND_ROOT = _PROMPT_ROOT / "backgrounds"
+_MOTION_ROOT = _PROMPT_ROOT / "motions"
+_CAMERA_ROOT = _PROMPT_ROOT / "cameras"
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,34 @@ class BackgroundProfile:
         return self.profile_id == DEFAULT_BACKGROUND_PROFILE_ID
 
 
+@dataclass(frozen=True)
+class MotionProfile:
+    profile_id: str
+    display_name: str
+    description: str
+    ui_order: int
+    directives: tuple[str, ...]
+    system_instruction: str
+
+    @property
+    def passthrough(self) -> bool:
+        return self.profile_id == DEFAULT_MOTION_PROFILE_ID
+
+
+@dataclass(frozen=True)
+class CameraProfile:
+    profile_id: str
+    display_name: str
+    description: str
+    ui_order: int
+    directives: tuple[str, ...]
+    system_instruction: str
+
+    @property
+    def passthrough(self) -> bool:
+        return self.profile_id == DEFAULT_CAMERA_PROFILE_ID
+
+
 def _profile_directories(root: Path, kind: str) -> tuple[Path, ...]:
     try:
         directories = tuple(
@@ -78,7 +110,12 @@ def _fingerprint(path: Path) -> tuple[object, ...]:
 
 def enhancer_profiles_fingerprint() -> tuple[object, ...]:
     values: list[object] = []
-    for kind, root in (("style", _STYLE_ROOT), ("background", _BACKGROUND_ROOT)):
+    for kind, root in (
+        ("style", _STYLE_ROOT),
+        ("background", _BACKGROUND_ROOT),
+        ("motion", _MOTION_ROOT),
+        ("camera", _CAMERA_ROOT),
+    ):
         for directory in sorted(_profile_directories(root, kind), key=lambda item: item.name):
             path = directory / "profile.json"
             values.extend((kind, directory.name, *_fingerprint(path)))
@@ -129,6 +166,83 @@ def _validate_directive(value: Any, context: str) -> str:
         raise EnhancerProfileError(f"{context} must be one unprefixed Common bullet")
     if any(token in result for token in ("「", "」", "<d>", "</d>")):
         raise EnhancerProfileError(f"{context} cannot contain direct speech")
+    return result
+
+
+def _load_fixed_directive_profile(
+    directory: Path,
+    *,
+    kind: str,
+    default_profile_id: str,
+    profile_type: type[MotionProfile] | type[CameraProfile],
+) -> MotionProfile | CameraProfile:
+    context = f"{kind} profile {directory.name!r}"
+    data = _read_manifest(directory / "profile.json", kind)
+    expected = {
+        "schema_version",
+        "profile_id",
+        "display_name",
+        "description",
+        "ui_order",
+        "directives",
+        "system_instruction",
+    }
+    if set(data) != expected:
+        raise EnhancerProfileError(
+            f"{context} fields are invalid; missing={sorted(expected - set(data))}, "
+            f"extra={sorted(set(data) - expected)}"
+        )
+    profile_id, display_name, description, ui_order, instruction = _common_fields(
+        data, directory, context
+    )
+    raw_directives = data["directives"]
+    if not isinstance(raw_directives, list):
+        raise EnhancerProfileError(f"{context}.directives must be a list")
+    directives = tuple(
+        _validate_directive(value, f"{context}.directives[{index}]")
+        for index, value in enumerate(raw_directives)
+    )
+    if profile_id == default_profile_id and directives:
+        raise EnhancerProfileError(f"passthrough {kind} profile cannot add directives")
+    if profile_id != default_profile_id and not directives:
+        raise EnhancerProfileError(f"{context} must add at least one directive")
+    return profile_type(
+        profile_id=profile_id,
+        display_name=display_name,
+        description=description,
+        ui_order=ui_order,
+        directives=directives,
+        system_instruction=instruction,
+    )
+
+
+@lru_cache(maxsize=32)
+def _load_motion_cached(
+    directory_text: str, fingerprint: tuple[object, ...]
+) -> MotionProfile:
+    del fingerprint
+    result = _load_fixed_directive_profile(
+        Path(directory_text),
+        kind="motion",
+        default_profile_id=DEFAULT_MOTION_PROFILE_ID,
+        profile_type=MotionProfile,
+    )
+    assert isinstance(result, MotionProfile)
+    return result
+
+
+@lru_cache(maxsize=32)
+def _load_camera_cached(
+    directory_text: str, fingerprint: tuple[object, ...]
+) -> CameraProfile:
+    del fingerprint
+    result = _load_fixed_directive_profile(
+        Path(directory_text),
+        kind="camera",
+        default_profile_id=DEFAULT_CAMERA_PROFILE_ID,
+        profile_type=CameraProfile,
+    )
+    assert isinstance(result, CameraProfile)
     return result
 
 
@@ -247,6 +361,26 @@ def load_background_profile(profile_id: str) -> BackgroundProfile:
     return _load_background_cached(str(directory), _fingerprint(path))
 
 
+def load_motion_profile(profile_id: str) -> MotionProfile:
+    if not isinstance(profile_id, str) or not _PROFILE_ID_RE.fullmatch(profile_id):
+        raise EnhancerProfileError(f"Unknown motion_profile {profile_id!r}")
+    directory = _MOTION_ROOT / profile_id
+    path = directory / "profile.json"
+    if not directory.is_dir() or not path.is_file():
+        raise EnhancerProfileError(f"Unknown motion_profile {profile_id!r}")
+    return _load_motion_cached(str(directory), _fingerprint(path))
+
+
+def load_camera_profile(profile_id: str) -> CameraProfile:
+    if not isinstance(profile_id, str) or not _PROFILE_ID_RE.fullmatch(profile_id):
+        raise EnhancerProfileError(f"Unknown camera_profile {profile_id!r}")
+    directory = _CAMERA_ROOT / profile_id
+    path = directory / "profile.json"
+    if not directory.is_dir() or not path.is_file():
+        raise EnhancerProfileError(f"Unknown camera_profile {profile_id!r}")
+    return _load_camera_cached(str(directory), _fingerprint(path))
+
+
 def discover_style_profile_ids() -> list[str]:
     profiles = [load_style_profile(path.name) for path in _profile_directories(_STYLE_ROOT, "style")]
     profiles.sort(key=lambda item: (item.ui_order, item.profile_id))
@@ -265,4 +399,28 @@ def discover_background_profile_ids() -> list[str]:
     result = [item.profile_id for item in profiles]
     if DEFAULT_BACKGROUND_PROFILE_ID not in result:
         raise EnhancerProfileError("The passthrough background profile is missing")
+    return result
+
+
+def discover_motion_profile_ids() -> list[str]:
+    profiles = [
+        load_motion_profile(path.name)
+        for path in _profile_directories(_MOTION_ROOT, "motion")
+    ]
+    profiles.sort(key=lambda item: (item.ui_order, item.profile_id))
+    result = [item.profile_id for item in profiles]
+    if DEFAULT_MOTION_PROFILE_ID not in result:
+        raise EnhancerProfileError("The passthrough motion profile is missing")
+    return result
+
+
+def discover_camera_profile_ids() -> list[str]:
+    profiles = [
+        load_camera_profile(path.name)
+        for path in _profile_directories(_CAMERA_ROOT, "camera")
+    ]
+    profiles.sort(key=lambda item: (item.ui_order, item.profile_id))
+    result = [item.profile_id for item in profiles]
+    if DEFAULT_CAMERA_PROFILE_ID not in result:
+        raise EnhancerProfileError("The passthrough camera profile is missing")
     return result

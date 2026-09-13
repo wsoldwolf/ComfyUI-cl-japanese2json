@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "stable",
+  "display_name": "安定",
+  "description": "被写体を読みやすく保つ抑制されたカメラ。",
+  "ui_order": 10,
+  "directives": [
+    "カメラは主要被写体の動作を読み取れる安定した構図を優先し、固定、緩やかな前進又は後退及び短い横移動をSceneごとに使い分ける。",
+    "カメラ移動を行う場合は開始視点と終了視点を明確にし、理由のない揺れ、急激な回転又は被写体を長時間見失う移動を行わない。"
+  ],
+  "system_instruction": "Camera directives are deterministic profile output. Do not classify or rewrite source camera instructions."
+}

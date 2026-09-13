@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "subtle",
+  "display_name": "控えめ",
+  "description": "静かな場面向けの小さく意図的な身体動作。",
+  "ui_order": 10,
+  "directives": [
+    "各Sceneの主要人物は完全な静止を続けず、呼吸に伴う重心移動、視線に連動した頭部の向き、手指又は肩の小さな動作から、その場面に適した意図的な動作を少なくとも一つ示す。",
+    "小さな動作にも開始姿勢、動作の変化及び落ち着く姿勢を設け、無目的な揺れ、反復する身振り又は身体全体の浮遊で動作を代用しない。"
+  ],
+  "system_instruction": "Motion directives are deterministic profile output. Do not classify or rewrite source motion."
+}

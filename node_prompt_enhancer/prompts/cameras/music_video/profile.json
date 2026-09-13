@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "music_video",
+  "display_name": "MV",
+  "description": "楽曲展開に合わせて撮影強度と軌道を変化させる。",
+  "ui_order": 50,
+  "directives": [
+    "カメラは楽曲のセクション、拍の強さ及び歌詞の焦点に合わせて、接近、後退、横移動、追従、垂直移動及び被写体周囲のアーク移動をSceneごとに使い分ける。",
+    "静かな区間では緩やかな移動と長めの構図保持を用い、強い区間では大きな移動量、明瞭な回り込み及び異なるShotサイズへの移行で強度差を作る。",
+    "連続するSceneでは開始角度、軌道、終了角度、カメラ高及び移動方向のうち複数を変化させ、正面からの接近又は固定構図だけを反復しない。",
+    "前景要素と遠景を利用した視差を作りながら主要人物の顔、リップシンク及び身体動作を追跡し、カメラ運動だけで人物動作を代用しない。"
+  ],
+  "system_instruction": "Camera directives are deterministic profile output. Do not classify or rewrite source camera instructions."
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "profile_id": "orbit_subject",
+  "display_name": "被写体周回",
+  "description": "主要被写体の周囲を回り込むアーク撮影。",
+  "ui_order": 40,
+  "directives": [
+    "カメラは主要被写体を中心に、斜め前方から側面を通って斜め後方へ、又はその逆へ移動する広い半円状のアーク移動を重点的に使用する。",
+    "周回中にカメラの高さと距離も変化させ、開始視点と終了視点で背景の見え方、被写体の向き及び前景との視差を明確に変える。",
+    "周回撮影でも主要被写体の顔又は主動作を追跡し、同じ場所で水平に回転するだけのパン、単なる背景回転又は外観の再設計として表現しない。"
+  ],
+  "system_instruction": "Camera directives are deterministic profile output. Do not classify or rewrite source camera instructions."
+}

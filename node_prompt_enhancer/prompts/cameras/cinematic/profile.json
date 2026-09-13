@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "profile_id": "cinematic",
+  "display_name": "映画的",
+  "description": "奥行きと視差を重視した映画的な撮影。",
+  "ui_order": 20,
+  "directives": [
+    "カメラは正面の固定構図を反復せず、低い斜め前方、高い側面、背後からの肩越し及び奥行き方向の接近又は後退をSceneごとに使い分ける。",
+    "移動カメラは開始視点、主要被写体の周囲又は側面を通る軌道及び終了視点を明瞭に変化させ、単なる拡大縮小で移動を代用しない。",
+    "前景の環境要素を画面横断させ、主要被写体、中景及び遠景の間に視差を作る。ただし前景で顔と主要動作を長時間遮蔽しない。"
+  ],
+  "system_instruction": "Camera directives are deterministic profile output. Do not classify or rewrite source camera instructions."
+}

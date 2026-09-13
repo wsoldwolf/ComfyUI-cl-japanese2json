@@ -2,14 +2,14 @@
 
 ## 1. 目的
 
-`CL Prompt Enhancer (GGUF)`は、`CL Prompt Merger (Reduced Markdown)`等が出力したグローバル縮小Markdownへ、選択式の画風と背景密度を適用するComfyUIノードである。
+`CL Prompt Enhancer (GGUF)`は、`CL Prompt Merger (Reduced Markdown)`等が出力したグローバル縮小Markdownへ、選択式の画風、背景密度、人物動作及びカメラワークを適用するComfyUIノードである。
 
 本ノードは完成MarkdownをLLMへ自由生成させない。Pythonが入力構造、Subject、保持分析、Commonの順序及び最終組み立てを所有し、LLMは次の二つだけを担当する。
 
 - source側Commonバレットを`keep`、`style`、`background`又は`anchor`へ分類する。
 - 選択した背景密度の範囲内で、既存事実を補足する日本語Common文を生成する。
 
-画風文は外部プロファイルから決定的に挿入する。別入力`user_prompt`はLLMへ変更対象として渡さず、source側の拡張後に既存Prompt Mergerで機械的に統合する。これにより、ユーザーが明示したSubject、保持条件、世界設定及び禁止事項を保護しながら、プリセットだけを切り替えられるようにする。
+画風、人物動作及びカメラワークの文は外部プロファイルから決定的に挿入する。別入力`user_prompt`はLLMへ変更対象として渡さず、source側の拡張後に既存Prompt Mergerで機械的に統合する。これにより、ユーザーが明示したSubject、保持条件、世界設定及び禁止事項を保護しながら、プリセットだけを切り替えられるようにする。
 
 ## 2. ノード契約
 
@@ -55,10 +55,16 @@
 | `background_detail_override` | STRING socket | 空 | 非空なら`background_detail`を上書き |
 | `save_debug_output` | BOOLEAN | `False` | ComfyUI output以下へ診断bundleを保存 |
 | `semantic_guard` | BOOLEAN | `False` | 実験的な情景の意味監査。8Bで誤検出があるため既定OFF。原文anchor保持は常時有効 |
+| `motion_profile` | COMBO | `passthrough` | 外部人物動作プロファイル |
+| `camera_profile` | COMBO | `passthrough` | 外部カメラワークプロファイル |
+| `motion_profile_override` | STRING socket | 空 | 非空なら`motion_profile`を上書き |
+| `camera_profile_override` | STRING socket | 空 | 非空なら`camera_profile`を上書き |
 
-三つのoverrideは前後空白を除去した非空文字列だけを採用する。未知のモデル又はプロファイルは暗黙に先頭項目へ置換せず停止する。
+五つのoverrideは前後空白を除去した非空文字列だけを採用する。未知のモデル又はプロファイルは暗黙に先頭項目へ置換せず停止する。
 
-各overrideは`connected_combo_source`入力メタデータで、順に`model_name`、`style_profile`及び`background_detail`を列挙元として公開する。`CL Connected Combo`を接続すると、サブグラフ境界を含む配線から対応する候補を自動取得できる。Enhancer自身のCOMBO及びoverride優先順位は変更しない。
+各overrideは`connected_combo_source`入力メタデータで、順に`model_name`、`style_profile`、`background_detail`、`motion_profile`及び`camera_profile`を列挙元として公開する。`CL Connected Combo`を接続すると、サブグラフ境界を含む配線から対応する候補を自動取得できる。Enhancer自身のCOMBO及びoverride優先順位は変更しない。
+
+`motion_profile`及び`camera_profile`は既存WFのwidget位置を崩さないため任意入力の末尾へ追加する。未保存又は旧WFから欠落している場合は`passthrough`として扱う。
 
 ### 2.2 出力
 
@@ -125,9 +131,10 @@ user_prompt ──────> 独立検証・変更禁止 ──────�
 6. `style`と分類されたsource Commonを、画風変更時だけ除外する。
 7. `background`と分類されたsource Commonを、背景変更時だけ除外する。`anchor`はユーザーと矛盾しない物理的情景の元文を固定要素バレットへコピーする。時間帯変更を含む複合背景文では物体自体を新BACKGROUNDへ引き継ぐ。
 8. LLM生成背景から時間帯権威値と矛盾する行を除外する。
-9. 選択画風の固定directive、固定要素バレット、次に受理したLLM生成背景文をsource Common先頭へ追加する。semantic_guard有効時は、この候補と元Common・ユーザー権威を照合してから採用する。
-10. userを既存Prompt Mergerで最後に統合する。
-11. 最終Markdownを再検証し、user意味本文の存在を確認する。
+9. 選択画風、人物動作及びカメラワークの固定directive、固定要素バレット、次に受理したLLM生成背景文をsource Common先頭へ追加する。semantic_guard有効時は、この候補と元Common・ユーザー権威を照合してから採用する。
+10. Common本文をUnicode NFKC、空白除去及び末尾句点除去で正規化し、完全一致する行だけを機械的に一件へ縮約する。user Commonを最優先とし、user本文は削除しない。
+11. userを既存Prompt Mergerで最後に統合する。
+12. 最終Markdownを再検証し、user意味本文の存在を確認する。
 
 一文に画風と人物、背景と普遍的な人物動作等が混在する場合、LLMは`keep`を返さなければならない。分類を安全側へ倒し、複合指示の一部だけを暗黙に破棄しない。ただし、入力画像で一時的に観測された静止ポーズ、人物配置、画角、Shotサイズ及び視点はSubjectの同一性でも普遍的動作でもないため、背景変更時に置換できる`background`として扱う。純粋な画風だけを禁止する文は`style`、純粋な背景条件だけを禁止する文は`background`であり、禁止表現であるという理由だけで旧画風又は旧背景を残さない。`画風は...とする`、`作画は...とする`、`舞台は...とする`、`背景は...とする`、`時間帯は...とする`、`天候は...とする`、`照明は...とする`及び`構図は...とする`の単一責務文を、小型モデル向けの意味アンカーとしてシステムプロンプトへ明記する。
 
@@ -171,7 +178,51 @@ LLMが返す`BACKGROUND`は環境専用であり、人物、キャラクター�
 
 新しい画風は新規ディレクトリとmanifestを追加するだけでUIへ現れる。Pythonの条件分岐追加を必要としない。
 
-## 7. 背景密度プロファイル
+## 7. 人物動作プロファイル
+
+人物動作は`node_prompt_enhancer/prompts/motions/<profile_id>/profile.json`から自動検出する。初期同梱IDは次のとおりである。
+
+- `passthrough`
+- `subtle`
+- `natural`
+- `dynamic`
+- `music_video`
+- `mv_anime_emotional`
+- `limited_anime`
+
+`subtle`は小さな意図的動作、`natural`は接地と自然な重心移動、`dynamic`は大きな全身動作、`music_video`は歌詞・楽曲強度・Source Vocalリップシンク、`mv_anime_emotional`は歌詞へ反応する手描きアニメの全身演技と追従運動、`limited_anime`はキーポーズとコマ打ちを担当する。個別のScene動作を固定せず、後段Plannerが歌詞と尺に合わせて選択できる動作文法をCommonへ与える。
+
+manifestは画風プロファイルと同じ`schema_version`、`profile_id`、`display_name`、`description`、`ui_order`、`directives`及び`system_instruction`を持つ。`passthrough`だけは空の`directives`を要求する。新規ディレクトリとmanifestの追加だけでUI候補へ現れる。
+
+## 8. カメラワークプロファイル
+
+カメラワークは`node_prompt_enhancer/prompts/cameras/<profile_id>/profile.json`から自動検出する。初期同梱IDは次のとおりである。
+
+- `passthrough`
+- `stable`
+- `cinematic`
+- `dynamic`
+- `orbit_subject`
+- `mv_anime_emotional`
+- `music_video`
+
+`stable`は読みやすい抑制された撮影、`cinematic`は奥行きと視差、`dynamic`は大きな軌道変化、`orbit_subject`は被写体周囲の半円アーク、`mv_anime_emotional`は人物の感情と全身演技を追跡する映画的MV撮影、`music_video`は楽曲構造に応じた撮影強度をCommonへ追加する。プロファイルは個別Sceneのcamera enumを直接生成せず、後段Plannerへ撮影の選択肢と変化要件を伝える。
+
+manifest schemaと拡張規則は人物動作プロファイルと同じである。
+
+## 9. Common重複除去
+
+機械的な重複除去は常時有効で、次の範囲だけを扱う。
+
+- user Commonと同一のsource Commonはsource側だけを除去する。
+- 残存source又はuser Commonと同一のプロファイル行は追加しない。
+- 複数プロファイル又は生成背景が同一行を追加した場合は最初の一件だけを採用する。
+- 大文字小文字、表記又は意味が異なる行を類似度だけで削除しない。
+- Subject及び保持分析はこの処理の対象にしない。
+
+削除件数と本文はreportの`duplicate_common_lines_removed`及び`duplicate_common_lines`へ記録する。意味的に近い行のLLM統合、要約及び矛盾解決は、誤ってユーザー制約を弱める可能性があるため本段階では行わない。
+
+## 10. 背景密度プロファイル
 
 背景密度は`node_prompt_enhancer/prompts/backgrounds/<profile_id>/profile.json`から自動検出する。初期同梱IDは次のとおりである。
 
@@ -201,7 +252,7 @@ manifest schemaは次である。
 
 生成行数は`0 <= minimum_lines <= maximum_lines <= 12`とする。`passthrough`は両方0、それ以外は最低1行を要求する。生成背景は入力の場所、時間、天候、色、光源、連続性及び禁止事項を保持し、新しい人物、物語上の出来事、台詞又は可読文字を導入してはならない。LLM応答時点ではmanifestの行数範囲を検証する。その後、ユーザー時間帯との矛盾行を安全側で除外した結果が最低行数を下回っても、密度よりユーザー権威を優先して処理を継続し、除外数をWARNINGとreportへ記録する。
 
-## 8. LLM protocol
+## 11. LLM protocol
 
 LLM入力は内部JSONであり、sourceのSubject、保持分析、採番済みCommon、変更禁止のuser prompt、実効プロファイル、追加ヒント、任意の`authoritative_environment.time_of_day`及び前回検証エラーを構造化して渡す。これは入力理解を安定させるための内部形式であり、LLMへJSON出力を要求しない。
 
@@ -230,16 +281,16 @@ END_ENHANCEMENT
 
 参照タグはLLM要求内で一時tokenへ保護する。LLMは新しい参照タグを導入できず、最終構造へタグを復元する処理もPythonが所有する。
 
-## 9. パススルーとモデルライフサイクル
+## 12. パススルーとモデルライフサイクル
 
 次の場合はGGUFを解決又はロードしない。
 
-- 画風と背景がともに`passthrough`。
+- 画風と背景がともに`passthrough`。人物動作又はカメラだけが有効な場合も、それらは決定的に挿入できるためGGUFをロードしない。
 - 背景が`passthrough`、画風だけが有効、かつsourceにCommonバレットがない。
 
 前者でも`user_prompt`があれば決定論的なPrompt Mergerだけを実行する。`keep_model_loaded=False`では成功又は失敗にかかわらずfinallyでモデルを解放する。これを既定とし、後段のMiniMax H3がComfyUI管理外GGUFのVRAMを引き継がないようにする。
 
-## 10. 再試行、停止及び割込み
+## 13. 再試行、停止及び割込み
 
 初回を含む最大要求数は`retry_max + 1`であり、無限再試行を行わない。各再試行では検証エラーを次の要求へ含め、seedを一つ進める。
 
@@ -247,11 +298,11 @@ llama.cppのstreaming応答は10秒ごとにheartbeatを出す。最初のchunk�
 
 `finish_reason=length`、空応答、protocol不正及び背景行数不正は検証失敗とする。規定回数で解決しない場合は最後の理由を含む`PromptEnhancerError`で停止し、部分的なMarkdownを正常出力しない。
 
-## 11. デバッグ出力
+## 14. デバッグ出力
 
 `save_debug_output=True`では`ComfyUI/output/cl_prompt_enhancer_debug/`へ、入力、実効設定、各要求、保護済みLLM入力、生応答、validation結果、最終Markdown、report又は例外を保存する。ユーザーのSubject、保持情報及び世界設定を含むため、共有前に内容を確認する。
 
-## 12. 推奨接続
+## 15. 推奨接続
 
 ```text
 Vision等の自動Brief ─┐
@@ -259,12 +310,12 @@ Vision等の自動Brief ─┐
 基礎PlanningBrief ────┘                                      │
                                                              ├─> enhanced_markdown ─> CL MV Prompt Planner.planning_markdown
 ユーザー最終指示 ─────────────────────────────────────────────> user_prompt
-CL String Combo ─────────────────────────────────────────────> style_profile_override / background_detail_override
+CL Connected Combo ──────────────────────────────────────────> 各profile override
 ```
 
 自動生成されたBriefは`source_markdown`へ、変更を避けたい最終的な人間の指示は`user_prompt`へ接続する。既にPrompt Mergerへ含めた同じユーザー断片を再度`user_prompt`へ接続すると重複するため、provenanceを二重投入しない。
 
-## 13. テスト要件
+## 16. テスト要件
 
 - 全profileの検出順、schema及び未知IDエラー。
 - 選択profileだけをsystem promptへ合成すること。
@@ -281,12 +332,16 @@ CL String Combo ─────────────────────�
 - 人物又は構図を含む`BACKGROUND`を除外しても最低行数を満たす場合だけ正常行を保持して継続すること。
 - 外部model、style及びbackground overrideが実効値へ反映されること。
 - ノード登録、入出力順、既定値、シアン成功ログ及びモデル解放。
+- Motion及びCamera profileの検出順、外部manifest、既定passthrough及びSTRING override。
+- Motion又はCameraだけが有効な場合にGGUFをロードせず、決定的なCommonを追加すること。
+- user、source及び各追加profile間の正規化完全一致だけを除去し、user本文を維持すること。
 
-## 14. 非対象
+## 17. 非対象
 
-- Scene、Shot、歌詞、カメラ、音響又はH3 JSONの生成。
+- Scene、Shot、歌詞、camera enum、音響又はH3 JSONの生成。
 - Subject identity又は保持分析の創作。
 - user prompt内の矛盾解決、要約又は自動削除。一意な時間帯の抽出はuser本文を変更せず、自動source及び生成背景との優先順位付けにだけ使用する。
 - 画像解析。
 - モデル又は`llama-cpp-python`の自動導入。
 - 自由形式のMarkdown全文生成。
+- 類似度又はLLMによる意味的なCommon統合。

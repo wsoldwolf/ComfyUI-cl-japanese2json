@@ -50,6 +50,8 @@ def node_arguments(**overrides):
         "chat_format": "auto",
         "style_profile": "passthrough",
         "background_detail": "passthrough",
+        "motion_profile": "passthrough",
+        "camera_profile": "passthrough",
         "max_tokens": 256,
         "temperature": 0.1,
         "top_p": 0.9,
@@ -68,6 +70,8 @@ def node_arguments(**overrides):
         "model_name_override": "",
         "style_profile_override": "",
         "background_detail_override": "",
+        "motion_profile_override": "",
+        "camera_profile_override": "",
         "save_debug_output": False,
         "semantic_guard": False,  # Legacy transport fixtures; semantic cases have independent verdicts.
     }
@@ -112,16 +116,71 @@ class PromptEnhancerProfileTests(unittest.TestCase):
             profiles.discover_background_profile_ids(),
             ["passthrough", "reduce", "low", "medium", "high", "ultra"],
         )
+        self.assertEqual(
+            profiles.discover_motion_profile_ids(),
+            [
+                "passthrough",
+                "subtle",
+                "natural",
+                "dynamic",
+                "music_video",
+                "mv_anime_emotional",
+                "limited_anime",
+            ],
+        )
+        self.assertEqual(
+            profiles.discover_camera_profile_ids(),
+            [
+                "passthrough",
+                "stable",
+                "cinematic",
+                "dynamic",
+                "orbit_subject",
+                "mv_anime_emotional",
+                "music_video",
+            ],
+        )
         for value in profiles.discover_style_profile_ids():
             profiles.load_style_profile(value)
         for value in profiles.discover_background_profile_ids():
             profiles.load_background_profile(value)
+        for value in profiles.discover_motion_profile_ids():
+            profiles.load_motion_profile(value)
+        for value in profiles.discover_camera_profile_ids():
+            profiles.load_camera_profile(value)
 
     def test_unknown_profiles_are_rejected(self):
         with self.assertRaises(errors.EnhancerProfileError):
             profiles.load_style_profile("unknown")
         with self.assertRaises(errors.EnhancerProfileError):
             profiles.load_background_profile("unknown")
+        with self.assertRaises(errors.EnhancerProfileError):
+            profiles.load_motion_profile("unknown")
+        with self.assertRaises(errors.EnhancerProfileError):
+            profiles.load_camera_profile("unknown")
+
+    def test_motion_and_camera_profiles_are_external_directives(self):
+        motion = "\n".join(profiles.load_motion_profile("music_video").directives)
+        camera = "\n".join(profiles.load_camera_profile("orbit_subject").directives)
+        self.assertIn("ソースボーカル", motion)
+        self.assertIn("足を使わない滑走", motion)
+        self.assertIn("広い半円状のアーク移動", camera)
+        self.assertIn("開始視点と終了視点", camera)
+
+    def test_mv_anime_emotional_is_split_without_project_specific_nouns(self):
+        motion = "\n".join(
+            profiles.load_motion_profile("mv_anime_emotional").directives
+        )
+        camera = "\n".join(
+            profiles.load_camera_profile("mv_anime_emotional").directives
+        )
+        self.assertIn("予備動作、主動作、反動", motion)
+        self.assertIn("身体付属物", motion)
+        self.assertNotIn("カメラは正面", motion)
+        self.assertIn("広いアーク移動", camera)
+        self.assertIn("強い視差と奥行き", camera)
+        self.assertNotIn("鳥居", motion + camera)
+        self.assertNotIn("狐耳", motion + camera)
 
     def test_anime_profiles_constrain_character_to_limited_animation(self):
         for profile_id in (
@@ -516,6 +575,51 @@ class PromptEnhancerEngineTests(unittest.TestCase):
         self.assertIn("# 共通プロンプト", result.markdown)
         self.assertIn("透明水彩", result.markdown)
 
+    def test_motion_and_camera_profiles_need_no_llm(self):
+        result = engine.enhance_reduced_markdown(
+            BASE,
+            USER,
+            style=profiles.load_style_profile("passthrough"),
+            background=profiles.load_background_profile("passthrough"),
+            motion=profiles.load_motion_profile("dynamic"),
+            camera=profiles.load_camera_profile("orbit_subject"),
+            backend=None,
+            max_tokens=128,
+            temperature=0.1,
+            top_p=0.9,
+            repetition_penalty=1.05,
+            seed=1,
+            retry_max=0,
+        )
+        self.assertEqual(result.request_count, 0)
+        self.assertIn("明確な予備動作", result.markdown)
+        self.assertIn("広い半円状のアーク移動", result.markdown)
+        self.assertEqual(result.report["motion_profile"], "dynamic")
+        self.assertEqual(result.report["camera_profile"], "orbit_subject")
+        self.assertGreater(result.report["motion_lines_added"], 0)
+        self.assertGreater(result.report["camera_lines_added"], 0)
+
+    def test_normalized_exact_common_duplicates_are_removed(self):
+        directive = profiles.load_motion_profile("limited_anime").directives[0]
+        source = f"# 共通プロンプト\n* {directive}\n"
+        result = engine.enhance_reduced_markdown(
+            source,
+            "",
+            style=profiles.load_style_profile("passthrough"),
+            background=profiles.load_background_profile("passthrough"),
+            motion=profiles.load_motion_profile("limited_anime"),
+            camera=profiles.load_camera_profile("passthrough"),
+            backend=None,
+            max_tokens=128,
+            temperature=0.1,
+            top_p=0.9,
+            repetition_penalty=1.05,
+            seed=1,
+            retry_max=0,
+        )
+        self.assertEqual(result.markdown.count(directive), 1)
+        self.assertEqual(result.report["duplicate_common_lines_removed"], 1)
+
 
 class PromptEnhancerNodeTests(unittest.TestCase):
     def test_registration_and_input_contract(self):
@@ -533,6 +637,16 @@ class PromptEnhancerNodeTests(unittest.TestCase):
         self.assertFalse(inputs["required"]["keep_model_loaded"][1]["default"])
         self.assertTrue(inputs["optional"]["user_prompt"][1]["forceInput"])
         self.assertTrue(inputs["optional"]["style_profile_override"][1]["forceInput"])
+        self.assertEqual(inputs["optional"]["motion_profile"][1]["default"], "passthrough")
+        self.assertEqual(inputs["optional"]["camera_profile"][1]["default"], "passthrough")
+        self.assertEqual(
+            inputs["optional"]["motion_profile_override"][1]["connected_combo_source"],
+            "motion_profile",
+        )
+        self.assertEqual(
+            inputs["optional"]["camera_profile_override"][1]["connected_combo_source"],
+            "camera_profile",
+        )
 
     def test_node_passthrough_does_not_resolve_or_load_model(self):
         instance = node_mod.CLPromptEnhancerGGUF()
@@ -561,11 +675,15 @@ class PromptEnhancerNodeTests(unittest.TestCase):
                         model_name_override="/models/override.gguf",
                         style_profile_override="anime_2020s",
                         background_detail_override="reduce",
+                        motion_profile_override="dynamic",
+                        camera_profile_override="orbit_subject",
                     )
                 )
         report = json.loads(output[1])
         self.assertEqual(report["style_profile"], "anime_2020s")
         self.assertEqual(report["background_detail"], "reduce")
+        self.assertEqual(report["motion_profile"], "dynamic")
+        self.assertEqual(report["camera_profile"], "orbit_subject")
         self.assertEqual(report["model_name"], "/models/override.gguf")
         self.assertEqual(backend.ensure_calls[0]["model_path"], model)
         self.assertEqual(backend.clear_count, 1)

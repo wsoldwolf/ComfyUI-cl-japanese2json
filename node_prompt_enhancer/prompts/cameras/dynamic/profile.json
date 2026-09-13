@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "dynamic",
+  "display_name": "ダイナミック",
+  "description": "大きな軌道変化と被写体追従を使用する。",
+  "ui_order": 30,
+  "directives": [
+    "カメラは前進、後退、横移動、垂直移動、追従及び広いアーク移動をSceneごとに使い分け、連続するSceneで同じ方向と同じShotサイズを反復しない。",
+    "主要被写体の斜め前方から開始し、側面又は背後を通って異なる高さと角度へ到達するなど、開始視点、移動軌道及び終了視点を一つの移動内で明確に変化させる。",
+    "人物の主動作に合わせて接近、回り込み又は後退の速度を変化させ、動作の頂点で構図上の強調を作る。",
+    "前景要素を横切らせて強い視差と奥行きを作るが、過剰な手振れ、無目的な回転又は主要人物を画面外へ失う移動は行わない。"
+  ],
+  "system_instruction": "Camera directives are deterministic profile output. Do not classify or rewrite source camera instructions."
+}

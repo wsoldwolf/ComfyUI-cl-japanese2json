@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
 import json
 import logging
 import re
 import threading
 import time
+import unicodedata
 from typing import Any, Callable
 
 from ..common.scene_anchors import scene_anchor
@@ -30,7 +32,14 @@ from .markdown import (
     protected_user_fragments,
     rewrite_common,
 )
-from .profiles import BackgroundProfile, StyleProfile
+from .profiles import (
+    BackgroundProfile,
+    CameraProfile,
+    MotionProfile,
+    StyleProfile,
+    load_camera_profile,
+    load_motion_profile,
+)
 from .prompt_loader import load_enhancer_system_prompt
 from .protocol import EnhancementResponse, parse_enhancement_response
 
@@ -232,6 +241,54 @@ def _verify_user_prompt(final_markdown: str, user: PromptInspection) -> None:
         )
 
 
+def _common_line_key(value: str) -> str:
+    """Return a conservative key for exact Common-line deduplication."""
+
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    normalized = re.sub(r"\s+", "", normalized)
+    return normalized.rstrip("。")
+
+
+def _deduplicate_common(
+    source: PromptInspection,
+    user: PromptInspection,
+    removed_source_ids: set[str],
+    additions: list[tuple[str, str]],
+) -> tuple[set[str], tuple[str, ...], tuple[str, ...], dict[str, int]]:
+    """Remove only normalized-exact duplicates while preserving user authority."""
+
+    removed = set(removed_source_ids)
+    seen = {
+        _common_line_key(item.text)
+        for item in user.common
+        if _common_line_key(item.text)
+    }
+    skipped: list[str] = []
+    for item in source.common:
+        if item.source_id in removed:
+            continue
+        key = _common_line_key(item.text)
+        if key and key in seen:
+            removed.add(item.source_id)
+            skipped.append(item.text)
+            continue
+        if key:
+            seen.add(key)
+
+    accepted: list[str] = []
+    counts: Counter[str] = Counter()
+    for origin, value in additions:
+        key = _common_line_key(value)
+        if key and key in seen:
+            skipped.append(value)
+            continue
+        accepted.append(value)
+        counts[origin] += 1
+        if key:
+            seen.add(key)
+    return removed, tuple(accepted), tuple(skipped), dict(counts)
+
+
 def enhance_reduced_markdown(
     source_markdown: str,
     user_prompt: str,
@@ -245,12 +302,16 @@ def enhance_reduced_markdown(
     repetition_penalty: float,
     seed: int,
     retry_max: int,
+    motion: MotionProfile | None = None,
+    camera: CameraProfile | None = None,
     additional_instruction: str = "",
     progress_callback: Callable[[str, int], None] | None = None,
     interrupt_callback: Callable[[], Any] | None = None,
     debug_events: list[dict[str, Any]] | None = None,
     semantic_guard: bool = False,
 ) -> PromptEnhancementResult:
+    motion = motion or load_motion_profile("passthrough")
+    camera = camera or load_camera_profile("passthrough")
     source = inspect_prompt(source_markdown, "source_markdown")
     user = inspect_prompt(user_prompt, "user_prompt")
     time_authority = authoritative_time_of_day(
@@ -346,8 +407,24 @@ def enhance_reduced_markdown(
                     maximum_background_lines=background.maximum_lines,
                 )
                 if semantic_guard:
-                    candidate_removed, candidate_additions, _anchors, _blocked = _common_changes(
-                        source, response, style, background, conflicting_source_ids, time_authority)
+                    (
+                        candidate_removed,
+                        candidate_additions,
+                        _anchors,
+                        _blocked,
+                        _duplicates,
+                        _addition_counts,
+                    ) = _common_changes(
+                        source,
+                        user,
+                        response,
+                        style,
+                        background,
+                        motion,
+                        camera,
+                        conflicting_source_ids,
+                        time_authority,
+                    )
                     candidate_common = [item.text for item in source.common
                                         if item.source_id not in candidate_removed]
                     candidate_common.extend(candidate_additions)
@@ -423,8 +500,29 @@ def enhance_reduced_markdown(
                     retry_max,
                     exc,
                 )
-    removed, additions, anchor_lines, conflicting_background_lines = _common_changes(
-        source, response, style, background, conflicting_source_ids, time_authority)
+    (
+        removed,
+        additions,
+        anchor_lines,
+        conflicting_background_lines,
+        duplicate_lines,
+        addition_counts,
+    ) = _common_changes(
+        source,
+        user,
+        response,
+        style,
+        background,
+        motion,
+        camera,
+        conflicting_source_ids,
+        time_authority,
+    )
+    if duplicate_lines:
+        LOGGER.info(
+            "[cl_prompt_enhancer] Removed %d normalized-exact duplicate Common line(s)",
+            len(duplicate_lines),
+        )
     if conflicting_background_lines:
         LOGGER.warning(
             "[cl_prompt_enhancer] Removed %d generated background line(s) "
@@ -432,11 +530,6 @@ def enhance_reduced_markdown(
             len(conflicting_background_lines),
             time_authority,
         )
-    accepted_background_lines = tuple(
-        value
-        for value in response.background_lines
-        if value not in conflicting_background_lines
-    )
     enhanced_base = rewrite_common(
         source_markdown,
         source,
@@ -453,7 +546,13 @@ def enhance_reduced_markdown(
         "schema_version": 1,
         "style_profile": style.profile_id,
         "background_detail": background.profile_id,
-        "mode": "passthrough" if not needs_inference and not additions else "enhanced",
+        "motion_profile": motion.profile_id,
+        "camera_profile": camera.profile_id,
+        "mode": (
+            "passthrough"
+            if not needs_inference and not additions and not removed
+            else "enhanced"
+        ),
         "user_lines_preserved": len(user.bullets),
         "user_lines_modified": 0,
         "source_common_lines": len(source.common),
@@ -467,8 +566,13 @@ def enhance_reduced_markdown(
             conflicting_background_lines
         ),
         "authoritative_time_of_day": time_authority,
-        "style_lines_added": len(style.directives),
-        "background_lines_added": len(accepted_background_lines),
+        "style_lines_added": addition_counts.get("style", 0),
+        "motion_lines_added": addition_counts.get("motion", 0),
+        "camera_lines_added": addition_counts.get("camera", 0),
+        "background_lines_added": addition_counts.get("background", 0),
+        "common_lines_added": len(additions),
+        "duplicate_common_lines_removed": len(duplicate_lines),
+        "duplicate_common_lines": list(duplicate_lines),
         "llm_requests": request_count,
         "retries": retries,
         "semantic_guard": semantic_guard,
@@ -512,7 +616,17 @@ def enhance_reduced_markdown(
     )
 
 
-def _common_changes(source, response, style, background, conflicting_ids, time_authority):
+def _common_changes(
+    source,
+    user,
+    response,
+    style,
+    background,
+    motion,
+    camera,
+    conflicting_ids,
+    time_authority,
+):
     """Construct exactly the candidate that is reviewed, then rendered."""
     removed = set(conflicting_ids)
     anchors = []
@@ -529,6 +643,15 @@ def _common_changes(source, response, style, background, conflicting_ids, time_a
             removed.add(item.source_id)
     blocked = tuple(value for value in response.background_lines
                     if conflicts_with_time_of_day(value, time_authority))
-    additions = (*style.directives, *dict.fromkeys(anchors),
-                 *(value for value in response.background_lines if value not in blocked))
-    return removed, additions, tuple(dict.fromkeys(anchors)), blocked
+    unique_anchors = tuple(dict.fromkeys(anchors))
+    additions = [
+        *(("style", value) for value in style.directives),
+        *(("motion", value) for value in motion.directives),
+        *(("camera", value) for value in camera.directives),
+        *(("anchor", value) for value in unique_anchors),
+        *(("background", value) for value in response.background_lines if value not in blocked),
+    ]
+    removed, accepted, duplicates, counts = _deduplicate_common(
+        source, user, removed, additions
+    )
+    return removed, accepted, unique_anchors, blocked, duplicates, counts

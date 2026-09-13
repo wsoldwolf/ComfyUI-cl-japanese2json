@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "profile_id": "passthrough",
+  "display_name": "パススルー",
+  "description": "カメラに追加指示を適用しない。",
+  "ui_order": 0,
+  "directives": [],
+  "system_instruction": "Do not add, remove, or reinterpret camera directives."
+}

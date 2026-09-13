@@ -18,10 +18,16 @@ from .errors import PromptEnhancerError
 from .markdown import inspect_prompt
 from .profiles import (
     DEFAULT_BACKGROUND_PROFILE_ID,
+    DEFAULT_CAMERA_PROFILE_ID,
+    DEFAULT_MOTION_PROFILE_ID,
     DEFAULT_STYLE_PROFILE_ID,
     discover_background_profile_ids,
+    discover_camera_profile_ids,
+    discover_motion_profile_ids,
     discover_style_profile_ids,
     load_background_profile,
+    load_camera_profile,
+    load_motion_profile,
     load_style_profile,
 )
 from .prompt_loader import enhancer_prompts_fingerprint
@@ -206,6 +212,36 @@ class CLPromptEnhancerGGUF:
                 "semantic_guard": (
                     "BOOLEAN", {"default": False, "tooltip": "Experimental LLM review of changed environment facts. Small models may reject valid changes; disabled by default. Verbatim scene-anchor preservation is always active. Up to 2 meaning repairs."},
                 ),
+                "motion_profile": (
+                    discover_motion_profile_ids(),
+                    {
+                        "default": DEFAULT_MOTION_PROFILE_ID,
+                        "tooltip": "External character-motion profile; passthrough adds no motion rules.",
+                    },
+                ),
+                "camera_profile": (
+                    discover_camera_profile_ids(),
+                    {
+                        "default": DEFAULT_CAMERA_PROFILE_ID,
+                        "tooltip": "External camera-work profile; passthrough adds no camera rules.",
+                    },
+                ),
+                "motion_profile_override": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "connected_combo_source": "motion_profile",
+                        "tooltip": "Overrides motion_profile when non-empty.",
+                    },
+                ),
+                "camera_profile_override": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "connected_combo_source": "camera_profile",
+                        "tooltip": "Overrides camera_profile when non-empty.",
+                    },
+                ),
             },
         }
 
@@ -306,6 +342,10 @@ class CLPromptEnhancerGGUF:
         background_detail_override: str = "",
         save_debug_output: bool = False,
         semantic_guard: bool = False,
+        motion_profile: str = DEFAULT_MOTION_PROFILE_ID,
+        camera_profile: str = DEFAULT_CAMERA_PROFILE_ID,
+        motion_profile_override: str = "",
+        camera_profile_override: str = "",
     ) -> tuple[str, str, str]:
         with self._lock:
             if not isinstance(semantic_guard, bool):
@@ -318,6 +358,12 @@ class CLPromptEnhancerGGUF:
             )
             effective_background, background_overridden = _select_override(
                 background_detail, background_detail_override, "background_detail"
+            )
+            effective_motion, motion_overridden = _select_override(
+                motion_profile, motion_profile_override, "motion_profile"
+            )
+            effective_camera, camera_overridden = _select_override(
+                camera_profile, camera_profile_override, "camera_profile"
             )
             self._validate_parameters(
                 chat_format=chat_format,
@@ -340,6 +386,8 @@ class CLPromptEnhancerGGUF:
                 raise PromptEnhancerError("additional_instruction must be a string without NUL")
             style = load_style_profile(effective_style)
             background = load_background_profile(effective_background)
+            motion = load_motion_profile(effective_motion)
+            camera = load_camera_profile(effective_camera)
             source = inspect_prompt(source_markdown, "source_markdown")
             needs_inference = not background.passthrough or (
                 not style.passthrough and bool(source.common)
@@ -348,6 +396,8 @@ class CLPromptEnhancerGGUF:
                 (model_overridden, "model_name", effective_model),
                 (style_overridden, "style_profile", effective_style),
                 (background_overridden, "background_detail", effective_background),
+                (motion_overridden, "motion_profile", effective_motion),
+                (camera_overridden, "camera_profile", effective_camera),
             ):
                 if active:
                     LOGGER.info(
@@ -359,6 +409,8 @@ class CLPromptEnhancerGGUF:
                 "chat_format": chat_format,
                 "style_profile": effective_style,
                 "background_detail": effective_background,
+                "motion_profile": effective_motion,
+                "camera_profile": effective_camera,
                 "max_tokens": max_tokens,
                 "temperature": float(temperature),
                 "top_p": float(top_p),
@@ -404,6 +456,8 @@ class CLPromptEnhancerGGUF:
                     user_prompt,
                     style=style,
                     background=background,
+                    motion=motion,
+                    camera=camera,
                     backend=self._backend if needs_inference else None,
                     max_tokens=max_tokens,
                     temperature=float(temperature),
@@ -424,8 +478,9 @@ class CLPromptEnhancerGGUF:
                 status = (
                     f"enhanced global prompt; style={effective_style}; "
                     f"background={effective_background}; "
+                    f"motion={effective_motion}; camera={effective_camera}; "
                     f"user_lines={report['user_lines_preserved']}; "
-                    f"added={report['style_lines_added'] + report['background_lines_added']}; "
+                    f"added={report['common_lines_added']}; "
                     f"removed_auto={len(report['removed_source_common_ids'])}; "
                     f"LLM requests={result.request_count}; retries={result.retry_count}"
                 )

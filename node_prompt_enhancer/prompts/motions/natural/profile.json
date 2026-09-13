@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "natural",
+  "display_name": "自然",
+  "description": "接地と重心移動を保った自然な全身動作。",
+  "ui_order": 20,
+  "directives": [
+    "各Sceneの主要人物には歌詞、音楽又は周囲の対象に反応する意図的な身体動作を与え、予備動作、主動作、反動及び姿勢の立て直しを連続した一つの動作として示す。",
+    "立っている人物が位置を変える場合は、足裏の接地、踏み出し、重心移動、蹴り出し及び着地を示し、飛行又は浮遊が明示されない限り足を動かさない滑走や浮遊で移動させない。",
+    "腕、脚、胴体及び頭部を同じ方向へ一様に動かさず、主動作に応じたひねり、逆方向の釣り合い及び自然な重心移動を加える。",
+    "髪、衣装及び身体に付随する装飾は主動作よりわずかに遅れて追従し、加速、停止及び方向転換に応じた慣性と収束を示す。"
+  ],
+  "system_instruction": "Motion directives are deterministic profile output. Do not classify or rewrite source motion."
+}
