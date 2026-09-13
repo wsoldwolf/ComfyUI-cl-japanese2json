@@ -1215,6 +1215,11 @@ def _validated_response_content(content: str, finish_reason: Any) -> str:
 def _validate_translation_text(record: TranslationRecord, translated: str) -> str:
     if record.payload is None:
         raise TranslationError(f"Record {record.record_id} has no translatable payload")
+    if not translated.strip():
+        raise TranslationError(
+            f"Record {record.record_id} has an empty translation; "
+            "translate the complete source text after its record marker"
+        )
     if "\n" in translated or "\r" in translated:
         raise TranslationError(f"Record {record.record_id} was split across multiple lines")
     if CODE_FENCE_RE.search(translated):
@@ -2309,7 +2314,7 @@ def _rebuild(document: LexicalDocument) -> str:
     for block in document.blocks:
         lines = [block.directive]
         for record in block.records:
-            if record.translated is None:
+            if record.translated is None or not record.translated.strip():
                 raise TranslationError(f"Record {record.record_id} has no validated translation")
             lines.append(f"{record.output_prefix}{record.translated}")
         sections.append("\n".join(lines))
@@ -2421,7 +2426,10 @@ def translate_markdown(
                 interrupt_callback=interrupt_callback)
         for record in source_records:
             sentences = sentence_groups[record.record_id]
-            if not sentences or any(item.translated is None for item in sentences):
+            if not sentences or any(
+                item.translated is None or not item.translated.strip()
+                for item in sentences
+            ):
                 raise TranslationError(
                     f"Record {record.record_id} has incomplete sentence translations"
                 )

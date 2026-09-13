@@ -8,8 +8,18 @@ import unicodedata
 from dataclasses import replace
 from typing import Mapping
 
-from .camera_policy import fallback_arc_description, required_camera_sequence
+from .camera_policy import (
+    fallback_arc_description,
+    required_camera_sequence,
+    repair_scheduled_camera_description,
+)
 from .errors import PlannerResponseError
+from .performance_policy import (
+    balanced_shot_start_windows,
+    minimum_deliberate_action_phases,
+    action_signature,
+    deduplicate_actions,
+)
 from .placeholders import ReferenceProtector
 from .structures import (
     AuxiliaryVisual,
@@ -101,6 +111,9 @@ _CREATIVE_VOCAL_CUES = (
     "語る",
     "語り",
     "声を出",
+    "言葉を口に",
+    "言葉を発",
+    "言葉を紡",
 )
 _LOCKED_SOURCE_VOCAL_VISUAL_CUES = frozenset(
     {
@@ -351,6 +364,8 @@ def _lyric_blueprint_text(
             ", ".join(raw_subjects),
         )
     return restored
+
+
 
 
 def parse_song_bible_response(
@@ -632,6 +647,8 @@ def parse_lyric_action_response(
     content: str,
     pending: dict[int, TimelineScene],
     protector: ReferenceProtector,
+    *,
+    repair_motion: bool = True,
 ) -> tuple[dict[int, LyricActionBlueprint], dict[int, str]]:
     """Recover valid lyric blueprints independently from one batched response."""
 
@@ -672,7 +689,7 @@ def parse_lyric_action_response(
                 actions=blueprint.subject_actions,
                 duration_seconds=pending[scene_id].duration_seconds,
             )
-            if motion_issues:
+            if motion_issues and repair_motion:
                 blueprint, added_actions = repair_lyric_action_motion(
                     blueprint,
                     duration_seconds=pending[scene_id].duration_seconds,
@@ -883,9 +900,9 @@ def _subject_action_motion_issues(
             unicodedata.normalize("NFKC", value[2])
         )
     ]
-    required = 2 if duration_seconds >= 10 else 1
+    required = minimum_deliberate_action_phases(duration_seconds)
     unique_deliberate = {
-        " ".join(unicodedata.normalize("NFKC", value[2]).split())
+        action_signature(value[2])
         for value in deliberate
     }
     if len(unique_deliberate) >= required:
@@ -937,6 +954,7 @@ def _motion_phase_additions(
     scene_id: int,
     subject: str,
     count: int,
+    existing_actions: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     templates = (
         (
@@ -951,13 +969,23 @@ def _motion_phase_additions(
             "{subject}は膝を曲げて身体を低く沈め、片足で踏み込んで"
             "立ち上がりながら片手を頭上へ伸ばす。"
         ),
+        (
+            "{subject}は両足の支持を保ちながら膝を伸ばして上体を起こし、"
+            "両腕を下ろして重心を中央へ戻す。"
+        ),
+    )
+    existing = {
+        action_signature(sentence.strip().removeprefix("続いて"))
+        for action in existing_actions
+        for sentence in re.split(r"(?<=。)", action)
+    }
+    candidates = (
+        templates[(scene_id - 1 + index) % len(templates)].format(subject=subject)
+        for index in range(len(templates))
     )
     return tuple(
-        templates[(scene_id - 1 + index) % len(templates)].format(
-            subject=subject
-        )
-        for index in range(count)
-    )
+        value for value in candidates if action_signature(value) not in existing
+    )[:count]
 
 
 def repair_lyric_action_motion(
@@ -1035,14 +1063,14 @@ def repair_subject_motion(
     scene: PlannedScene,
     *,
     duration_seconds: int,
+    terminal_result: str | None = None,
 ) -> tuple[PlannedScene, tuple[str, ...]]:
     """Add a bounded whole-Subject motion floor without another LLM call.
 
     This recovery is intentionally independent of lyric, medium, anatomy, and
     environment.  It preserves every model-authored line and appends only the
-    minimum number of missing motion phases.  Lyric-action profiles do not use
-    this path because their immutable ACTIONs are validated in the repairable
-    blueprint stage.
+    minimum number of missing motion phases after final integration. A locked
+    visible result remains the final line, after any added physical recovery.
     """
 
     issues = subject_motion_issues(
@@ -1072,6 +1100,9 @@ def repair_subject_motion(
         scene_id=scene.scene_id,
         subject=subject,
         count=missing,
+        existing_actions=tuple(
+            action for shot in scene.shots for action in shot.subject_actions
+        ),
     )
     mutable_actions = [list(shot.subject_actions) for shot in scene.shots]
     for index, action in enumerate(additions):
@@ -1088,14 +1119,20 @@ def repair_subject_motion(
             None,
         )
         if target is None:
-            # Every Shot already has the protocol maximum.  Replacing the
-            # final passive line is safer than creating an invalid 9th line.
-            target = preferred
-            mutable_actions[target][-1] = action
+            # A full record is not permission to erase its locked operation.
+            return scene, ()
         else:
-            mutable_actions[target].append(action)
+            insert_at = len(mutable_actions[target])
+            if (
+                terminal_result is not None
+                and target == len(scene.shots) - 1
+                and mutable_actions[target]
+                and action_signature(mutable_actions[target][-1]) == action_signature(terminal_result)
+            ):
+                insert_at -= 1
+            mutable_actions[target].insert(insert_at, action)
     repaired_shots = tuple(
-        replace(shot, subject_actions=tuple(mutable_actions[index]))
+        replace(shot, subject_actions=deduplicate_actions(tuple(mutable_actions[index])))
         for index, shot in enumerate(scene.shots)
     )
     repaired = replace(scene, shots=repaired_shots)
@@ -1174,6 +1211,17 @@ def scene_signature(scene: PlannedScene) -> tuple[object, ...]:
             )
         )
     return tuple(signature)
+
+
+def subject_action_signature(scene: PlannedScene) -> tuple[str, ...]:
+    """Return the exact normalized Subject ACTION sequence for one Scene."""
+
+    return tuple(
+        action_signature(action)
+        for shot in scene.shots
+        for action in shot.subject_actions
+        if re.search(r"<Subject [1-9][0-9]*>", action)
+    )
 
 
 def auxiliary_visual_signatures(scene: PlannedScene) -> tuple[str, ...]:
@@ -1620,6 +1668,30 @@ def _parse_scene_record(
             "1 Shot for a short or non-lyric Scene; got "
             f"{len(shots)}"
         )
+    if timeline.duration_seconds >= 8 and len(shots) > 1:
+        windows = balanced_shot_start_windows(
+            timeline.duration_seconds * 1000, len(shots)
+        )
+        for shot_index, (minimum, _preferred, maximum) in enumerate(
+            windows, start=1
+        ):
+            shot = shots[shot_index]
+            clamped = min(max(shot.start_ms, minimum), maximum)
+            if clamped == shot.start_ms:
+                continue
+            shots[shot_index] = replace(shot, start_ms=clamped)
+            LOGGER.warning(
+                "[cl_mv_prompt_planner] %s Shot %d start_ms=%d left too "
+                "little duration on one side of the cut; normalized it to "
+                "%d inside the balanced coverage window %d-%d without "
+                "retrying the Scene",
+                context,
+                shot_index + 1,
+                shot.start_ms,
+                clamped,
+                minimum,
+                maximum,
+            )
     camera_sequence = required_camera_sequence(
         scene_id=scene_id,
         profile_id=visual_profile.profile_id,
@@ -1640,6 +1712,22 @@ def _parse_scene_record(
                 f"speed={expected[2]!r} from required_camera_sequence; got "
                 f"type={actual[0]!r}, amplitude={actual[1]!r}, "
                 f"speed={actual[2]!r}"
+            )
+        repaired_description = repair_scheduled_camera_description(
+            shot.camera.description,
+            requirement=requirement,
+            actions=shot.subject_actions,
+        )
+        if repaired_description != shot.camera.description:
+            shot_number = requirement["shot_number"]
+            shots[shot_number - 1] = replace(
+                shot, camera=replace(shot.camera, description=repaired_description)
+            )
+            LOGGER.warning(
+                "[cl_mv_prompt_planner] %s Shot %d repaired CAMERA-only "
+                "description: removed copied performer actions or restored "
+                "the scheduled physical route",
+                context, shot_number,
             )
         if requirement["type"] == "arc":
             normalized_description = unicodedata.normalize(

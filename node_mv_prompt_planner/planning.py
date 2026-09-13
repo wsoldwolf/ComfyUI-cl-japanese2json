@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import logging
@@ -18,6 +18,12 @@ from .errors import (
     PlannerResponseError,
 )
 from .placeholders import ReferenceProtector
+from .performance_policy import (
+    balanced_shot_start_windows,
+    minimum_deliberate_action_phases,
+    action_signature,
+    deduplicate_actions,
+)
 from .prompt_loader import load_planner_prompt, load_profiled_planner_prompt
 from .structures import (
     AuxiliaryVisual,
@@ -40,6 +46,7 @@ from .validation import (
     parse_song_bible_response,
     repair_subject_motion,
     scene_signature,
+    subject_action_signature,
     subject_motion_issues,
     vocal_guard_issues,
 )
@@ -392,9 +399,12 @@ def _previous_scene_tail(
     final_action = final_shot.subject_actions[-1]
     return {
         "scene_id": scene.scene_id,
-        "scene_intent": protector.protect(scene.scene_intent),
         "final_composition": protector.protect(final_shot.composition),
         "final_action": protector.protect(final_action),
+        "usage": (
+            "Use only final placement, support and object state as the new "
+            "starting state; do not replay the previous action or lyric intent."
+        ),
         "environment": protector.protect(final_shot.environment),
         "camera": {
             "type": final_shot.camera.type,
@@ -717,7 +727,9 @@ def _camera_choreography_contract(
 def _subject_motion_contract(scene: TimelineScene) -> dict[str, object]:
     """Give the model a compact, content-neutral performance floor."""
 
-    minimum_phases = 2 if scene.duration_seconds >= 10 else 1
+    minimum_phases = minimum_deliberate_action_phases(
+        scene.duration_seconds
+    )
     motion_families = (
         "travel through space and recover balance",
         "rotate the torso while reaching across a clear path",
@@ -741,6 +753,15 @@ def _subject_motion_contract(scene: TimelineScene) -> dict[str, object]:
             "derive the exact action from the current lyric and world; use the "
             "suggested family only when compatible, never replace a locked lyric "
             "predicate, and finish in a visibly changed body position"
+        ),
+        "phase_progression": (
+            "spread the phases through anticipation, committed movement, "
+            "follow-through, and supported recovery instead of front-loading "
+            "them at the beginning"
+        ),
+        "duration_coverage": (
+            "keep deliberate articulated performance active across the Scene "
+            "duration, including the final Shot"
         ),
     }
 
@@ -805,6 +826,13 @@ def _line_protocol_shape_contract(
             auxiliary_lines_per_shot = [0] * exact_shot_count
         elif exact_auxiliary_count == 1:
             auxiliary_lines_per_shot = [0] * (exact_shot_count - 1) + [1]
+    shot_start_windows = (
+        balanced_shot_start_windows(
+            scene.duration_seconds * 1000, exact_shot_count
+        )
+        if exact_shot_count is not None and scene.duration_seconds >= 8
+        else ()
+    )
     return {
         "minimum_shot_blocks": minimum_shots,
         "maximum_shot_blocks": maximum_shots,
@@ -814,6 +842,17 @@ def _line_protocol_shape_contract(
             f"strictly increasing integer from 1 through "
             f"{scene.duration_seconds * 1000 - 1}"
         ),
+        "balanced_shot_start_windows_ms": [
+            {
+                "shot_number": index + 2,
+                "minimum": minimum,
+                "preferred": preferred,
+                "maximum": maximum,
+            }
+            for index, (minimum, preferred, maximum) in enumerate(
+                shot_start_windows
+            )
+        ],
         "end_scene_after_shot_blocks": (
             exact_shot_count
             if exact_shot_count is not None
@@ -855,6 +894,13 @@ def _retry_record_shape_reminder(
             f"integer below {scene.duration_seconds * 1000}; write END_SCENE "
             f"only after END_SHOT number {exact}"
         )
+        windows = shape["balanced_shot_start_windows_ms"]
+        if windows:
+            shot_rule += "; later SHOT start windows are " + ", ".join(
+                f"Shot {value['shot_number']}={value['minimum']}-"
+                f"{value['maximum']}ms (preferred {value['preferred']}ms)"
+                for value in windows
+            )
     else:
         shot_rule = (
             f"write {shape['minimum_shot_blocks']}-"
@@ -1155,9 +1201,12 @@ def _scene_input(
                 lyric_action_blueprint.visible_result
             ),
             "application": (
-                "Python will replace generated ACTION choreography with this "
-                "blueprint after parsing; make COMPOSITION, ENVIRONMENT, and "
-                "CAMERA support its exact target, contact path, and result"
+                "Python merges this blueprint with generated supporting ACTIONs. "
+                "Echo locked phases exactly in order across Shots, inserting "
+                "preparation before contact and recovery after release. Target "
+                "2-4 meaningful action lines per Shot; results have a separate "
+                "reserved line. COMPOSITION, ENVIRONMENT and CAMERA support "
+                "the target without repeating ACTION prose."
             ),
         }
     return payload
@@ -1267,30 +1316,88 @@ def _plan_song_bible(
 
 
 def _lyric_action_request_scene(
-    scene: TimelineScene, protector: ReferenceProtector
+    scene: TimelineScene,
+    protector: ReferenceProtector,
+    *,
+    excluded_lyric_indices: tuple[int, ...] = (),
 ) -> dict[str, Any]:
+    lyric_lines = _lyric_lines(scene, protector)
+    filtered_lyric_lines = [
+        line
+        for line in lyric_lines
+        if line["index"] not in excluded_lyric_indices
+    ]
+    # Keep at least one source line available.  With no alternative, the
+    # retry feedback must force a non-verbal spatial reading of the same line.
+    if not filtered_lyric_lines:
+        filtered_lyric_lines = lyric_lines
     return {
         "scene_id": scene.scene_id,
         "duration_ms": scene.duration_seconds * 1000,
-        "lyric_lines": _lyric_lines(scene, protector),
+        "lyric_lines": filtered_lyric_lines,
+        "excluded_lyric_indices": list(excluded_lyric_indices),
         "allowed_response_modes": [
             "direct_subject_action",
             "direct_object_action",
             "spatial_metaphor",
         ],
         "semantic_grounding_order": [
-            "choose the earliest complete source predicate",
+            "choose the earliest complete non-vocal predicate among the "
+            "supplied lyric_lines and never select an excluded index",
             "identify its actor, physical head verb, and concrete target",
             "make the target recognizable before contact",
             "execute that exact verb instead of a visually convenient substitute",
             "show the completed result on the same target after release",
         ],
+        "subject_motion_contract": _subject_motion_contract(scene),
         "style_separation": (
-            "This stage has intentionally omitted global medium, background, "
-            "motif, and camera directions. Do not invent them or use them as "
-            "the action. Resolve only the source lyric's literal visible predicate."
+            "Global visual direction and Scene anchors are supplied only as "
+            "world and feasibility constraints. Do not copy medium, lighting, "
+            "background, motif, or camera prose into ACTION. Resolve the source "
+            "lyric's visible predicate inside that permitted world."
         ),
     }
+
+
+def _failed_lyric_anchor(
+    content: str,
+    *,
+    scene_id: int,
+    error: str,
+) -> int | None:
+    """Return an anchor that repeatedly produced forbidden verbal content."""
+
+    if not any(
+        marker in error
+        for marker in (
+            "forbidden marker '「'",
+            "forbidden marker '」'",
+            'forbidden marker \'"\'',
+            "screen-text cue",
+            "forbidden vocal cue",
+            "quotes source lyric text",
+        )
+    ):
+        return None
+    active_scene: int | None = None
+    for line in content.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) == 2 and parts[0] == "LYRIC_SCENE":
+            try:
+                active_scene = int(parts[1])
+            except ValueError:
+                active_scene = None
+            continue
+        if (
+            active_scene == scene_id
+            and len(parts) == 3
+            and parts[0] == "LYRIC_RESPONSE"
+        ):
+            try:
+                return int(parts[1])
+            except ValueError:
+                return None
+    return None
 
 
 def _plan_lyric_action_blueprints(
@@ -1321,6 +1428,9 @@ def _plan_lyric_action_blueprints(
     resolved: dict[int, LyricActionBlueprint] = {}
     failure_counts = {scene_id: 0 for scene_id in pending}
     feedback: dict[int, str] = {}
+    excluded_lyric_indices: dict[int, set[int]] = {
+        scene_id: set() for scene_id in pending
+    }
     serial_retry = False
     retry_count = 0
     attempt = 0
@@ -1339,12 +1449,22 @@ def _plan_lyric_action_blueprints(
                 "retention_constraints": planning_brief[
                     "retention_constraints"
                 ],
+                "global_visual_direction": planning_brief.get(
+                    "global_visual_direction", []
+                ),
+                "scene_anchors": planning_brief.get("scene_anchors", []),
             },
             "reference_legend": protector.legend(),
             "requested_scene_ids": requested_ids,
             "requested_scene_count": len(requested_ids),
             "scenes": [
-                _lyric_action_request_scene(request_pending[scene_id], protector)
+                _lyric_action_request_scene(
+                    request_pending[scene_id],
+                    protector,
+                    excluded_lyric_indices=tuple(
+                        sorted(excluded_lyric_indices[scene_id])
+                    ),
+                )
                 for scene_id in requested_ids
             ],
         }
@@ -1366,9 +1486,15 @@ def _plan_lyric_action_blueprints(
                     "active_batch": batch_number,
                     "active_attempt": attempt,
                     "pending_lyric_action_scene_ids": requested_ids,
+                    "excluded_lyric_indices": {
+                        str(scene_id): sorted(values)
+                        for scene_id, values in excluded_lyric_indices.items()
+                        if values
+                    },
                     "request_count": request_index,
                 }
             )
+        content = ""
         try:
             content, event = _call(
                 backend,
@@ -1391,8 +1517,16 @@ def _plan_lyric_action_blueprints(
                 debug_events=debug_events,
             )
             recovered, errors = parse_lyric_action_response(
-                content, request_pending, protector
+                content, request_pending, protector, repair_motion=False
             )
+            for scene_id, blueprint in list(recovered.items()):
+                if blueprint.lyric_anchor_index in excluded_lyric_indices[scene_id]:
+                    errors[scene_id] = (
+                        f"Scene {scene_id} selected excluded lyric index "
+                        f"{blueprint.lyric_anchor_index}; choose an index from "
+                        "the supplied lyric_lines"
+                    )
+                    del recovered[scene_id]
             if event is not None:
                 event.update(
                     {
@@ -1421,9 +1555,39 @@ def _plan_lyric_action_blueprints(
         failed = [scene_id for scene_id in requested_ids if scene_id in pending]
         for scene_id in failed:
             failure_counts[scene_id] += 1
-            feedback[scene_id] = errors.get(
+            diagnostic = errors.get(
                 scene_id, f"Scene {scene_id} lyric blueprint is missing"
             )
+            failed_anchor = _failed_lyric_anchor(
+                content,
+                scene_id=scene_id,
+                error=diagnostic,
+            )
+            timeline = pending[scene_id]
+            remaining_indices = {
+                index
+                for index in range(1, len(timeline.lyrics) + 1)
+                if index not in excluded_lyric_indices[scene_id]
+                and index != failed_anchor
+            }
+            if failed_anchor is not None and remaining_indices:
+                excluded_lyric_indices[scene_id].add(failed_anchor)
+                feedback[scene_id] = (
+                    f"{diagnostic}; lyric index {failed_anchor} generated "
+                    "forbidden quoted, spoken, mouth-driven, or visible text "
+                    "and is excluded from the next request; choose the "
+                    "earliest remaining non-vocal predicate and do not merely "
+                    "remove punctuation"
+                )
+            elif failed_anchor is not None:
+                feedback[scene_id] = (
+                    f"{diagnostic}; no alternate lyric remains, so reinterpret "
+                    f"lyric index {failed_anchor} as a non-verbal spatial or "
+                    "object action without quoted words, mouth motion, or "
+                    "visible text"
+                )
+            else:
+                feedback[scene_id] = diagnostic
         exhausted = [
             scene_id
             for scene_id in failed
@@ -1487,7 +1651,7 @@ def _apply_lyric_action_blueprint(
         assignments[target].append(action)
     shots: list[PlannedShot] = []
     for index, shot in enumerate(scene.shots):
-        assigned = assignments[index]
+        assigned = list(assignments[index])
         if not assigned:
             # A full profile may choose more Shots than the compact blueprint
             # contains phases. Preserve one model-authored supporting action
@@ -1503,10 +1667,55 @@ def _apply_lyric_action_blueprint(
                 action_units[-1],
             )
             assigned = [supporting_action]
+
+        # The compact blueprint locks lyric meaning, but it must not erase the
+        # fuller performance choreography generated with the Scene, Common
+        # prompt, camera path, and available environment in view.  Preserve
+        # compatible Subject-bearing supporting phases and remove only exact
+        # repeats.  Semantic conflicts remain a retry concern for the planner.
+        assigned = list(deduplicate_actions(tuple(assigned)))
+        # If the full plan echoes every locked phase in order, its placement
+        # of preparation/follow-through is usable. Otherwise keep locked order.
+        model_actions = deduplicate_actions(shot.subject_actions)
+        locked_keys = [action_signature(action) for action in assigned]
+        model_keys = [action_signature(action) for action in model_actions]
+        positions: list[int] = []
+        cursor = 0
+        for key in locked_keys:
+            try:
+                position = model_keys.index(key, cursor)
+            except ValueError:
+                positions = []
+                break
+            positions.append(position)
+            cursor = position + 1
+        if positions:
+            extra_budget = max(0, 4 - len(assigned))
+            chosen: list[str] = []
+            for position, action in enumerate(model_actions):
+                if position in positions:
+                    chosen.append(action)
+                elif extra_budget and re.search(r"<Subject [1-9][0-9]*>", action):
+                    chosen.append(action)
+                    extra_budget -= 1
+            assigned = chosen
+        capacity = max(4, len(assigned))
+        for supporting_action in shot.subject_actions:
+            if len(assigned) >= capacity:
+                break
+            if not re.search(r"<Subject [1-9][0-9]*>", supporting_action):
+                continue
+            assigned = list(deduplicate_actions((*assigned, supporting_action)))
         if index == shot_count - 1:
             # VISIBLE_RESULT is an outcome, not a substitute for the
             # performer's final motion phase.
-            assigned = [*assigned, blueprint.visible_result]
+            result_signature = action_signature(blueprint.visible_result)
+            assigned = [
+                action
+                for action in assigned
+                if action_signature(action) != result_signature
+            ][:7]
+            assigned.append(blueprint.visible_result)
         shots.append(
             PlannedShot(
                 start_ms=shot.start_ms,
@@ -1581,6 +1790,7 @@ def generate_mv_plan(
                 "vocal_warnings": [],
                 "visual_enrichment_profile": visual_profile.payload_summary(),
                 "duplicate_scene_diagnostics": [],
+                "duplicate_subject_action_diagnostics": [],
                 "duplicate_auxiliary_visual_diagnostics": [],
                 "last_error": None,
             }
@@ -1613,7 +1823,10 @@ def generate_mv_plan(
     vocal_warnings: list[dict[str, object]] = []
     motion_repairs: list[dict[str, object]] = []
     duplicate_diagnostics: list[dict[str, int]] = []
+    duplicate_action_diagnostics: list[dict[str, int]] = []
     duplicate_auxiliary_diagnostics: list[dict[str, int]] = []
+    pre_repair_scene_signatures: dict[int, tuple[object, ...]] = {}
+    pre_repair_action_signatures: dict[int, tuple[str, ...]] = {}
     scene_retries = 0
     lyric_action_blueprints: dict[int, LyricActionBlueprint] = {}
     scenes = list(timeline.scenes)
@@ -1851,6 +2064,7 @@ def generate_mv_plan(
                     serial_retry = True
                 accepted: dict[int, PlannedScene] = {}
                 duplicate_sources: dict[int, int] = {}
+                duplicate_action_sources: dict[int, int] = {}
                 camera_guard_diagnostics: dict[
                     int, list[dict[str, object]]
                 ] = {}
@@ -1863,41 +2077,50 @@ def generate_mv_plan(
                         recovered_scene = _apply_lyric_action_blueprint(
                             recovered_scene, blueprint
                         )
-                    # Blueprint ACTIONs are immutable at this stage and were
-                    # already motion-validated while the preplan was still
-                    # repairable.  Retrying the full Scene cannot change them.
-                    if blueprint is None:
-                        motion_issues = subject_motion_issues(
+                    recovered_scene = replace(
+                        recovered_scene,
+                        shots=tuple(
+                            replace(shot, subject_actions=deduplicate_actions(shot.subject_actions))
+                            for shot in recovered_scene.shots
+                        ),
+                    )
+                    pre_repair_scene_signature = scene_signature(
+                        recovered_scene
+                    )
+                    pre_repair_action_signature = subject_action_signature(
+                        recovered_scene
+                    )
+                    motion_issues = subject_motion_issues(
+                        recovered_scene,
+                        duration_seconds=pending[scene_id].duration_seconds,
+                    )
+                    if motion_issues:
+                        recovered_scene, added_actions = repair_subject_motion(
                             recovered_scene,
                             duration_seconds=pending[scene_id].duration_seconds,
+                            terminal_result=(blueprint.visible_result if blueprint else None),
                         )
-                        if motion_issues:
-                            recovered_scene, added_actions = repair_subject_motion(
-                                recovered_scene,
-                                duration_seconds=(
-                                    pending[scene_id].duration_seconds
-                                ),
+                        if not added_actions:
+                            errors[scene_id] = "; ".join(
+                                str(issue["message"])
+                                for issue in motion_issues
                             )
-                            if not added_actions:
-                                errors[scene_id] = "; ".join(
-                                    str(issue["message"])
-                                    for issue in motion_issues
-                                )
-                                continue
-                            diagnostic = {
-                                "scene_id": scene_id,
-                                "reason": str(motion_issues[0]["message"]),
-                                "added_actions": list(added_actions),
-                            }
-                            motion_repairs.append(diagnostic)
-                            LOGGER.warning(
-                                "[cl_mv_prompt_planner] Scene %d omitted "
-                                "purposeful whole-Subject motion; appended %d "
-                                "content-neutral ACTION phase(s) without "
-                                "retrying the complete Scene",
-                                scene_id,
-                                len(added_actions),
-                            )
+                            continue
+                        diagnostic = {
+                            "scene_id": scene_id,
+                            "reason": str(motion_issues[0]["message"]),
+                            "added_actions": list(added_actions),
+                        }
+                        motion_repairs.append(diagnostic)
+                        LOGGER.warning(
+                            "[cl_mv_prompt_planner] Scene %d omitted "
+                            "purposeful whole-Subject motion after lyric "
+                            "blueprint integration; appended %d "
+                            "content-neutral ACTION phase(s) without "
+                            "retrying the complete Scene",
+                            scene_id,
+                            len(added_actions),
+                        )
                     camera_issues = camera_guard_issues(recovered_scene)
                     vocal_issues = vocal_guard_issues(
                         recovered_scene, pending[scene_id]
@@ -1919,10 +2142,13 @@ def generate_mv_plan(
                     duplicate_id = next(
                         (
                             other_id
-                            for other_id, other_scene in sorted(existing.items())
+                            for other_id in sorted(existing)
                             if other_id < scene_id
-                            and scene_signature(other_scene)
-                            == scene_signature(recovered_scene)
+                            and pre_repair_scene_signatures.get(
+                                other_id,
+                                scene_signature(existing[other_id]),
+                            )
+                            == pre_repair_scene_signature
                         ),
                         None,
                     )
@@ -1942,6 +2168,43 @@ def generate_mv_plan(
                         errors[scene_id] = (
                             f"Scene {scene_id} duplicates the complete visual plan "
                             f"of Scene {duplicate_id}"
+                        )
+                        continue
+
+                    duplicate_action_id = next(
+                        (
+                            other_id
+                            for other_id in sorted(existing)
+                            if other_id < scene_id
+                            and pre_repair_action_signature
+                            and pre_repair_action_signatures.get(
+                                other_id,
+                                subject_action_signature(existing[other_id]),
+                            )
+                            == pre_repair_action_signature
+                        ),
+                        None,
+                    )
+                    if duplicate_action_id is not None:
+                        duplicate_action_sources[scene_id] = (
+                            duplicate_action_id
+                        )
+                        diagnostic = {
+                            "scene_id": scene_id,
+                            "duplicate_of": duplicate_action_id,
+                        }
+                        if diagnostic not in duplicate_action_diagnostics:
+                            duplicate_action_diagnostics.append(diagnostic)
+                        duplicate_avoidance.setdefault(scene_id, {})[
+                            duplicate_action_id
+                        ] = existing[duplicate_action_id]
+                        duplicate_repair_indices.setdefault(scene_id, 1)
+                        serial_retry = True
+                        errors[scene_id] = (
+                            f"Scene {scene_id} repeats the exact Subject ACTION "
+                            f"sequence of Scene {duplicate_action_id}; keep the "
+                            "locked lyric predicate but generate distinct "
+                            "supporting choreography"
                         )
                         continue
 
@@ -2029,6 +2292,12 @@ def generate_mv_plan(
                         continue
 
                     accepted[scene_id] = recovered_scene
+                    pre_repair_scene_signatures[scene_id] = (
+                        pre_repair_scene_signature
+                    )
+                    pre_repair_action_signatures[scene_id] = (
+                        pre_repair_action_signature
+                    )
                     if camera_issues:
                         for issue in camera_issues:
                             LOGGER.warning(
@@ -2089,6 +2358,9 @@ def generate_mv_plan(
                                 if issue["scene_id"] in recovered
                             ],
                             "duplicate_scene_sources": duplicate_sources,
+                            "duplicate_subject_action_sources": (
+                                duplicate_action_sources
+                            ),
                             "duplicate_repair_requirements": request_repairs,
                             "auxiliary_visual_repair_requirements": (
                                 request_auxiliary_repairs
@@ -2126,6 +2398,9 @@ def generate_mv_plan(
                             "vocal_warnings": vocal_warnings,
                             "motion_repairs": motion_repairs,
                             "duplicate_scene_diagnostics": duplicate_diagnostics,
+                            "duplicate_subject_action_diagnostics": (
+                                duplicate_action_diagnostics
+                            ),
                             "duplicate_auxiliary_visual_diagnostics": (
                                 duplicate_auxiliary_diagnostics
                             ),
@@ -2269,6 +2544,9 @@ def generate_mv_plan(
             "vocal_warnings": vocal_warnings,
             "motion_repairs": motion_repairs,
             "duplicate_scene_diagnostics": duplicate_diagnostics,
+            "duplicate_subject_action_diagnostics": (
+                duplicate_action_diagnostics
+            ),
             "duplicate_auxiliary_visual_diagnostics": (
                 duplicate_auxiliary_diagnostics
             ),
@@ -2296,6 +2574,9 @@ def generate_mv_plan(
                 "vocal_warnings": vocal_warnings,
                 "motion_repairs": motion_repairs,
                 "duplicate_scene_diagnostics": duplicate_diagnostics,
+                "duplicate_subject_action_diagnostics": (
+                    duplicate_action_diagnostics
+                ),
                 "duplicate_auxiliary_visual_diagnostics": (
                     duplicate_auxiliary_diagnostics
                 ),

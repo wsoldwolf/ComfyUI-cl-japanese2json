@@ -708,7 +708,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertEqual(rejected, {})
         self.assertIn("forbidden vocal cue", reject_errors[2])
 
-    def test_light_8b_preplans_one_scene_without_global_visual_direction(self) -> None:
+    def test_light_8b_preplans_one_scene_with_world_constraints(self) -> None:
         base = timeline_parser.parse_prompt_timeline(TIMELINE)
         second_lyric_scene = structures.TimelineScene(
             scene_id=3,
@@ -777,11 +777,92 @@ class MVPromptPlannerTests(unittest.TestCase):
             [[2], [3]],
         )
         for request in requests:
-            self.assertNotIn(
-                "global_visual_direction",
-                request["planning_constraints"],
+            self.assertEqual(
+                request["planning_constraints"]["global_visual_direction"],
+                planning_brief["global_visual_direction"],
+            )
+            self.assertEqual(
+                request["planning_constraints"]["scene_anchors"],
+                planning_brief.get("scene_anchors", []),
             )
             self.assertIn("style_separation", request["scenes"][0])
+            self.assertIn("subject_motion_contract", request["scenes"][0])
+
+    def test_lyric_preplan_excludes_anchor_that_repeats_forbidden_words(self) -> None:
+        base = timeline_parser.parse_prompt_timeline(TIMELINE)
+        scene = structures.TimelineScene(
+            scene_id=2,
+            duration_seconds=5,
+            is_continue=True,
+            state="voiced",
+            source_start_ms=4000,
+            source_end_ms=9000,
+            lyrics=(
+                structures.TimelineLyric(
+                    text="それでも永遠を口にする",
+                    section_label="[Chorus]",
+                    section_kind="custom",
+                ),
+                structures.TimelineLyric(
+                    text="古い門を越えて進む",
+                    section_label="[Chorus]",
+                    section_kind="custom",
+                ),
+            ),
+            lip_sync_lines=base.scenes[1].lip_sync_lines,
+            soundscape_lines=base.scenes[1].soundscape_lines,
+        )
+        brief = brief_parser.parse_planning_brief(BRIEF)
+        protector, planning_brief, _ = planning._build_protector(
+            brief,
+            structures.TimelineDocument(scenes=(scene,)),
+        )
+        rejected = lyric_blueprint(2).replace(
+            "COMPOSITION_REQUIREMENT\tCLMPSUB1Xの前に奥行きのある硬い対象面を配置する。",
+            "COMPOSITION_REQUIREMENT\t「永遠」を口にする動作を描写する。",
+        )
+        accepted = lyric_blueprint(2).replace(
+            "LYRIC_RESPONSE\t1\tdirect_subject_action",
+            "LYRIC_RESPONSE\t2\tdirect_subject_action",
+        )
+        backend = FakePlannerBackend([rejected, accepted])
+
+        recovered, _, retries = planning._plan_lyric_action_blueprints(
+            backend,
+            scenes=[scene],
+            planning_brief=planning_brief,
+            protector=protector,
+            call_settings={
+                "max_tokens": 4096,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "repetition_penalty": 1.05,
+                "seed": 1,
+            },
+            retry_max=2,
+            request_index=0,
+            batch_number=1,
+            progress_callback=None,
+            interrupt_callback=None,
+            debug_events=None,
+            debug_state=None,
+            scenes_per_request=1,
+        )
+
+        self.assertEqual(recovered[2].lyric_anchor_index, 2)
+        self.assertEqual(retries, 1)
+        retry_request = json.loads(
+            backend.calls[1]["messages"][1]["content"]
+        )
+        self.assertEqual(
+            retry_request["scenes"][0]["excluded_lyric_indices"], [1]
+        )
+        self.assertEqual(
+            [line["index"] for line in retry_request["scenes"][0]["lyric_lines"]],
+            [2],
+        )
+        self.assertIn("lyric index 1", retry_request["retry_feedback"])
+        self.assertIn("do not merely remove punctuation", retry_request["retry_feedback"])
 
     def test_visual_profiles_validate_auxiliary_visual_contracts(self) -> None:
         timeline = timeline_parser.parse_prompt_timeline(TIMELINE)
@@ -954,7 +1035,62 @@ class MVPromptPlannerTests(unittest.TestCase):
             "<Subject 1>は指先を対象面へ接触させて軌跡を刻む。",
             rendered,
         )
-        self.assertNotIn("片腕を空へ伸ばして踏み出す", rendered)
+        self.assertIn("片腕を空へ伸ばして踏み出す", rendered)
+
+    def test_lyric_blueprint_merge_preserves_supporting_performance(self) -> None:
+        scene = structures.PlannedScene(
+            scene_id=2,
+            scene_intent="対象へ働きかける。",
+            shots=(
+                structures.PlannedShot(
+                    start_ms=0,
+                    composition="<Subject 1>と石段を示す。",
+                    subject_actions=(
+                        "<Subject 1>は左足で石段を踏み、重心を前へ移す。",
+                        "<Subject 1>は胴体をひねって両腕を大きく開く。",
+                    ),
+                    environment="夜の境内を示す。",
+                    camera=structures.CameraPlan(
+                        "arc", "large", "moderate", "周囲を回り込む。"
+                    ),
+                ),
+            ),
+            lyric_anchor_index=1,
+            lyric_response_mode="direct_subject_action",
+        )
+        blueprint = structures.LyricActionBlueprint(
+            scene_id=2,
+            lyric_anchor_index=1,
+            lyric_response_mode="direct_subject_action",
+            composition_requirement="石段を接触対象として示す。",
+            subject_actions=(
+                "<Subject 1>は右手を石段へ伸ばす。",
+                "<Subject 1>は指先で石段へ触れる。",
+            ),
+            visible_result="石段の表面に短い傷が残る。",
+        )
+
+        merged = planning._apply_lyric_action_blueprint(scene, blueprint)
+
+        actions = merged.shots[0].subject_actions
+        self.assertEqual(actions[:2], blueprint.subject_actions)
+        self.assertIn(scene.shots[0].subject_actions[0], actions)
+        self.assertIn(scene.shots[0].subject_actions[1], actions)
+        self.assertEqual(actions[-1], blueprint.visible_result)
+
+    def test_duration_aware_motion_floor_and_shot_windows(self) -> None:
+        policy = module("node_mv_prompt_planner.performance_policy")
+        self.assertEqual(
+            [
+                policy.minimum_deliberate_action_phases(seconds)
+                for seconds in (4, 5, 8, 12)
+            ],
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(
+            policy.balanced_shot_start_windows(14000, 2),
+            ((4550, 7000, 9450),),
+        )
 
     def test_planning_brief_uses_existing_subset_only(self) -> None:
         brief = brief_parser.parse_planning_brief(BRIEF)
@@ -1863,7 +1999,8 @@ class MVPromptPlannerTests(unittest.TestCase):
 
         self.assertEqual(recovered_errors, {})
         self.assertEqual(len(recovered[16].shots), 2)
-        self.assertEqual([shot.start_ms for shot in recovered[16].shots], [0, 1200])
+        self.assertEqual([shot.start_ms for shot in recovered[16].shots], [0, 4550])
+        self.assertTrue(any("balanced coverage window" in line for line in captured.output))
         self.assertTrue(any("reassembled" in line for line in captured.output))
 
     def test_scene_parser_rejects_two_complete_records_for_same_scene(self) -> None:
@@ -2209,6 +2346,53 @@ class MVPromptPlannerTests(unittest.TestCase):
             2,
         )
         self.assertEqual(len(plan.scenes[1].shots[0].subject_actions), 3)
+
+    def test_exact_subject_action_sequence_retries_only_later_scene(self) -> None:
+        repeated_actions = (
+            "CLMPSUB1Xは右足を踏み出して重心を前へ移す。",
+            "CLMPSUB1Xは胴体をひねって左腕を斜め上へ開く。",
+        )
+        same_actions_second = scene_payload(
+            2, actions=repeated_actions
+        ).replace(
+            "人物と背景の奥行きを斜め構図で示す。",
+            "人物を遠い側面構図で示す。",
+        )
+        repaired_second = scene_payload(
+            2,
+            actions=(
+                "CLMPSUB1Xは左足を踏み出して重心を前へ移す。",
+                "CLMPSUB1Xは胴体をひねって両腕を斜め上へ開く。",
+            ),
+        )
+        backend = FakePlannerBackend(
+            [
+                song_bible(),
+                scene_payload(1, actions=repeated_actions)
+                + "\n"
+                + same_actions_second,
+                repaired_second,
+            ]
+        )
+
+        plan = planning.generate_mv_plan(
+            brief_parser.parse_planning_brief(BRIEF),
+            timeline_parser.parse_prompt_timeline(TIMELINE),
+            backend,
+            scenes_per_batch=2,
+            retry_max=2,
+        )
+
+        self.assertEqual(
+            plan.metadata["duplicate_subject_action_diagnostics"],
+            [{"scene_id": 2, "duplicate_of": 1}],
+        )
+        retry_input = json.loads(backend.calls[2]["messages"][1]["content"])
+        self.assertEqual(retry_input["requested_scene_ids"], [2])
+        self.assertIn(
+            "repeats the exact Subject ACTION sequence",
+            retry_input["retry_feedback"],
+        )
 
     def test_exact_auxiliary_visual_repetition_retries_only_later_scene(self) -> None:
         repeated = "細い帯が奥へ伸び、二方向へ分岐して停止する。"
@@ -2649,7 +2833,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(issues[0]["code"], "subject_deliberate_motion_missing")
-        self.assertEqual(issues[0]["required_phases"], 2)
+        self.assertEqual(issues[0]["required_phases"], 4)
 
     def test_subject_motion_contract_accepts_distinct_body_phases(self) -> None:
         active = structures.PlannedScene(
@@ -2662,6 +2846,8 @@ class MVPromptPlannerTests(unittest.TestCase):
                     subject_actions=(
                         "<Subject 1>は重心を前足へ移して深く踏み込む。",
                         "<Subject 1>は胴体をひねり、右腕を上へ伸ばす。",
+                        "<Subject 1>は左足へ重心を移して身体の向きを変える。",
+                        "<Subject 1>は両足で着地して両腕を広げた構えへ移る。",
                     ),
                     environment="背景が流れる。",
                     camera=structures.CameraPlan(
@@ -2709,7 +2895,7 @@ class MVPromptPlannerTests(unittest.TestCase):
             )
             self.assertEqual(
                 validation.subject_motion_issues(
-                    scene, duration_seconds=14
+                    scene, duration_seconds=5
                 ),
                 [],
             )
@@ -2809,7 +2995,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            validation.subject_motion_issues(scene, duration_seconds=14),
+            validation.subject_motion_issues(scene, duration_seconds=5),
             [],
         )
 

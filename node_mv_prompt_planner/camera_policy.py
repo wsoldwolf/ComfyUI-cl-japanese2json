@@ -8,6 +8,9 @@ foreground/background elements.
 from __future__ import annotations
 
 from typing import Any
+import re
+
+from .performance_policy import action_signature
 
 
 _SCHEDULED_PROFILE_IDS = frozenset(
@@ -277,3 +280,70 @@ def fallback_arc_description(
         ),
     }
     return descriptions.get((family_index, shot_index))
+
+
+def repair_scheduled_camera_description(
+    description: str,
+    *,
+    requirement: dict[str, Any],
+    actions: tuple[str, ...],
+) -> str:
+    """Repair only scheduled non-arc geometry; keep authored usable routes."""
+
+    kind = requirement["type"]
+    route_terms = {
+        "push": r"接近|近づ|前進|進み|進む",
+        "pull": r"後退|遠ざ|離れ|引いて|退く",
+        "truck": r"横移動|横方向|水平|横切|平行移動|左右|スイープ",
+        "pedestal": r"上昇|下降|高さ|垂直|上へ|下へ",
+    }
+    if kind not in route_terms:
+        return description
+    action_phrases = {
+        sentence.strip().removeprefix("続いて").rstrip("。.!！")
+        for action in actions
+        for sentence in re.split(r"(?<=。)", action)
+        if sentence.strip()
+    }
+    action_keys = {action_signature(value) for value in action_phrases}
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=。)", description):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        # A camera prefix can be followed by an exact copied ACTION clause.
+        # Remove that suffix, retaining any independently useful camera path.
+        for phrase in sorted(action_phrases, key=len, reverse=True):
+            body = sentence.rstrip("。.!！")
+            if phrase and body.endswith(phrase):
+                sentence = body[:-len(phrase)].rstrip("、, ")
+                if sentence:
+                    sentence += "。"
+        if not sentence:
+            continue
+        copied_action = action_signature(sentence) in action_keys
+        performer_command = (
+            re.match(r"<Subject [1-9][0-9]*>(?:は|が|の)", sentence)
+            and re.search(r"(?:手|腕|足|膝|身体|胴体).*(?:上げ|下げ|添え|踏|伸ば|曲げ|ひね|開い)", sentence)
+            and not re.search(r"追[う跡従]|捉え|映[すし]|見せ|焦点|構図|カメラ|視点", sentence)
+        )
+        if not copied_action and not performer_command:
+            kept.append(sentence)
+    cleaned = "".join(kept)
+    if (
+        cleaned
+        and re.search(route_terms[kind], cleaned)
+        and re.search(r"前景|背景|視差|奥行き", cleaned)
+    ):
+        return cleaned
+    fallback = {
+        "push": "斜め遠景から前景の奥行きを通って主要被写体へ接近し、動作と接触対象が見える斜め近景で終える。前景と背景の視差を保つ。",
+        "pull": "主要被写体の斜め近景から後方へ移動し、前景、全身の動作及び背景を一緒に見渡せる斜め広角構図で終える。奥行きに沿う視差を示す。",
+        "truck": "主要被写体の左斜め側方から前景を横切って右斜め側方へ水平移動し、動作を捉えながら近い前景と遠い背景の視差を変える。",
+        "pedestal": (
+            "高い斜め視点から前景に沿って垂直に下降し、主要被写体の動作と結果を捉える低い斜め視点で終える。前景と背景の上下方向の視差を示す。"
+            if re.search(r"descend|drop", requirement["spatial_goal"])
+            else "低い斜め視点から前景に沿って垂直に上昇し、主要被写体の動作と周囲を捉える高い斜め視点で終える。前景と背景の上下方向の視差を示す。"
+        ),
+    }
+    return fallback[kind]
