@@ -330,7 +330,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertIn("retry one Scene at a time", "\n".join(captured.output))
 
     def test_song_bible_target_spec_records_approved_design_boundaries(self) -> None:
-        text = (ROOT / "docs" / "cl_mv_prompt_planner_song_bible_spec.md").read_text(
+        text = (ROOT / "docs" / "spec" / "cl_mv_prompt_planner_song_bible_spec.md").read_text(
             encoding="utf-8"
         )
         for marker in (
@@ -1656,6 +1656,88 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertEqual(recovered_errors, {})
         self.assertEqual(len(recovered[2].shots), 2)
 
+    def test_locked_lyric_blueprint_prevents_retries_for_generated_subject_name(self) -> None:
+        timeline = timeline_parser.parse_prompt_timeline(
+            TIMELINE.replace("# シーン 5秒 継続", "# シーン 14秒 継続").replace(
+                "00:04.000-00:09.000", "00:04.000-00:18.000"
+            )
+        )
+        source_scene = timeline.scenes[1]
+        timeline_scene = structures.TimelineScene(
+            scene_id=9,
+            duration_seconds=source_scene.duration_seconds,
+            is_continue=source_scene.is_continue,
+            state=source_scene.state,
+            source_start_ms=source_scene.source_start_ms,
+            source_end_ms=source_scene.source_end_ms,
+            lyrics=source_scene.lyrics,
+            lip_sync_lines=source_scene.lip_sync_lines,
+            soundscape_lines=source_scene.soundscape_lines,
+        )
+        protector = module("node_mv_prompt_planner.placeholders").ReferenceProtector()
+        protector.protect(BRIEF)
+        light = visual_profiles.load_visual_profile("lyric_visuals_light_8b")
+        required_kind = light.scene_contract(9)["required_kind"]
+        response = "\n".join(
+            (
+                "SCENE\t9",
+                "SCENE_INTENT\t狐巫女が夜空を振り返る。",
+                "LYRIC_RESPONSE\t1\tdirect_subject_action",
+                "SHOT\t0",
+                "COMPOSITION\t狐巫女と鳥居を斜め構図で示す。",
+                "ACTION\t1\t狐巫女が右腕を上げる。",
+                "ENVIRONMENT\t夜霧が石畳の上を流れる。",
+                "CAMERA\tpull\tlarge\tmoderate\t斜め近景から後退し、人物と鳥居の視差を広げる。",
+                "END_SHOT",
+                "SHOT\t7000",
+                "COMPOSITION\t狐巫女と変化した対象を奥行き方向に並べる。",
+                "ACTION\t1\t狐巫女が身体をひねって振り返る。",
+                f"AUX_VISUAL\t{required_kind}\t淡い光が対象から夜空へ伸びる。",
+                "ENVIRONMENT\t薄い雲が月の前を横切る。",
+                "CAMERA\tarc\tlarge\tfast\t人物の後方から側面を通って正面まで半円状に回り込む。",
+                "END_SHOT",
+                "END_SCENE",
+            )
+        )
+        rejected, errors = validation.parse_scene_response(
+            response,
+            {9: timeline_scene},
+            protector,
+            visual_profile=light,
+        )
+        self.assertEqual(rejected, {})
+        self.assertIn("requires at least one ACTION naming", errors[9])
+
+        blueprint = structures.LyricActionBlueprint(
+            scene_id=9,
+            lyric_anchor_index=1,
+            lyric_response_mode="direct_subject_action",
+            composition_requirement="人物と対象の接触を同時に示す。",
+            subject_actions=("<Subject 1>は右腕を対象へ伸ばす。",),
+            visible_result="対象が月光を反射する。",
+        )
+        recovered, recovered_errors = validation.parse_scene_response(
+            response,
+            {9: timeline_scene},
+            protector,
+            visual_profile=light,
+            locked_lyric_action_blueprints={9: blueprint},
+        )
+        self.assertEqual(recovered_errors, {})
+        locked = planning._apply_lyric_action_blueprint(recovered[9], blueprint)
+        self.assertTrue(
+            any(
+                "<Subject 1>" in action
+                for shot in locked.shots
+                for action in shot.subject_actions
+            )
+        )
+        self.assertIn("<Subject 1>", locked.shots[1].subject_actions[0])
+        self.assertEqual(
+            locked.shots[1].subject_actions[-1],
+            blueprint.visible_result,
+        )
+
     def test_light_8b_recovers_aux_visual_after_end_shot(self) -> None:
         timeline = timeline_parser.parse_prompt_timeline(
             TIMELINE.replace("# シーン 5秒 継続", "# シーン 12秒 継続").replace(
@@ -2695,11 +2777,39 @@ class MVPromptPlannerTests(unittest.TestCase):
 
         self.assertEqual(len(additions), 1)
         self.assertEqual(repaired.shots[0].subject_actions[0], passive.shots[0].subject_actions[0])
-        self.assertIn("<Subject 1>は現在の形状と外観を維持", additions[0])
+        self.assertIn("<Subject 1>は", additions[0])
+        self.assertIn("足", additions[0])
+        self.assertIn("腕", additions[0])
+        self.assertNotIn("画面内を斜め前方へ大きく移動", additions[0])
         self.assertEqual(
             validation.subject_motion_issues(
                 repaired, duration_seconds=4
             ),
+            [],
+        )
+
+    def test_subject_motion_contract_accepts_adverbial_limb_actions(self) -> None:
+        scene = structures.PlannedScene(
+            scene_id=8,
+            scene_intent="人物が腕を使って姿勢を変える。",
+            shots=(
+                structures.PlannedShot(
+                    start_ms=0,
+                    composition="<Subject 1>を中央に置く。",
+                    subject_actions=(
+                        "<Subject 1>は右手を頭上までゆっくりと上げる。",
+                        "<Subject 1>は両手を胸の前で静かに合わせる。",
+                    ),
+                    environment="背景の光が変わる。",
+                    camera=structures.CameraPlan(
+                        "arc", "large", "moderate", "周囲を回り込む。"
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            validation.subject_motion_issues(scene, duration_seconds=14),
             [],
         )
 

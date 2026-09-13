@@ -17,7 +17,7 @@ def encoded(raw: bytes) -> str:
 
 class TextFileNodeTests(unittest.TestCase):
     def test_dedicated_spec_tracks_browser_and_backend_contract(self) -> None:
-        spec = (ROOT / "docs" / "cl_text_file_spec.md").read_text(encoding="utf-8")
+        spec = (ROOT / "docs" / "spec" / "cl_text_file_spec.md").read_text(encoding="utf-8")
         for marker in (
             "CLLoadTextFile",
             "file_name",

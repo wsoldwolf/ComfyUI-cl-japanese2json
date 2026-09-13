@@ -140,6 +140,10 @@ class PromptEnhancerProfileTests(unittest.TestCase):
                 self.assertIn("3DCGアニメーション", directives)
                 self.assertIn("フルアニメーション", directives)
                 self.assertIn("Live2D", directives)
+                self.assertIn("リップシンク", directives)
+                self.assertIn("口を閉じたまま固定しない", directives)
+                self.assertIn("足裏の接地", directives)
+                self.assertIn("理由のない浮遊", directives)
 
     def test_system_prompt_composes_only_selected_profile_policy(self):
         value = prompt_loader.load_enhancer_system_prompt(
@@ -214,6 +218,52 @@ class PromptEnhancerProtocolTests(unittest.TestCase):
         self.assertEqual(parsed.background_lines, ("夜の森を描く。",))
         self.assertEqual(len(parsed.warnings), 2)
 
+    def test_missing_final_marker_is_restored_only_after_full_validation(self):
+        parsed = protocol.parse_enhancement_response(
+            "ENHANCEMENT_V1\nSOURCE\tC001\tbackground\n"
+            "BACKGROUND\t夜霧が石畳の上を流れる。",
+            expected_source_ids=("C001",),
+            minimum_background_lines=1,
+            maximum_background_lines=1,
+        )
+        self.assertEqual(parsed.classifications, {"C001": "background"})
+        self.assertEqual(
+            parsed.background_lines,
+            ("夜霧が石畳の上を流れる。",),
+        )
+        self.assertTrue(any("END_ENHANCEMENT" in item for item in parsed.warnings))
+
+        with self.assertRaisesRegex(
+            errors.EnhancerResponseError,
+            "SOURCE ids differ",
+        ):
+            protocol.parse_enhancement_response(
+                "ENHANCEMENT_V1\nBACKGROUND\t夜霧が石畳の上を流れる。",
+                expected_source_ids=("C001",),
+                minimum_background_lines=1,
+                maximum_background_lines=1,
+            )
+
+    def test_non_background_record_is_discarded_when_minimum_remains(self):
+        parsed = protocol.parse_enhancement_response(
+            "ENHANCEMENT_V1\nSOURCE\tC001\tbackground\n"
+            "BACKGROUND\t夜霧が石畳の上を流れる。\n"
+            "BACKGROUND\t鳥居の前で人物がポーズをとっている。\n"
+            "BACKGROUND\t冷たい月光が濡れた石畳を照らす。\n"
+            "END_ENHANCEMENT",
+            expected_source_ids=("C001",),
+            minimum_background_lines=2,
+            maximum_background_lines=3,
+        )
+        self.assertEqual(
+            parsed.background_lines,
+            (
+                "夜霧が石畳の上を流れる。",
+                "冷たい月光が濡れた石畳を照らす。",
+            ),
+        )
+        self.assertTrue(any("discarded BACKGROUND" in item for item in parsed.warnings))
+
     def test_protocol_rejects_missing_ids_unknown_classes_and_references(self):
         cases = (
             "ENHANCEMENT_V1\nEND_ENHANCEMENT",
@@ -227,6 +277,30 @@ class PromptEnhancerProtocolTests(unittest.TestCase):
                     raw,
                     expected_source_ids=("C001",),
                     minimum_background_lines=1 if "BACKGROUND" in raw else 0,
+                    maximum_background_lines=1,
+                )
+
+    def test_protocol_rejects_performer_pose_and_framing_as_background(self):
+        invalid_lines = (
+            "鳥居の前で人物がポーズをとっている。",
+            "構図は全身ショットで中央に配置する。",
+            "正面からの視点で被写体を捉える。",
+        )
+        for value in invalid_lines:
+            raw = (
+                "ENHANCEMENT_V1\n"
+                "SOURCE\tC001\tbackground\n"
+                f"BACKGROUND\t{value}\n"
+                "END_ENHANCEMENT"
+            )
+            with self.subTest(value=value), self.assertRaisesRegex(
+                errors.EnhancerResponseError,
+                "environment only",
+            ):
+                protocol.parse_enhancement_response(
+                    raw,
+                    expected_source_ids=("C001",),
+                    minimum_background_lines=1,
                     maximum_background_lines=1,
                 )
 

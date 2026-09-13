@@ -1473,7 +1473,7 @@ def _apply_lyric_action_blueprint(
 ) -> PlannedScene:
     """Lock focused semantic choreography while retaining spatial/camera work."""
 
-    action_units = [*blueprint.subject_actions, blueprint.visible_result]
+    action_units = list(blueprint.subject_actions)
     shot_count = len(scene.shots)
     assignments: list[list[str]] = [[] for _ in scene.shots]
     for index, action in enumerate(action_units):
@@ -1483,10 +1483,24 @@ def _apply_lyric_action_blueprint(
     for index, shot in enumerate(scene.shots):
         assigned = assignments[index]
         if not assigned:
-            # A future profile may request more Shots than the compact
-            # blueprint has action units.  Repeat the locked end state rather
-            # than reintroducing unrelated choreography from the Scene LLM.
-            assigned = [action_units[-1]]
+            # A full profile may choose more Shots than the compact blueprint
+            # contains phases. Preserve one model-authored supporting action
+            # from that Shot; it was generated around the locked blueprint.
+            # Fall back to the final locked action only when the model supplied
+            # no usable action at all.
+            supporting_action = next(
+                (
+                    action
+                    for action in shot.subject_actions
+                    if re.search(r"<Subject [1-9][0-9]*>", action)
+                ),
+                action_units[-1],
+            )
+            assigned = [supporting_action]
+        if index == shot_count - 1:
+            # VISIBLE_RESULT is an outcome, not a substitute for the
+            # performer's final motion phase.
+            assigned = [*assigned, blueprint.visible_result]
         shots.append(
             PlannedShot(
                 start_ms=shot.start_ms,
@@ -1786,6 +1800,7 @@ def generate_mv_plan(
                     request_pending,
                     protector,
                     visual_profile=visual_profile,
+                    locked_lyric_action_blueprints=lyric_action_blueprints,
                 )
                 for scene_id, message in errors.items():
                     if any(

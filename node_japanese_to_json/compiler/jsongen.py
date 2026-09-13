@@ -836,6 +836,12 @@ def _source_vocal_binding(
                 binding = SourceVocalBinding(subject=subject, speaker=subject)
             if shot_number not in binding.shot_numbers:
                 binding.shot_numbers.append(shot_number)
+    if binding is not None:
+        # Source Vocal is a Scene-level timeline binding. Reduced Markdown
+        # deliberately renders its canonical bullet only once (in Shot 1),
+        # but that compact representation must not disable visible lip-sync
+        # after a later Shot boundary.
+        binding.shot_numbers = list(range(1, len(scene.shots) + 1))
     return binding
 
 
@@ -1207,16 +1213,7 @@ def _render_shot_line(
     source_lip_sync = SOURCE_VOCAL_LIP_SYNC_LINE_RE.fullmatch(line)
     if source_lip_sync is not None:
         subject = int(source_lip_sync.group(1))
-        return (
-            f"<Subject {subject}> (S{subject}) visually performs and lip-syncs only "
-            "to the aligned Source Vocal track at the current absolute Source "
-            "Timeline interval. Treat detected human-vocal activity, phoneme timing, "
-            "visible mouth closures, sustained notes, and phrase boundaries in that "
-            "track as authoritative. During instrumental or silent intervals, keep "
-            "the lips closed. Continue phrases seamlessly across continuation-scene "
-            "boundaries; do not infer lyrics or generate, replace, repeat, translate, "
-            "or add any vocal sound."
-        )
+        return _source_vocal_lip_sync_instruction(subject)
     lip_sync = LIP_SYNC_LINE_RE.fullmatch(line)
     if lip_sync is None:
         return _with_internal_speaker_ids(line, context=context)
@@ -1265,10 +1262,25 @@ def _render_shot_line(
     )
 
 
+def _source_vocal_lip_sync_instruction(subject: int) -> str:
+    return (
+        f"<Subject {subject}> (S{subject}) visibly performs continuous lip-sync "
+        "throughout this entire shot only to the aligned Source Vocal track at "
+        "the current absolute Source Timeline interval. Keep the mouth actively "
+        "changing through every detected sung phrase; treat human-vocal activity, "
+        "phoneme timing, visible mouth closures, sustained notes, and phrase "
+        "boundaries in that track as authoritative. During instrumental or silent "
+        "intervals, keep the lips closed. Continue phrases seamlessly across shot "
+        "and continuation-scene boundaries; do not infer lyrics or generate, "
+        "replace, repeat, translate, or add any vocal sound."
+    )
+
+
 def _detailed_description_block(
     scene: Scene,
     voice_audio: dict[int, tuple[int, int]],
     background_music_reuse: BackgroundMusicReuse | None,
+    source_vocal: SourceVocalBinding | None,
     preserves_source_audio: bool,
 ) -> str:
     parts = [_sentence(line) for line in scene.preamble]
@@ -1315,6 +1327,17 @@ def _detailed_description_block(
             )
             for line_number, line in enumerate(shot.lines, start=1)
         ]
+        if (
+            source_vocal is not None
+            and shot_number in source_vocal.shot_numbers
+            and not any(
+                SOURCE_VOCAL_LIP_SYNC_LINE_RE.fullmatch(line) is not None
+                for line in shot.lines
+            )
+        ):
+            rendered_lines.append(
+                _source_vocal_lip_sync_instruction(source_vocal.subject)
+            )
         body = "\n".join(rendered_lines)
         present_audio = {
             int(match.group(1)) for match in AUDIO_REFERENCE_RE.finditer(body)
@@ -1551,6 +1574,7 @@ def _shot_object(
         scene,
         voice_audio,
         background_music_reuse,
+        source_vocal,
         preserves_source_audio,
     )
     detailed_audio = {

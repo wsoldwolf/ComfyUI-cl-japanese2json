@@ -121,7 +121,7 @@ class ConnectedComboTests(unittest.TestCase):
         self.assertIn('"combo",', source)
 
     def test_spec_keeps_manual_and_connected_nodes_separate(self) -> None:
-        source = (ROOT / "docs" / "cl_connected_combo_spec.md").read_text(
+        source = (ROOT / "docs" / "spec" / "cl_connected_combo_spec.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("`CL String Combo`はユーザー", source)

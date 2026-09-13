@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -85,10 +86,11 @@ class FakeVisionBackend:
             for part in kwargs["messages"][1]["content"]
             if part.get("type") == "image_url"
         ]
-        assert len(image_parts) == 1
-        uri = image_parts[0]["image_url"]["url"]
-        assert uri.startswith("data:image/png;base64,")
-        assert base64.b64decode(uri.split(",", 1)[1]).startswith(b"\x89PNG")
+        assert len(image_parts) <= 1
+        if image_parts:
+            uri = image_parts[0]["image_url"]["url"]
+            assert uri.startswith("data:image/png;base64,")
+            assert base64.b64decode(uri.split(",", 1)[1]).startswith(b"\x89PNG")
         callback = kwargs.get("progress_callback")
         if callback:
             callback(1)
@@ -437,29 +439,28 @@ class VisionAnalyzerTests(unittest.TestCase):
         )
         self.assertEqual(observation.visible_text, ("OPEN 24 HOURS",))
 
-    def test_protocol_normalizes_known_small_model_feature_aliases(self):
-        response = VALID_RESPONSE.replace(
-            "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
-            "SUBJECT_FEATURE\tstockings\t白い脚衣\tclear",
-        ).replace(
+    def test_protocol_leaves_semantic_translation_to_llm_repair(self):
+        english_description = VALID_RESPONSE.replace(
             "SUBJECT_FEATURE\tface\t少し吊り目の顔\tclear",
             "SUBJECT_FEATURE\tears\tfox ears、耳の先端に赤い花飾り付き\tclear",
         )
-        observation, warnings = validation.parse_observation_response(response)
-        features = observation.primary_subject.features
-        self.assertEqual(features[0].category, "ears")
-        self.assertEqual(
-            features[0].description,
-            "狐耳、耳の先端に赤い花飾り付き",
+        with self.assertRaisesRegex(Exception, "untranslated English prose"):
+            validation.parse_observation_response(english_description)
+
+        object_category = VALID_RESPONSE.replace(
+            "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
+            "SUBJECT_FEATURE\tstockings\t白い脚衣\tclear",
         )
-        self.assertEqual(features[1].category, "clothing")
-        self.assertEqual(features[1].description, "白い脚衣")
-        self.assertTrue(
-            any("Translated a known SUBJECT_FEATURE term" in item for item in warnings)
+        with self.assertRaisesRegex(Exception, "unknown category 'stockings'"):
+            validation.parse_observation_response(object_category)
+
+        repair_request = node_mod._observation_repair_request(
+            english_description,
+            validation.VisionObservationError("untranslated English prose"),
         )
-        self.assertTrue(
-            any("category 'stockings' to 'clothing'" in item for item in warnings)
-        )
+        repair_data = json.loads(repair_request)
+        self.assertEqual(repair_data["candidate_response"], english_description)
+        self.assertIn("untranslated English prose", repair_data["validation_error"])
 
     def test_protocol_keeps_rejecting_unknown_english_feature_prose(self):
         response = VALID_RESPONSE.replace(
@@ -653,7 +654,21 @@ class VisionAnalyzerTests(unittest.TestCase):
                 frame_count=1,
                 warnings=(),
             )
-            backend = FakeVisionBackend(["bad response", VALID_RESPONSE])
+            invalid_response = VALID_RESPONSE.replace(
+                "SUBJECT_FEATURE\tface\t少し吊り目の顔\tclear",
+                "SUBJECT_FEATURE\tears\tfox ears、耳の先端に赤い花飾り付き\tclear",
+            ).replace(
+                "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
+                "SUBJECT_FEATURE\tstockings\t白い脚衣\tclear",
+            )
+            repaired_response = VALID_RESPONSE.replace(
+                "SUBJECT_FEATURE\tface\t少し吊り目の顔\tclear",
+                "SUBJECT_FEATURE\tears\t狐耳、耳の先端に赤い花飾り付き\tclear",
+            ).replace(
+                "SUBJECT_FEATURE\thair\t長い淡い金髪\tclear",
+                "SUBJECT_FEATURE\tclothing\t白い脚衣\tclear",
+            )
+            backend = FakeVisionBackend([invalid_response, repaired_response])
             instance = node_mod.CLImageAnalyzerVisionGGUF()
             instance._backend = backend
             instance._cache = cache_mod.ObservationCache(lambda: root / "cache")
@@ -700,9 +715,21 @@ class VisionAnalyzerTests(unittest.TestCase):
             self.assertIn("retries: 1", first[3])
             self.assertIn("cache: hit (memory)", second[3])
             self.assertIn("<Picture 2>", second[2])
+            self.assertIn("狐耳、耳の先端に赤い花飾り付き", first[2])
+            self.assertIn("白い脚衣", first[2])
+            self.assertNotIn("fox ears", first[2])
             self.assertIn("成人の狼娘", hinted[2])
             self.assertIn("subject_hint: lock_identity -> consistent", hinted[3])
             self.assertEqual(len(backend.complete_calls), 4)
+            image_counts = [
+                sum(
+                    part.get("type") == "image_url"
+                    for part in call["messages"][1]["content"]
+                )
+                for call in backend.complete_calls
+            ]
+            self.assertEqual(image_counts, [1, 0, 1, 1])
+            self.assertIn("Automatically repaired", first[3])
             self.assertGreaterEqual(backend.clear_count, 2)
 
     def test_external_image_override_bypasses_internal_loader_and_reuses_cache(self):

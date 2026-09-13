@@ -4,7 +4,7 @@
 
 本書は`CL Load Text File (Drag & Drop)`の詳細仕様を定義する。本ノードはComfyUIのブラウザ画面で任意のローカル場所にあるプレーンテキストを選択又はD&Dし、その内容をSTRINGとして他ノードへ渡す。
 
-本書を当該ノードの正本とする。共通の登録要件は`docs/cl_japanese2json_comfyui_node_spec.md`に従う。
+本書を当該ノードの正本とする。共通の登録要件は`docs/spec/cl_japanese2json_comfyui_node_spec.md`に従う。
 
 バックエンドはユーザー指定パスを開かない。ブラウザが読み取ったバイト列だけをBase64として受け取り、再検証して復号する。この境界により、`ComfyUI/input`へのコピー、サーバーからの任意パス参照及びパストラバーサルを必要としない。
 

@@ -35,7 +35,7 @@ def audio(samples, sample_rate=4):
 
 class AudioPadTests(unittest.TestCase):
     def test_dedicated_spec_tracks_public_contract(self) -> None:
-        spec = (ROOT / "docs" / "cl_audio_pad_spec.md").read_text(encoding="utf-8")
+        spec = (ROOT / "docs" / "spec" / "cl_audio_pad_spec.md").read_text(encoding="utf-8")
         for marker in (
             "CLAudioPad",
             "CLAudioPadPair",

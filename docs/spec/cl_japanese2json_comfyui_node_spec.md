@@ -2,7 +2,7 @@
 
 ## 1. 目的
 
-本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー、グローバルプロンプト統合、GGUFによる保護付きプロンプト拡張、ユーザー定義文字列コンボ、接続先追従コンボ及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/cl_audio_pad_spec.md`、`docs/cl_text_file_spec.md`、`docs/cl_vocal2promptseg_spec.md`、`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_mv_prompt_planner_song_bible_spec.md`、`docs/cl_prompt_merger_spec.md`、`docs/cl_prompt_enhancer_spec.md`、`docs/cl_string_combo_spec.md`、`docs/cl_connected_combo_spec.md`及び`docs/cl_scene_limiter_spec.md`である。
+本書は`cl_japanese2json`コンパイラ、PCM無音パディング機能、任意パスのプレーンテキスト読込機能、ボーカルステムからScene/SRTを生成する補助機能、MVプランナー、グローバルプロンプト統合、GGUFによる保護付きプロンプト拡張、ユーザー定義文字列コンボ、接続先追従コンボ及びScene制限機能を、独立したComfyUIカスタムノードとして提供する共通実装要件を定義する。入力文法とJSON生成規則の正本は`docs/spec/cl_japanese2json_spec.md`、各補助ノードの詳細な正本は`docs/spec/cl_audio_pad_spec.md`、`docs/spec/cl_text_file_spec.md`、`docs/spec/cl_vocal2promptseg_spec.md`、`docs/spec/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/spec/cl_mv_prompt_planner_song_bible_spec.md`、`docs/spec/cl_prompt_merger_spec.md`、`docs/spec/cl_prompt_enhancer_spec.md`、`docs/spec/cl_string_combo_spec.md`、`docs/spec/cl_connected_combo_spec.md`及び`docs/spec/cl_scene_limiter_spec.md`である。
 
 本版はドラフトの破壊的改訂であり、後方互換性を要件としない。実装は明示的Shot、`prompt_prefix`へ格納するCommon、Python生成の話者ID、Retention、台詞指定及び参照音声駆動のAudio再利用リップシンク、BGM生成、既存BGM Audioの再利用、BGM内ボーカルへのリップシンク及びFull-Reference 6セクションを対象とする。
 
@@ -74,11 +74,11 @@ OUTPUT_NODE = False
 
 `compile_json()`は1要素tuple`(json_text,)`を返す。
 
-`CLVocalToPromptSegments`のクラスメタデータ、4出力、入力順序、Whisper探索、PCM解析、Lyrics整列、SRT及びテンプレート生成規則は`docs/cl_vocal2promptseg_spec.md`に従う。
+`CLVocalToPromptSegments`のクラスメタデータ、4出力、入力順序、Whisper探索、PCM解析、Lyrics整列、SRT及びテンプレート生成規則は`docs/spec/cl_vocal2promptseg_spec.md`に従う。
 
-`CLMVPromptPlannerGGUF`、`CLPromptMerger`、`CLStringCombo`及び`CLSceneLimiter`の契約は、それぞれ`docs/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/cl_prompt_merger_spec.md`、`docs/cl_string_combo_spec.md`及び`docs/cl_scene_limiter_spec.md`に従う。MVプランナーのSong Bible v3と構造化入力、直前Scene状態、重複排除及びカメラ意味ガードは`docs/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/cl_mv_prompt_visual_profiles_spec.md`に従う。
+`CLMVPromptPlannerGGUF`、`CLPromptMerger`、`CLStringCombo`及び`CLSceneLimiter`の契約は、それぞれ`docs/spec/cl_mv_prompt_planner_comfyui_node_spec.md`、`docs/spec/cl_prompt_merger_spec.md`、`docs/spec/cl_string_combo_spec.md`及び`docs/spec/cl_scene_limiter_spec.md`に従う。MVプランナーのSong Bible v3と構造化入力、直前Scene状態、重複排除及びカメラ意味ガードは`docs/spec/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/spec/cl_mv_prompt_visual_profiles_spec.md`に従う。
 
-`CLAudioPad`及び`CLAudioPadPair`の詳細契約は`docs/cl_audio_pad_spec.md`、`CLLoadTextFile`の詳細契約は`docs/cl_text_file_spec.md`に従う。本書の4.2、4.2.1及び4.3は共通仕様から参照するための概要であり、相違する場合は各詳細仕様を優先する。
+`CLAudioPad`及び`CLAudioPadPair`の詳細契約は`docs/spec/cl_audio_pad_spec.md`、`CLLoadTextFile`の詳細契約は`docs/spec/cl_text_file_spec.md`に従う。本書の4.2、4.2.1及び4.3は共通仕様から参照するための概要であり、相違する場合は各詳細仕様を優先する。
 
 `CLLoadTextFile`のクラスメタデータは次である。
 
@@ -324,7 +324,7 @@ Qwen3と判定でき、呼出しシグネチャが対応する場合は次を追
 
 固定プロンプト用語は、保護台詞をプレースホルダ化した後、外部CSV辞書によりLLM送信前に決定論的な英語へ正規化する。応答で`entire画面`等の混在表記が返った場合も、通常検証より前に同じ辞書で修復してWARNINGを記録する。この修復は保護台詞内部及び辞書にない日本語へ適用しない。
 
-同梱辞書`node_japanese_to_json/dictionaries/prompt_terms.csv`の後に、任意の`node_japanese_to_json/dictionaries/prompt_terms.user.csv`、`ComfyUI/user/cl_japanese2json/prompt_terms.csv`を順に重ね、後者の同一`source`を優先する。更新時刻又はサイズが変化した辞書はComfyUI再起動なしで次の実行時に再読込する。CSV検証、適用順及びエラー条件は`docs/cl_prompt_term_dictionary_spec.md`に従う。この機能のためにノード入力を追加せず、保存済みワークフローのウィジェット順を維持する。
+同梱辞書`node_japanese_to_json/dictionaries/prompt_terms.csv`の後に、任意の`node_japanese_to_json/dictionaries/prompt_terms.user.csv`、`ComfyUI/user/cl_japanese2json/prompt_terms.csv`を順に重ね、後者の同一`source`を優先する。更新時刻又はサイズが変化した辞書はComfyUI再起動なしで次の実行時に再読込する。CSV検証、適用順及びエラー条件は`docs/spec/cl_prompt_term_dictionary_spec.md`に従う。この機能のためにノード入力を追加せず、保存済みワークフローのウィジェット順を維持する。
 
 ## 7. システムプロンプト
 
@@ -625,7 +625,7 @@ The camera moves closer.
 
 時間範囲付きBGM再利用では、Scene preambleの後、`[Shot 1]`より前に、元区間をScene全体へ1:1で割り当てて再構成、再生成又はリタイミングしない固定文を追加する。
 
-Source audio保持では、現在のSource Timeline絶対時間区間をScene全体で連続使用し、生成、置換、再開始、再ミックス、リタイミング、ループ、クロスフェード、複製又は音声追加を行わない固定文を`[Shot 1]`より前へ追加する。`SOURCE_VOCAL`行はSource Vocalの人声区間、音素、閉口、持続音及びフレーズ境界だけで口形を駆動し、無声区間では閉口する固定文へ置換する。
+Source audio保持では、現在のSource Timeline絶対時間区間をScene全体で連続使用し、生成、置換、再開始、再ミックス、リタイミング、ループ、クロスフェード、複製又は音声追加を行わない固定文を`[Shot 1]`より前へ追加する。`SOURCE_VOCAL`行はScene単位の結合として扱い、Source Vocalの人声区間、音素、閉口、持続音及びフレーズ境界だけで口形を駆動する固定文をScene内の全Shotへ展開する。発声区間中は口形を継続的に変化させ、無声区間では閉口し、Shot境界で同期を解除又は再開始しない。
 
 ### 10.5 overall_soundscape
 
@@ -896,7 +896,7 @@ set "FORCE_CMAKE=1"
 - `CLLoadTextFile`の登録、`WEB_DIRECTORY`、1出力及び非表示transport入力
 - テキストファイルのUTF-8/BOM復号、LF正規化、空ファイル、Base64/NUL/容量エラー及び内容依存キャッシュ指紋
 - フロントエンドがFile APIとD&Dを使用し、upload API又は本文プレビューを持たないこと
-- ローカルWhisperモデル探索、PCM有声検出、先頭Lyricsを制限したWhisper初期ヒント、Whisper CLI既定の前文引き継ぎ、初回60秒・アンカー後20秒の探索上限と前後アンカー限定救済によるSuno Lyrics単調整列、VAD・類似度統計、入力Lyrics対SRTセルフテスト、範囲外を拒否するミリ秒単位SRT一律オフセット、有声Sceneへの任意歌詞コメント、SRT及び現行Markdownテンプレート生成（詳細は`docs/cl_vocal2promptseg_spec.md`）
+- ローカルWhisperモデル探索、PCM有声検出、先頭Lyricsを制限したWhisper初期ヒント、Whisper CLI既定の前文引き継ぎ、初回60秒・アンカー後20秒の探索上限と前後アンカー限定救済によるSuno Lyrics単調整列、VAD・類似度統計、入力Lyrics対SRTセルフテスト、範囲外を拒否するミリ秒単位SRT一律オフセット、有声Sceneへの任意歌詞コメント、SRT及び現行Markdownテンプレート生成（詳細は`docs/spec/cl_vocal2promptseg_spec.md`）
 - UI秒数、H3 Planフレーム数及び追加マージンからのサンプル数計算
 - `match_audio`の継続時間を基準とする同一及び異種サンプルレートでのサンプル数計算
 - `end`、`start`、`both`のPCM値0.0配置

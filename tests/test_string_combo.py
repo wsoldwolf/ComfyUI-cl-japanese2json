@@ -103,7 +103,7 @@ class StringComboTests(unittest.TestCase):
         self.assertIn('value[index + 1] === "|"', source)
 
     def test_spec_requires_right_click_property_and_hidden_transport(self) -> None:
-        source = (ROOT / "docs" / "cl_string_combo_spec.md").read_text(
+        source = (ROOT / "docs" / "spec" / "cl_string_combo_spec.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("右クリック→プロパティーパネル", source)

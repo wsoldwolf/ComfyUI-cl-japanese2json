@@ -159,6 +159,8 @@ class CoreIntegrationTests(unittest.TestCase):
 ## ショット
 * <Subject 1>が音楽に合わせて身体を動かす。
 * リップシンク: <Subject 1> <- ソースボーカル
+## ショット 4秒
+* <Subject 1>が片腕を上げながら身体の向きを変える。
 ## 音響
 * 発声: ソースボーカルのみ
 * ソース音声: 完全維持"""
@@ -171,6 +173,17 @@ class CoreIntegrationTests(unittest.TestCase):
         prompt = parsed["shots"][0]["prompt"]
         self.assertNotIn("<Audio ", "\n".join(prompt))
         self.assertIn("Source Vocal", prompt[3])
+        self.assertEqual(
+            prompt[3].count(
+                "visibly performs continuous lip-sync throughout this entire shot"
+            ),
+            2,
+        )
+        self.assertIn(
+            "Source Vocal track",
+            prompt[3].split("[Shot 2]", 1)[1],
+        )
+        self.assertIn("[Shot 1], [Shot 2]", prompt[0])
         self.assertIn("locked Source Timeline full mix unchanged", prompt[5])
 
     def test_54_second_bgm_is_sliced_across_six_scenes(self) -> None:

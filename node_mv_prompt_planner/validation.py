@@ -6,6 +6,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import replace
+from typing import Mapping
 
 from .camera_policy import fallback_arc_description, required_camera_sequence
 from .errors import PlannerResponseError
@@ -191,8 +192,8 @@ _DELIBERATE_SUBJECT_MOTION_RE = re.compile(
     r"進む|退く|振り返|向き直|方向転換|ひね|捻|回転|旋回|しゃが|"
     r"屈|起き上|立ち上|重心を|体重を|姿勢を(?:変|低|高|立て直)|"
     r"身を(?:起|沈|伏|反|翻|乗り出|引|寄)|"
-    r"(?:腕|手|指|脚|足)を(?:伸|引|上|下|振|差し|かざ|翳|握|開|閉|"
-    r"交差|曲|広げ|戻|置|当て|動か|揺すぶ|集め)|"
+    r"(?:腕|手|指|脚|足)を[^。、]{0,24}(?:伸|引|上|下|振|差し|かざ|翳|"
+    r"掲げ|握|開|閉|合わ|交差|曲|広げ|戻|置|当て|動か|揺すぶ|集め)|"
     r"(?:身体|上半身|胴体|腰|肩|首|頭部|頭|顔)を"
     r"(?:傾|倒|起|ひね|捻|回|沈|引|押|振|動か|揺すぶ)|"
     r"掴|握|押し|引っ|引き抜|触れ|接触|離し|払|投げ|蹴|叩|刻|描|"
@@ -939,16 +940,16 @@ def _motion_phase_additions(
 ) -> tuple[str, ...]:
     templates = (
         (
-            "{subject}は現在の形状と外観を維持したまま、身体全体を連動させて"
-            "画面内を斜め前方へ大きく移動し、その方向へ動き続ける。"
+            "{subject}は片足を一歩踏み出して重心を移し、胴体をひねりながら"
+            "反対側の腕を大きく前へ振り出す。"
         ),
         (
-            "{subject}は現在の形状と外観を維持したまま、身体全体の向きを変え"
-            "ながら横方向へ加速し、別の位置へ移動を続ける。"
+            "{subject}は両足で地面を踏み、身体の向きを変えながら両腕を開いて"
+            "別の構えへ移る。"
         ),
         (
-            "{subject}は現在の形状と外観を維持したまま、身体全体を後方へ大きく"
-            "退かせた直後に前方へ切り返し、異なる軌道で移動を続ける。"
+            "{subject}は膝を曲げて身体を低く沈め、片足で踏み込んで"
+            "立ち上がりながら片手を頭上へ伸ばす。"
         ),
     )
     return tuple(
@@ -1295,6 +1296,7 @@ def _parse_scene_record(
     timeline: TimelineScene,
     protector: ReferenceProtector,
     visual_profile: VisualEnrichmentProfile,
+    locked_lyric_action_blueprint: LyricActionBlueprint | None = None,
 ) -> PlannedScene:
     scene_id = timeline.scene_id
     context = f"Scene {scene_id}"
@@ -1334,7 +1336,29 @@ def _parse_scene_record(
         ) from exc
     raw_lyric_response_mode = lyric_response_parts[2].strip()
     pending_mode_reason: str | None = None
-    if raw_lyric_response_mode in LYRIC_RESPONSE_MODES:
+    if locked_lyric_action_blueprint is not None:
+        # The focused lyric preplan is applied immediately after this parser
+        # returns.  Treat its anchor and mode as authoritative here as well so
+        # an 8B model cannot spend the full retry budget on semantic fields
+        # that Python is about to replace deterministically.
+        locked = locked_lyric_action_blueprint
+        if (
+            lyric_anchor_index != locked.lyric_anchor_index
+            or raw_lyric_response_mode != locked.lyric_response_mode
+        ):
+            LOGGER.warning(
+                "[cl_mv_prompt_planner] %s emitted LYRIC_RESPONSE %r/%r "
+                "that conflicts with the locked lyric action blueprint; "
+                "using the locked anchor %r and mode %r without retrying",
+                context,
+                lyric_anchor_index,
+                raw_lyric_response_mode,
+                locked.lyric_anchor_index,
+                locked.lyric_response_mode,
+            )
+        lyric_anchor_index = locked.lyric_anchor_index
+        lyric_response_mode = locked.lyric_response_mode
+    elif raw_lyric_response_mode in LYRIC_RESPONSE_MODES:
         lyric_response_mode = raw_lyric_response_mode
     elif raw_lyric_response_mode in _LOCALIZED_LYRIC_RESPONSE_MODE_ALIASES:
         lyric_response_mode = _LOCALIZED_LYRIC_RESPONSE_MODE_ALIASES[
@@ -1712,6 +1736,16 @@ def _parse_scene_record(
         for shot in shots
         for action in shot.subject_actions
     )
+    has_locked_named_subject_action = (
+        locked_lyric_action_blueprint is not None
+        and any(
+            re.search(r"<Subject [1-9][0-9]*>", action)
+            for action in (
+                *locked_lyric_action_blueprint.subject_actions,
+                locked_lyric_action_blueprint.visible_result,
+            )
+        )
+    )
     if lyric_response_mode == _PENDING_DIRECT_ACTION_MODE:
         lyric_response_mode = (
             "direct_subject_action"
@@ -1726,7 +1760,11 @@ def _parse_scene_record(
             raw_lyric_response_mode,
             lyric_response_mode,
         )
-    if lyric_response_mode == "direct_subject_action" and not has_named_subject_action:
+    if (
+        lyric_response_mode == "direct_subject_action"
+        and not has_named_subject_action
+        and not has_locked_named_subject_action
+    ):
         raise PlannerResponseError(
             f"{context}.lyric_response mode direct_subject_action requires "
             "at least one ACTION naming <Subject N>"
@@ -1802,6 +1840,8 @@ def parse_scene_response(
     protector: ReferenceProtector,
     *,
     visual_profile: VisualEnrichmentProfile | None = None,
+    locked_lyric_action_blueprints: Mapping[int, LyricActionBlueprint]
+    | None = None,
 ) -> tuple[dict[int, PlannedScene], dict[int, str]]:
     if visual_profile is None:
         visual_profile = load_visual_profile(DEFAULT_VISUAL_PROFILE_ID)
@@ -1849,7 +1889,15 @@ def parse_scene_response(
             )
         try:
             recovered[scene_id] = _parse_scene_record(
-                block, timeline, protector, visual_profile
+                block,
+                timeline,
+                protector,
+                visual_profile,
+                (
+                    locked_lyric_action_blueprints.get(scene_id)
+                    if locked_lyric_action_blueprints is not None
+                    else None
+                ),
             )
         except PlannerResponseError as exc:
             errors[scene_id] = str(exc)

@@ -12,6 +12,20 @@ _SOURCE_ID_RE = re.compile(r"C[0-9]{3}\Z")
 _CLASSES = frozenset({"keep", "style", "background"})
 _REFERENCE_RE = re.compile(r"<(?:Subject|Picture)\s+[1-9][0-9]*>")
 _PLACEHOLDER_RE = re.compile(r"CLPE(?:SUB|PIC)[0-9]+X")
+_NON_BACKGROUND_CONTENT_RE = re.compile(
+    r"(?:"
+    r"人物|キャラクター|被写体|主体|ポーズ|身振り|"
+    r"リップシンク|発声|歌唱|音声|カメラ|撮影|構図|"
+    r"(?:全身|上半身|顔|胸元|足元).{0,12}(?:ショット|中心)|"
+    r"(?:正面|背面|側面|斜め|俯瞰|仰角).{0,12}(?:視点|撮影)|"
+    r"(?:画面|中央).{0,12}(?:配置|位置)|"
+    r"(?:立つ|座る|歩く|走る|踊る|振り向く|手を|腕を|脚を|足を)"
+    r")"
+)
+
+
+class _NonBackgroundContentError(EnhancerResponseError):
+    """A syntactically complete BACKGROUND record contains another concern."""
 
 
 @dataclass(frozen=True)
@@ -36,6 +50,11 @@ def _natural_text(parts: list[str], context: str, warnings: list[str]) -> str:
         raise EnhancerResponseError(f"{context} must be an unprefixed Common sentence")
     if _REFERENCE_RE.search(value) or _PLACEHOLDER_RE.search(value):
         raise EnhancerResponseError(f"{context} cannot introduce a Subject or Picture reference")
+    if _NON_BACKGROUND_CONTENT_RE.search(value):
+        raise _NonBackgroundContentError(
+            f"{context} must describe environment only and cannot contain "
+            "a performer, pose, framing, camera, or vocal instruction"
+        )
     return value
 
 
@@ -53,11 +72,24 @@ def parse_enhancement_response(
     lines = [line.strip(" \r\n") for line in raw.splitlines() if line.strip()]
     if not lines or lines[0] != "ENHANCEMENT_V1":
         raise EnhancerResponseError("Enhancer response must start with ENHANCEMENT_V1")
+    warnings: list[str] = []
     if lines[-1] != "END_ENHANCEMENT":
-        raise EnhancerResponseError("Enhancer response must end with END_ENHANCEMENT")
+        if "END_ENHANCEMENT" in lines:
+            raise EnhancerResponseError(
+                "Enhancer response must end with END_ENHANCEMENT"
+            )
+        # A missing final sentinel does not make otherwise complete SOURCE and
+        # BACKGROUND records ambiguous.  Append only the fixed protocol token;
+        # all record, id, class, text, and line-count validation below still
+        # has to pass, so a truncated data record remains an error.
+        lines.append("END_ENHANCEMENT")
+        warnings.append(
+            "Enhancer response omitted the final END_ENHANCEMENT marker; "
+            "restored the fixed terminator after validating all records"
+        )
     classifications: dict[str, str] = {}
     background: list[str] = []
-    warnings: list[str] = []
+    rejected_background: list[_NonBackgroundContentError] = []
     for line_number, line in enumerate(lines[1:-1], start=2):
         if "<TAB>" in line or "\\t" in line:
             line = line.replace("<TAB>", "\t").replace("\\t", "\t")
@@ -83,9 +115,20 @@ def parse_enhancement_response(
                 raise EnhancerResponseError(f"SOURCE {source_id} is repeated")
             classifications[source_id] = classification
         elif record == "BACKGROUND":
-            background.append(
-                _natural_text(parts[1:], f"BACKGROUND at line {line_number}", warnings)
-            )
+            try:
+                background.append(
+                    _natural_text(
+                        parts[1:],
+                        f"BACKGROUND at line {line_number}",
+                        warnings,
+                    )
+                )
+            except _NonBackgroundContentError as exc:
+                rejected_background.append(exc)
+                warnings.append(
+                    f"discarded BACKGROUND at line {line_number} because it "
+                    "contained a performer, pose, framing, camera, or vocal instruction"
+                )
         else:
             raise EnhancerResponseError(
                 f"Enhancer response uses unknown record {record!r} at line {line_number}"
@@ -98,6 +141,8 @@ def parse_enhancement_response(
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
     if not minimum_background_lines <= len(background) <= maximum_background_lines:
+        if len(background) < minimum_background_lines and rejected_background:
+            raise rejected_background[0]
         raise EnhancerResponseError(
             f"Enhancer returned {len(background)} BACKGROUND line(s); expected "
             f"{minimum_background_lines}-{maximum_background_lines}"

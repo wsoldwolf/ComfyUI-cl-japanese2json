@@ -31,38 +31,6 @@ _COMPOSITION_FIELDS = (
 )
 _STYLE_FIELDS = ("medium", "rendering", "palette")
 _VISIBILITY_ALIASES = {"visible": "clear"}
-_FEATURE_CATEGORY_ALIASES = {
-    "eye": "eyes",
-    "brow": "eyebrows",
-    "brows": "eyebrows",
-    "eyebrow": "eyebrows",
-    "ear": "ears",
-    "fox_ear": "ears",
-    "fox_ears": "ears",
-    "clothes": "clothing",
-    "costume": "clothing",
-    "dress": "clothing",
-    "footwear": "clothing",
-    "outfit": "clothing",
-    "shoe": "clothing",
-    "shoes": "clothing",
-    "sock": "clothing",
-    "socks": "clothing",
-    "stocking": "clothing",
-    "stockings": "clothing",
-    "accessories": "accessory",
-    "jewellery": "accessory",
-    "jewelry": "accessory",
-    "ornament": "accessory",
-    "ornaments": "accessory",
-    "tails": "tail",
-    "marking": "distinctive_feature",
-    "markings": "distinctive_feature",
-}
-_DESCRIPTION_TERM_ALIASES = (
-    (re.compile(r"(?<![A-Za-z])fox[ _-]+ears?(?![A-Za-z])", re.IGNORECASE), "狐耳"),
-    (re.compile(r"(?<![A-Za-z])fox[ _-]+tails?(?![A-Za-z])", re.IGNORECASE), "狐尻尾"),
-)
 _ALL_VISIBILITY_TOKENS = {
     *(value.casefold() for value in VISIBILITIES),
     *(value.casefold() for value in _VISIBILITY_ALIASES),
@@ -80,19 +48,6 @@ _GENERIC_FEATURE_RE = re.compile(
     r"アクセサリー|尾|尻尾)(?:が|を)?(?:見える|確認できる|写っている|映っている)$"
 )
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)?")
-
-
-def _normalize_feature_category(value: str) -> str:
-    category = value.strip()
-    folded = category.casefold().replace("-", "_").replace(" ", "_")
-    return _FEATURE_CATEGORY_ALIASES.get(folded, category)
-
-
-def _normalize_known_description_terms(value: str) -> str:
-    normalized = value
-    for pattern, replacement in _DESCRIPTION_TERM_ALIASES:
-        normalized = pattern.sub(replacement, normalized)
-    return normalized
 
 
 def _reject_untranslated_english_prose(text: str, context: str) -> None:
@@ -333,16 +288,10 @@ def parse_observation_response(
             raise VisionObservationError(
                 f"SUBJECT_FEATURE at line {cursor + 1} has too few TAB fields"
             )
-        raw_category = parts[1].strip()
-        category = _normalize_feature_category(raw_category)
+        category = parts[1].strip()
         if category not in FEATURE_CATEGORIES:
             raise VisionObservationError(
                 f"SUBJECT_FEATURE uses unknown category {category!r}"
-            )
-        if category != raw_category:
-            warnings.append(
-                f"Normalized SUBJECT_FEATURE category {raw_category!r} "
-                f"to {category!r} at line {cursor + 1}"
             )
         description_parts = [part.strip() for part in parts[2:-1]]
         raw_visibility = parts[-1]
@@ -392,13 +341,6 @@ def parse_observation_response(
         description = "、".join(
             part for part in description_parts if part
         )
-        normalized_description = _normalize_known_description_terms(description)
-        if normalized_description != description:
-            warnings.append(
-                "Translated a known SUBJECT_FEATURE term to Japanese at line "
-                f"{cursor + 1}"
-            )
-            description = normalized_description
         if not description:
             raise VisionObservationError(
                 f"SUBJECT_FEATURE at line {cursor + 1} has no description"

@@ -22,6 +22,12 @@ SYSTEM_PROMPT_PATH = (
     / "core"
     / "observation_system_prompt.txt"
 )
+REPAIR_SYSTEM_PROMPT_PATH = (
+    Path(__file__).resolve().parent
+    / "prompts"
+    / "core"
+    / "observation_repair_system_prompt.txt"
+)
 _QUANT_SUFFIX_RE = re.compile(
     r"(?:[-.](?:IQ|Q|F|BF)\d[^.]*)$", re.IGNORECASE
 )
@@ -200,28 +206,54 @@ def file_fingerprint(path: Path) -> tuple[str, int, int]:
     return str(resolved), stat.st_size, stat.st_mtime_ns
 
 
-def load_observation_system_prompt() -> str:
+def _load_prompt(path: Path, label: str) -> str:
     try:
-        prompt = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+        prompt = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise VisionModelDiscoveryError(
-            f"Vision observation system prompt cannot be read: {SYSTEM_PROMPT_PATH}"
+            f"Vision {label} system prompt cannot be read: {path}"
         ) from exc
     if not prompt.strip():
         raise VisionModelDiscoveryError(
-            "Vision observation system prompt is empty"
+            f"Vision {label} system prompt is empty"
         )
     return prompt.rstrip() + "\n"
 
 
+def load_observation_system_prompt() -> str:
+    return _load_prompt(SYSTEM_PROMPT_PATH, "observation")
+
+
+def load_observation_repair_system_prompt() -> str:
+    return _load_prompt(REPAIR_SYSTEM_PROMPT_PATH, "observation repair")
+
+
 def observation_system_prompt_fingerprint() -> tuple[str, int, int, str]:
     try:
-        resolved = SYSTEM_PROMPT_PATH.resolve(strict=True)
-        stat = resolved.stat()
-        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
-        return str(resolved), stat.st_size, stat.st_mtime_ns, digest
+        resolved = tuple(
+            path.resolve(strict=True)
+            for path in (SYSTEM_PROMPT_PATH, REPAIR_SYSTEM_PROMPT_PATH)
+        )
+        stats = tuple(path.stat() for path in resolved)
+        hasher = hashlib.sha256()
+        for path in resolved:
+            hasher.update(path.name.encode("utf-8"))
+            hasher.update(b"\x00")
+            hasher.update(path.read_bytes())
+            hasher.update(b"\x00")
+        return (
+            " | ".join(str(path) for path in resolved),
+            sum(stat.st_size for stat in stats),
+            max(stat.st_mtime_ns for stat in stats),
+            hasher.hexdigest(),
+        )
     except OSError as exc:
         digest = hashlib.sha256(
             f"{type(exc).__name__}|{exc}".encode("utf-8", "replace")
         ).hexdigest()
-        return str(SYSTEM_PROMPT_PATH), -1, -1, digest
+        return (
+            f"{SYSTEM_PROMPT_PATH} | {REPAIR_SYSTEM_PROMPT_PATH}",
+            -1,
+            -1,
+            digest,
+        )

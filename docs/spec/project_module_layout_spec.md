@@ -130,8 +130,9 @@ node_vision_analyzer/
   renderer.py
   debug_output.py
   prompts/
-    core/
-      observation_system_prompt.txt
+      core/
+        observation_system_prompt.txt
+        observation_repair_system_prompt.txt
 tests/
 web/
 workflows/

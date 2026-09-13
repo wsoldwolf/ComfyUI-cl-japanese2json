@@ -14,6 +14,7 @@ from .cache import ObservationCache, make_observation_cache_key
 from .debug_output import save_vision_debug_bundle
 from .discovery import (
     discover_vision_model_names,
+    load_observation_repair_system_prompt,
     load_observation_system_prompt,
     observation_system_prompt_fingerprint,
     resolve_vision_model_name,
@@ -106,12 +107,26 @@ def _observation_request(
     return "\n".join(lines)
 
 
+def _observation_repair_request(
+    candidate_response: str,
+    validation_error: Exception,
+) -> str:
+    return json.dumps(
+        {
+            "validation_error": f"{type(validation_error).__name__}: {validation_error}",
+            "candidate_response": candidate_response,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def _call_vision(
     backend: VisionBackend,
     *,
     system_prompt: str,
     request: str,
-    image_data_uri: str,
+    image_data_uri: str | None,
     max_tokens: int,
     temperature: float,
     top_p: float,
@@ -175,14 +190,18 @@ def _call_vision(
             )
         return False
 
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": request},
+    ]
+    if image_data_uri is not None:
+        user_content.append(
+            {"type": "image_url", "image_url": {"url": image_data_uri}}
+        )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": request},
-                {"type": "image_url", "image_url": {"url": image_data_uri}},
-            ],
+            "content": user_content,
         },
     ]
     thread = threading.Thread(
@@ -493,6 +512,7 @@ class CLImageAnalyzerVisionGGUF:
             loaded = None
             analysis = None
             system_prompt: str | None = None
+            repair_system_prompt: str | None = None
             pair = None
             observation = None
             result: str | None = None
@@ -565,6 +585,11 @@ class CLImageAnalyzerVisionGGUF:
                     events.append({"cache_key": cache_key, "cache": cache_status})
                 else:
                     system_prompt = load_observation_system_prompt()
+                    repair_system_prompt = (
+                        system_prompt.rstrip()
+                        + "\n\nREPAIR MODE OVERRIDE\n"
+                        + load_observation_repair_system_prompt()
+                    )
                     self._backend.ensure_loaded(
                         pair.model_path,
                         pair.projector_path,
@@ -608,15 +633,102 @@ class CLImageAnalyzerVisionGGUF:
                             )
                             event.update(metadata)
                             event["response"] = raw
-                            observation, parse_warnings = parse_observation_response(raw)
-                            validate_hint_assessment(
-                                observation,
-                                subject_hint=effective_hint,
-                                hint_mode=hint_mode,
-                            )
+                            try:
+                                candidate, parse_warnings = (
+                                    parse_observation_response(raw)
+                                )
+                                validate_hint_assessment(
+                                    candidate,
+                                    subject_hint=effective_hint,
+                                    hint_mode=hint_mode,
+                                )
+                            except VisionObservationError as validation_error:
+                                event["validation"] = "repairing"
+                                event["error"] = (
+                                    f"{type(validation_error).__name__}: "
+                                    f"{validation_error}"
+                                )
+                                repair_request = _observation_repair_request(
+                                    raw,
+                                    validation_error,
+                                )
+                                repair_seed = _seed_for_attempt(
+                                    seed,
+                                    retry_max + 1 + attempt_index,
+                                )
+                                repair_event: dict[str, Any] = {
+                                    "kind": "text_only_repair",
+                                    "attempt": attempt_index + 1,
+                                    "seed": repair_seed,
+                                    "request": repair_request,
+                                    "source_validation_error": str(
+                                        validation_error
+                                    ),
+                                }
+                                events.append(repair_event)
+                                retries = attempt_index + 1
+                                LOGGER.warning(
+                                    "[cl_vision_analyzer] Observation validation "
+                                    "failed; attempting automatic text-only LLM "
+                                    "repair: %s",
+                                    validation_error,
+                                )
+                                try:
+                                    repaired_raw, repair_metadata = _call_vision(
+                                        self._backend,
+                                        system_prompt=repair_system_prompt,
+                                        request=repair_request,
+                                        image_data_uri=None,
+                                        max_tokens=max_tokens,
+                                        temperature=0.0,
+                                        top_p=1.0,
+                                        repetition_penalty=1.0,
+                                        seed=repair_seed,
+                                        label=(
+                                            "observation text repair "
+                                            f"{attempt_index + 1}/{retry_max + 1}"
+                                        ),
+                                        progress_bar=None,
+                                    )
+                                    repair_event.update(repair_metadata)
+                                    repair_event["response"] = repaired_raw
+                                    candidate, parse_warnings = (
+                                        parse_observation_response(repaired_raw)
+                                    )
+                                    validate_hint_assessment(
+                                        candidate,
+                                        subject_hint=effective_hint,
+                                        hint_mode=hint_mode,
+                                    )
+                                except Exception as repair_error:
+                                    if (
+                                        type(repair_error).__name__
+                                        == "InterruptProcessingException"
+                                    ):
+                                        raise
+                                    repair_event["validation"] = "failed"
+                                    repair_event["error"] = (
+                                        f"{type(repair_error).__name__}: "
+                                        f"{repair_error}"
+                                    )
+                                    raise VisionObservationError(
+                                        "Automatic text-only LLM repair failed: "
+                                        f"{repair_error}; original validation "
+                                        f"error: {validation_error}"
+                                    ) from repair_error
+                                repair_event["validation"] = "passed"
+                                event["validation"] = "repaired"
+                                repair_warning = (
+                                    "Automatically repaired an invalid Vision "
+                                    "observation with a text-only LLM pass"
+                                )
+                                observation_warnings.append(repair_warning)
+                                warnings.append(repair_warning)
+                            observation = candidate
                             observation_warnings.extend(parse_warnings)
                             warnings.extend(parse_warnings)
-                            event["validation"] = "passed"
+                            if event.get("validation") != "repaired":
+                                event["validation"] = "passed"
                             break
                         except Exception as exc:
                             if type(exc).__name__ == "InterruptProcessingException":
@@ -734,6 +846,7 @@ class CLImageAnalyzerVisionGGUF:
                             projector_name=pair.projector_path.name,
                             settings={**settings, "cache_key": cache_key, "cache_status": cache_status},
                             system_prompt=system_prompt,
+                            repair_system_prompt=repair_system_prompt,
                             events=events,
                             observation=observation.to_dict(),
                             result=result,
@@ -758,6 +871,7 @@ class CLImageAnalyzerVisionGGUF:
                             projector_name=pair.projector_path.name if pair is not None else None,
                             settings=settings,
                             system_prompt=system_prompt,
+                            repair_system_prompt=repair_system_prompt,
                             events=events,
                             observation=observation.to_dict() if observation is not None else None,
                             result=result,

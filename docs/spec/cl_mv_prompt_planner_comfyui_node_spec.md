@@ -1,6 +1,6 @@
 # CL MV Prompt Planner (GGUF) ComfyUIノード仕様
 
-本書は`clmv-line-v5`ノード契約を記述する。Song Bible、役割別PlanningBrief、直前Scene最終状態、Scene及び付加映像の完全重複検出、`camera_guard`及び`vocal_guard`の詳細は`docs/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/cl_mv_prompt_visual_profiles_spec.md`を正本とする。
+本書は`clmv-line-v5`ノード契約を記述する。Song Bible、役割別PlanningBrief、直前Scene最終状態、Scene及び付加映像の完全重複検出、`camera_guard`及び`vocal_guard`の詳細は`docs/spec/cl_mv_prompt_planner_song_bible_spec.md`、視覚拡張プロファイルは`docs/spec/cl_mv_prompt_visual_profiles_spec.md`を正本とする。
 
 ## 1. ノード契約
 

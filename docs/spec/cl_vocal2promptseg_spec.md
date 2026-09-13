@@ -6,8 +6,8 @@
 
 本書は次の既存仕様を補足する。
 
-- `docs/cl_japanese2json_spec.md`: 日本語縮小版Markdown及びSource Timelineリップシンクの正本
-- `docs/cl_japanese2json_comfyui_node_spec.md`: ノードの独立性、ComfyUI標準`AUDIO`及び`CLAudioPad`の正本
+- `docs/spec/cl_japanese2json_spec.md`: 日本語縮小版Markdown及びSource Timelineリップシンクの正本
+- `docs/spec/cl_japanese2json_comfyui_node_spec.md`: ノードの独立性、ComfyUI標準`AUDIO`及び`CLAudioPad`の正本
 
 本書と既存仕様が競合する場合は既存仕様を優先する。本ノードは既存文法を拡張せず、既存コンパイラがそのまま受理できるテキストだけを生成する。
 

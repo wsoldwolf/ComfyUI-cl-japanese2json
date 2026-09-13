@@ -339,6 +339,8 @@ def enhance_reduced_markdown(
                     minimum_background_lines=background.minimum_lines,
                     maximum_background_lines=background.maximum_lines,
                 )
+                for warning in response.warnings:
+                    LOGGER.warning("[cl_prompt_enhancer] %s", warning)
                 event["parsed_response"] = {
                     "classifications": response.classifications,
                     "background_lines": list(response.background_lines),

@@ -189,7 +189,10 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                 else:
                     # Integrated Vision workflows may intentionally leave the
                     # outer user brief empty. The embedded Vision analyzer and
-                    # Prompt Merger construct the reduced Markdown at runtime.
+                    # either Prompt Merger or Prompt Enhancer construct the
+                    # reduced Markdown at runtime. Prompt Enhancer subsumes the
+                    # two-input merge when it receives original_prompt and
+                    # user_prompt directly.
                     self.assertTrue(planner_nodes)
                     self.assertEqual(
                         sum(
@@ -198,13 +201,13 @@ class WorkflowCompatibilityTests(unittest.TestCase):
                         ),
                         1,
                     )
-                    self.assertEqual(
-                        sum(
-                            node.get("type") == "CLPromptMerger"
-                            for node in all_nodes
-                        ),
-                        1,
-                    )
+                    merge_path_nodes = [
+                        node
+                        for node in all_nodes
+                        if node.get("type")
+                        in {"CLPromptMerger", "CLPromptEnhancerGGUF"}
+                    ]
+                    self.assertEqual(len(merge_path_nodes), 1)
 
                 if not planner_nodes:
                     canonical = llmj2e.translate_markdown(

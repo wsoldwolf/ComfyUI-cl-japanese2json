@@ -30,6 +30,7 @@ def save_vision_debug_bundle(
     projector_name: str | None,
     settings: dict[str, Any],
     system_prompt: str | None,
+    repair_system_prompt: str | None,
     events: list[dict[str, Any]],
     observation: dict[str, Any] | None,
     result: str | None,
@@ -57,6 +58,11 @@ def save_vision_debug_bundle(
     _write(target / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     if system_prompt is not None:
         _write(target / "system_prompt.txt", system_prompt)
+    if repair_system_prompt is not None:
+        _write(
+            target / "repair_system_prompt.txt",
+            repair_system_prompt,
+        )
     request_summary = [
         {
             "attempt": event.get("attempt"),

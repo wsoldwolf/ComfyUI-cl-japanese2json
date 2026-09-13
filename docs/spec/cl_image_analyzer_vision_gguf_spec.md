@@ -115,7 +115,7 @@ Vision固有のprojector管理、画像メッセージ生成及び観測プロ�
 
 | 名前 | 型 | 既定値 | 用途 |
 | --- | --- | --- | --- |
-| `save_debug_output` | BOOLEAN | False | 入力指紋、設定、system prompt、生LLM応答、検証結果及び最終観測JSONを保存する |
+| `save_debug_output` | BOOLEAN | False | 入力指紋、設定、観測・修復system prompt、生LLM応答、検証結果及び最終観測JSONを保存する |
 | `subject_hint` | STRING multiline | 空 | 人間が確定又は補助する人物・キャラクター設定。通常の自然言語を使用する |
 | `hint_mode` | COMBO | `lock_identity` | `observe_only`、`assist`又は`lock_identity` |
 | `hint_conflict` | COMBO | `warn` | 明瞭な画像証拠との矛盾時に`warn`で継続し、`strict`で停止する |
@@ -417,9 +417,9 @@ END_OBSERVATION
 
 `PRIMARY_SUBJECT`へ`image`、`picture`、`photo`、`画像`又は`写真`だけを記述してはならない。`SUBJECT_FEATURE`は色、形、数、材質、模様、長さ又は状態等の具体的な視覚属性を含める。`顔が見える`、`髪が見える`、`目が見える`、`全身が見える`等、可視性しか表さない記述は検証エラーとし再試行する。瞳を観測できる場合は虹彩中心部の主色を先に記述し、赤いアイライン、睫毛、瞼の影、反射光及び周囲の衣装色と区別する。虹彩の縁だけが別色なら主色の後に縁色を記述する。
 
-自然言語の観測値は簡潔な日本語とする。小型Visionモデルで反復して確認された単義的な特徴語`fox ears`及び`fox tail`は、Pythonがそれぞれ`狐耳`及び`狐尻尾`へ正規化して警告を残す。それ以外の未翻訳英語説明は検証エラーとして再試行し、日本語による全観測を要求する。既知語を含んでいても、残りに未翻訳英語があれば受理しない。`VISIBLE_TEXT`は画像内で実際に読める文字の転記であるためこの言語検証から除外する。`2D`及び`PBR`等の短い技術表記、単一英字並びに大文字略語は未翻訳英文として扱わない。
+自然言語の観測値は簡潔な日本語とする。未翻訳の英語説明はPythonの単語辞書で置換しない。検証器が未翻訳英語を検出した場合、選択中のVision LLMへ画像を再送せず、候補応答だけを与える低温度の自動修復推論を行い、語彙を限定しない英日翻訳を要求する。`VISIBLE_TEXT`は画像内で実際に読める文字の転記であるため翻訳対象から除外する。`2D`及び`PBR`等の短い技術表記、単一英字並びに大文字略語は未翻訳英文として扱わない。
 
-小型Visionモデルがcategoryへ複数形又は対象物名を返す場合、意味が一意な既知aliasだけをPythonで正規化し、警告を残す。例として`eye`を`eyes`、`eyebrow`を`eyebrows`、`ear`及び`fox ears`を`ears`、`stocking`、`stockings`、`socks`、`footwear`、`shoes`、`dress`、`outfit`及び`costume`を`clothing`へ変換する。辞書にないcategoryは従来どおり検証エラーとし、任意の未知categoryを`distinctive_feature`へ退避してはならない。
+categoryへ対象物名、同義語、別言語又は新しいlabelが出力された場合も、Pythonへ語彙対応表を持たせない。自動修復推論が候補応答内の説明から意味分類し、`face`、`hair`、`eyes`、`eyebrows`、`ears`、`body`、`clothing`、`accessory`、`tail`又は`distinctive_feature`のいずれかへ直す。修復後も未知category又は未翻訳英語が残る場合は検証エラーとし、任意の未知categoryをPythonだけで`distinctive_feature`へ退避してはならない。
 
 小型Visionモデルが`clear`と同じ意味で返す既知の`visible`だけは、Pythonが`clear`へ正規化して警告を残す。また、visibility前後の空白、既知categoryの不要な補助列、又は説明末尾へ連結された許可visibilityは、categoryと行末visibilityが一意に確定できる場合だけ正規の四列へ修復する。`SUBJECT_FEATURE`が`category`と具体的な説明だけの三列で、末尾visibilityだけが欠落した場合も解釈は一意であるため、説明を保持したまま保守的な`partial`を補完し警告する。同じ内容でLLM再試行を消費しない。明示された未知visibility、空の説明又は一意に分離できないその他の列崩れを推測で変換せず、検証エラーとして再試行する。
 
@@ -559,13 +559,15 @@ Pythonは特徴の文書順も固定する。基本順序はidentity、face、ha
 
 ## 12. 再試行とフォールバック
 
-初回応答が`cl-vision-observation-line-v2`として不正な場合、検証済みの正しいレコードを勝手に最終出力へ混ぜず、エラー理由と正規観測schemaを付けて全観測を再送する。`analysis_profile`は再試行要求にも送らない。ヒントが有効なのに`not_used`を返す、又は無効なのにヒント評価を返す応答も再試行対象とする。
+初回応答が`cl-vision-observation-line-v2`として不正な場合、まず同じVision LLMを画像なしのテキスト修復modeで一回呼び出す。修復入力は検証エラーと候補応答をJSONデータとして渡し、候補内の視覚事実を維持したまま、未翻訳説明の日本語化、categoryの意味分類、protocol構造、フィールド順及びenumだけを修正させる。修復推論は`temperature=0.0`、`top_p=1.0`及び`repetition_penalty=1.0`に固定し、画像の再観測、事実の追加、削除及び不確実性の強化を禁止する。
 
-- `retry_max=0`は再試行しない。
-- 再試行は最大10回だが既定は2回とする。
+修復済み応答は同じPython検証器へ戻す。検証成功時だけ正規観測として採用し、`status`へ自動修復を記録する。修復にも失敗した場合だけ、エラー理由と正規観測schemaを付けて画像全体を再観測する。`analysis_profile`は修復要求及び再観測要求へ送らない。ヒントが有効なのに`not_used`を返す、又は無効なのにヒント評価を返す応答も同じ修復・再観測対象とする。
+
+- `retry_max=0`でも初回観測応答に対する一回のテキスト修復を許すが、修復失敗後の画像再観測は行わない。
+- 画像再観測は最大10回だが既定は2回とし、各不正応答に対するテキスト修復は一回に限定する。
 - seedは`seed + attempt`を32-bit非ゼロ範囲へ正規化する。
 - protocol外の前置き、thinking markup、コードフェンス及び自然文だけの応答は不正とする。
-- JSON修復、Markdown修復又は自由文からの推測抽出を行わない。
+- JSON又はMarkdownを最終観測形式として採用せず、自由文から新しい視覚事実を推測抽出しない。修復LLMへのJSONは候補文字列を安全に運ぶ内部入力に限る。
 - `END_OBSERVATION`だけが欠落し、その他の全必須レコードと順序が完全な場合に限りPythonが終端を補完し、一度だけWARNINGを出して受理してよい。
 - retry上限到達時は最後の具体的な検証理由、本体モデル名、projector名及びprofileを含む`VisionAnalysisError`で停止する。
 
