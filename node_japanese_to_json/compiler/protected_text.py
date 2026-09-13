@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import logging
 import re
 
-from .errors import ProtectedTextError, TranslationError
+from .errors import ProtectedPlaceholderError, ProtectedTextError, TranslationError
 
 
 LOGGER = logging.getLogger("cl_japanese2json")
@@ -159,7 +159,7 @@ def validate_protected_translation(payload: ProtectedPayload, translated: str) -
     for token in payload.tokens:
         count = translated.count(token)
         if count != 1:
-            raise TranslationError(
+            raise ProtectedPlaceholderError(
                 f"Protected placeholder {token!r} occurred {count} time(s); expected exactly once"
             )
 
@@ -171,7 +171,7 @@ def validate_protected_translation(payload: ProtectedPayload, translated: str) -
             token for token in family_re.findall(translated) if token not in expected
         }
         if unexpected:
-            raise TranslationError("Translation contains an unexpected protected placeholder")
+            raise ProtectedPlaceholderError("Translation contains an unexpected protected placeholder")
 
 
 def restore_text(payload: ProtectedPayload, translated: str) -> str:

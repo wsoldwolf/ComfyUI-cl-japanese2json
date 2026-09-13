@@ -185,6 +185,30 @@ class FakeNativeAbortRawCompletionLlama(FakeRawCompletionLlama):
 
 
 class LlamaBackendTests(unittest.TestCase):
+    def test_grammar_is_built_quietly_and_forwarded_to_qwen_sampling(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        compiled = object()
+        factory = Mock(return_value=compiled)
+        backend = backend_module.LlamaBackend(
+            llama_module=SimpleNamespace(LlamaGrammar=SimpleNamespace(from_string=factory)),
+            llama_class=FakeRawCompletionLlama,
+        )
+        backend.llm = FakeRawCompletionLlama()
+        grammar = backend.compile_grammar('root ::= "ok"')
+        backend.complete_chat(
+            messages=[{'role': 'user', 'content': 'translate'}], grammar=grammar,
+            max_tokens=32, temperature=0.1, top_p=0.9, repeat_penalty=1.05, seed=1,
+        )
+        factory.assert_called_once_with('root ::= "ok"', verbose=False)
+        self.assertIs(backend.llm.text_completion_kwargs['grammar'], compiled)
+
+    def test_requested_grammar_is_never_silently_ignored(self):
+        backend = backend_module.LlamaBackend(llama_module=FakeLlamaModule)
+        with self.assertRaisesRegex(errors.ModelLoadError, 'LlamaGrammar'):
+            backend.compile_grammar('root ::= "ok"')
+
     def setUp(self) -> None:
         FakeLoadedLlama.instances.clear()
         FakeAbortLlamaModule.abort_callback = None

@@ -5,6 +5,8 @@ Translate only the Japanese prose following each SUB, RET, COM, SCN, or SND segm
 Never translate, alter, move, reorder, duplicate, or delete any placeholder token.
 Every uppercase token beginning with CLJT or CLJ and ending with X is an immutable placeholder. Protected placeholders may represent reference labels or direct speech.
 Copy every placeholder byte-for-byte and exactly once, in the original order.
+Each marker and protected token is mandatory within its own segment; the local compiler enforces this with a grammar when retrying a token error. Translate the surrounding prose in full and integrate each protected token at its grammatical position; do not summarize the prose and then append bare tokens.
+Reference-key metadata explains which reference each opaque token denotes. Use that meaning when translating relationships such as appearance derived from a reference, but output only the opaque token, never the metadata or an invented reference label.
 Never invent a placeholder and never move a protected placeholder into another segment.
 Protected CLJ placeholders are required content, not optional labels. Even when natural English could omit a repeated subject or reference, copy its CLJ placeholder and express it explicitly in that segment.
 Directive placeholders contain D and represent document structure. No prose may follow a directive placeholder before the next segment placeholder.

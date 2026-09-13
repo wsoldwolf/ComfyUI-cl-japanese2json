@@ -28,6 +28,8 @@ def main() -> None:
     parser.add_argument("--n-ctx", type=int, default=16384)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--retry-max", type=int, default=2)
+    parser.add_argument("--batches", type=int, nargs="+",
+                        help="Check selected 1-based batches without compiling a full Plan")
     args = parser.parse_args()
     if args.retry_max < 0:
         parser.error("manual checks require a finite --retry-max")
@@ -62,6 +64,25 @@ def main() -> None:
             events = []
             started = time.monotonic()
             try:
+                if args.batches:
+                    document = compiler.lex_japanese_markdown(source)
+                    records, _ = compiler._sentence_records(document.records)
+                    batches = compiler._make_batches(records, backend, prompt, args.max_tokens)
+                    selected = {}
+                    for number in args.batches:
+                        if not 1 <= number <= len(batches):
+                            raise ValueError(f"Batch {number} outside 1..{len(batches)}")
+                        selected[number] = compiler._translate_batch(
+                            batches[number - 1], backend, prompt,
+                            max_tokens=args.max_tokens, temperature=0.1, top_p=0.9,
+                            repetition_penalty=1.05, seed=seed, retry_max=args.retry_max,
+                            batch_index=number - 1, batch_count=len(batches),
+                            debug_events=events, progress_callback=None, interrupt_callback=None,
+                        )
+                    (args.output_dir / f"seed_{seed}_batches.json").write_text(
+                        json.dumps(selected, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    continue
                 canonical = compiler.translate_markdown(
                     source, backend, prompt, seed=seed, retry_max=args.retry_max,
                     max_tokens=args.max_tokens, debug_events=events,

@@ -539,6 +539,23 @@ class LlamaBackend:
             "usage": response.get("usage"),
         }
 
+    def compile_grammar(self, source: str) -> Any:
+        """Build an explicit sampling constraint; never silently discard it."""
+        grammar_class = getattr(self.llama_module, "LlamaGrammar", None)
+        factory = getattr(grammar_class, "from_string", None)
+        if not callable(factory):
+            raise ModelLoadError(
+                "This compiler requires llama-cpp-python LlamaGrammar.from_string; "
+                "install a compatible build to preserve protected translation tokens"
+            )
+        try:
+            grammar = factory(source, verbose=False)
+        except Exception as exc:
+            raise ModelLoadError("Could not build the protected translation grammar") from exc
+        if grammar is None:
+            raise ModelLoadError("llama-cpp-python returned no translation grammar")
+        return grammar
+
     def complete_chat(self, **kwargs: Any) -> Any:
         if self.llm is None:
             raise ModelLoadError("No GGUF model is loaded")

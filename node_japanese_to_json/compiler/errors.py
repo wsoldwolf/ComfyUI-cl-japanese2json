@@ -19,6 +19,10 @@ class TranslationError(CLJapaneseToJSONError):
     """The LLM translation response failed structural validation."""
 
 
+class ProtectedPlaceholderError(TranslationError):
+    """A translation lost, duplicated, or invented a protected token."""
+
+
 class InferenceStallError(TranslationError):
     """The local LLM stopped producing output before completing a response."""
 

@@ -11,7 +11,9 @@ import time
 from typing import Any, Callable, Iterable
 
 from .comments import strip_c_comments
-from .errors import InferenceStallError, ProtectedTextError, TranslationError
+from .errors import (
+    InferenceStallError, ProtectedPlaceholderError, ProtectedTextError, TranslationError,
+)
 from .protected_text import (
     ProtectedPayload,
     contains_unprotected_japanese,
@@ -21,6 +23,7 @@ from .protected_text import (
     validate_protected_translation,
 )
 from .term_dictionary import normalize_prompt_terms
+from .stream_grammar import translation_stream_grammar
 from .translation_units import (
     has_explicit_negation,
     needs_explicit_negation,
@@ -870,6 +873,18 @@ def _user_payload(
             "a forbidden state must not become a requested state. A following positive "
             "instruction must stay positive. Translate the whole sentence."
         )
+    reference_keys = [
+        f"{token} = {value}"
+        for item in stream.records
+        for token, value in item.record.payload.replacements.items()
+        if REFERENCE_LABEL_RE.fullmatch(value)
+    ]
+    if reference_keys:
+        requirement += (
+            " Reference key (metadata, not output): " + "; ".join(reference_keys)
+            + ". Preserve the reference's relationship to the surrounding prose "
+            "at its grammatical position; do not append a bare token to a summary."
+        )
     if retry_reason is not None:
         safe_reason = retry_reason.replace("\r", " ").replace("\n", " ")[:400]
         requirement = (
@@ -1111,6 +1126,7 @@ def _call_llm(
     repetition_penalty: float,
     seed: int,
     stop_token: str,
+    grammar: Any = None,
     progress_callback: Callable[[int], None] | None = None,
     interrupt_callback: Callable[[], Any] | None = None,
 ) -> Any:
@@ -1123,6 +1139,8 @@ def _call_llm(
         "seed": seed,
         "stop": [stop_token],
     }
+    if grammar is not None:
+        kwargs["grammar"] = grammar
     if hasattr(llm, "complete_chat"):
         if progress_callback is not None:
             kwargs["progress_callback"] = progress_callback
@@ -1725,7 +1743,7 @@ def _validate_stream_record_text(
         if token not in own_tokens and token in translated
     ]
     if foreign:
-        raise TranslationError(
+        raise ProtectedPlaceholderError(
             f"Record {stream_record.record.record_id} contains a placeholder from another record"
         )
     return _validate_translation_text(stream_record.record, translated)
@@ -1757,7 +1775,7 @@ def _restore_reference_aliases(
         if alias_count == 0:
             continue
         if alias_count > len(tokens):
-            raise TranslationError(
+            raise ProtectedPlaceholderError(
                 f"Record {stream_record.record.record_id} duplicated reference "
                 f"label {replacement!r}"
             )
@@ -1781,7 +1799,7 @@ def _restore_reference_aliases(
 
     unexpected_alias = REFERENCE_LABEL_RE.search(restored)
     if unexpected_alias is not None:
-        raise TranslationError(
+        raise ProtectedPlaceholderError(
             f"Record {stream_record.record.record_id} contains an unexpected "
             f"reference label {unexpected_alias.group(0)!r}"
         )
@@ -1953,11 +1971,27 @@ def _translate_batch(
     last_error: TranslationError | None = None
     attempt_record_limit = len(records)
     validation_no_progress_streak = 0
+    constrained_indices: set[int] = set()
+    grammar_factory = getattr(llm, "compile_grammar", None)
 
     while unresolved_indices:
-        attempt_indices = unresolved_indices[:attempt_record_limit]
+        constrained = unresolved_indices[0] in constrained_indices and callable(grammar_factory)
+        attempt_indices = [
+            index for index in unresolved_indices
+            if (index in constrained_indices and callable(grammar_factory)) == constrained
+        ][:attempt_record_limit]
         attempt_records = [records[index] for index in attempt_indices]
         stream = _build_translation_stream(attempt_records)
+        grammar_source = (
+            translation_stream_grammar(stream) if constrained else None
+        )
+        grammar = grammar_factory(grammar_source) if grammar_source is not None else None
+        if constrained:
+            LOGGER.info(
+                "[cl_japanese2json] Using grammar-constrained retry for %d "
+                "text segment(s); protected tokens are mandatory",
+                len(attempt_records),
+            )
         attempt_seed = _normalize_seed(
             seed + batch_index + retry_number * RETRY_SEED_STRIDE
         )
@@ -2075,6 +2109,9 @@ def _translate_batch(
                 stream=stream,
                 messages=messages,
             )
+            if event is not None:
+                event["transport"] = "gbnf" if grammar is not None else "validated_stream"
+                event["grammar"] = grammar_source
             response = _call_llm(
                 llm,
                 messages,
@@ -2084,6 +2121,7 @@ def _translate_batch(
                 repetition_penalty=repetition_penalty,
                 seed=attempt_seed,
                 stop_token=stream.stop_token,
+                grammar=grammar,
                 progress_callback=report_stream_progress,
                 interrupt_callback=check_inference_abort,
             )
@@ -2102,7 +2140,9 @@ def _translate_batch(
                     )
                 except TranslationError as exc:
                     value = None
-                    if retry_number > 0:
+                    if isinstance(exc, ProtectedPlaceholderError):
+                        constrained_indices.add(original_index)
+                    if retry_number > 0 and not callable(grammar_factory):
                         value = _repair_retry_dialogue_placeholders(
                             stream_record, translated, stream.protected_tokens
                         )
@@ -2146,6 +2186,15 @@ def _translate_batch(
             )
             for local_index, value in salvaged.items():
                 validated[attempt_indices[local_index]] = value
+            if content is not None and not isinstance(exc, InferenceStallError):
+                # A broken structural envelope can hide a simultaneous protected
+                # token failure. Retain only independently validated segments,
+                # and constrain the unresolved owners of missing/duplicate tokens.
+                for original_index, record in zip(attempt_indices, attempt_records):
+                    if validated[original_index] is None and any(
+                        content.count(token) != 1 for token in record.payload.tokens
+                    ):
+                        constrained_indices.add(original_index)
             if salvaged:
                 LOGGER.warning(
                     "[cl_japanese2json] Recovered %d/%d valid text segment(s) "

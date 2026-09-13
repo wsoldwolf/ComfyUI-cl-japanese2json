@@ -181,6 +181,10 @@ Audio区間そのものを発声内容の正本にする形式:
 
 検出対象の禁止文から英語の否定が脱落した場合は、`lost explicit negation`を記録し、その文だけ既存の`retry_max`内で再翻訳します。正常区間は保持し、上限に達した未解決結果は返しません。これは翻訳の意味全体を保証する検査ではなく、否定の対象や範囲が正しいかは英訳の確認も必要です。`save_debug_output`で元バレット・文番号と応答を追跡できます。外部用語辞書の詳細は[プロンプト用語辞書仕様](spec/cl_prompt_term_dictionary_spec.md)を参照してください。
 
-開発時に実GGUFで再現確認する場合は、ComfyUIのPython環境から`tools/check_compiler_translation.py`を使用できます。`--model`、`--source`、`--output-dir`を指定し、必要に応じて`--seeds 1 17 42`を付けてください。英語Markdown、Plan JSON及びデバッグ応答を保存し、動画生成は実行しません。小さな否定翻訳の回帰入力は`tests/fixtures/compiler_negation_ja.md`にあります。
+保護された参照や台詞の欠落・重複を検出すると、該当する未解決区間だけをllama.cppの文法制約（GBNF）付き再試行へ切り替えます。`Using grammar-constrained retry`が切替ログです。構造マーカーと元区間の各保護トークンを必須にすることで、同じコピー失敗を繰り返すことを防ぎます。通常の成功区間には文法制約の追加負荷をかけません。`retry_max`は引き続き有効で、`0`なら再試行しません。生成長上限や翻訳内容の誤りまで保証する仕組みではありません。
+
+参照トークンの意味は要求のメタデータでモデルへ伝え、本文と参照の関係を翻訳させます。特定の人物・物体に依存する翻訳はPythonへ追加していません。ComfyUI同梱バックエンドでは`LlamaGrammar.from_string`が必要で、未対応時に制約を黙って無効化しません。`save_debug_output`では各要求の`transport`と`grammar`も確認できます。
+
+開発時に実GGUFで再現確認する場合は、ComfyUIのPython環境から`tools/check_compiler_translation.py`を使用できます。`--model`、`--source`、`--output-dir`を指定し、必要に応じて`--seeds 1 17 42`を付けてください。英語Markdown、Plan JSON及びデバッグ応答を保存し、動画生成は実行しません。`--batches 13`を指定すると同じ入力・設定で作られる13番目のバッチだけを検証し、部分翻訳と応答を保存します（全体のPlanは生成しません）。小さな否定翻訳の回帰入力は`tests/fixtures/compiler_negation_ja.md`にあります。
 
 厳密な文法とJSON契約は[コンパイラ仕様](spec/cl_japanese2json_spec.md)、ComfyUIノード契約は[ノード実装仕様](spec/cl_japanese2json_comfyui_node_spec.md)を正本とします。
