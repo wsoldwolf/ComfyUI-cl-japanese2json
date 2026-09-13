@@ -47,6 +47,7 @@ LLMが最終JSONやMarkdown構造を自由生成する設計ではありませ�
 | [CL Load Text File](docs/nodes/text-file.md) | 任意場所のUTF-8テキストをD&D入力 |
 | [CL String Combo](docs/nodes/string-combo.md) | ユーザー定義文字列リストから値を選択 |
 | [CL Connected Combo](docs/nodes/connected-combo.md) | 接続先COMBOの候補へサブグラフ越しに追従 |
+| [CL 32-bit Seed](docs/nodes/seed32.md) | GGUFとH3へ共有できる保存可能な32-bit seedを供給 |
 
 すべてのガイドは[カスタムノード一覧](docs/nodes/README.md)から参照できます。
 

@@ -23,6 +23,7 @@
 - [CL Load Text File (Drag & Drop)](nodes/text-file.md)
 - [CL String Combo](nodes/string-combo.md)
 - [CL Connected Combo](nodes/connected-combo.md)
+- [CL 32-bit Seed](nodes/seed32.md)
 
 ## 開発者向け
 

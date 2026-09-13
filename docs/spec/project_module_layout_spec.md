@@ -111,6 +111,9 @@ node_connected_combo/
   node.py
   parser.py
   errors.py
+node_seed32/
+  node.py
+  errors.py
 node_audio_pad/
   node.py
 node_text_file/
@@ -152,6 +155,7 @@ Pythonファイルの旧パスは内部実装であり互換対象にしない�
 - `CLPromptMerger`
 - `CLStringCombo`
 - `CLImageAnalyzerVisionGGUF`
+- `CLSeed32`
 
 ディレクトリ変更だけを理由にワークフローJSONへPythonモジュールパスを書き込まない。ワークフローは上記型名と入出力契約によって読み込まれる。
 

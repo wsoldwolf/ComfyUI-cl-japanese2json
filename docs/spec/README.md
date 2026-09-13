@@ -28,3 +28,4 @@
 - [Load Text File仕様](cl_text_file_spec.md)
 - [String Combo仕様](cl_string_combo_spec.md)
 - [Connected Combo仕様](cl_connected_combo_spec.md)
+- [CL 32-bit Seed仕様](cl_seed32_spec.md)

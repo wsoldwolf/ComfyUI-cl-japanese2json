@@ -7,6 +7,7 @@ from .node_mv_prompt_planner.node import CLMVPromptPlannerGGUF
 from .node_prompt_enhancer.node import CLPromptEnhancerGGUF
 from .node_prompt_merger.node import CLPromptMerger
 from .node_scene_limiter.node import CLSceneLimiter
+from .node_seed32.node import CLSeed32
 from .node_string_combo.node import CLStringCombo
 from .node_text_file.node import CLLoadTextFile
 from .node_vocal_to_prompt_segments.node import CLVocalToPromptSegments
@@ -19,6 +20,7 @@ NODE_CLASS_MAPPINGS = {
     "CLPromptEnhancerGGUF": CLPromptEnhancerGGUF,
     "CLPromptMerger": CLPromptMerger,
     "CLSceneLimiter": CLSceneLimiter,
+    "CLSeed32": CLSeed32,
     "CLStringCombo": CLStringCombo,
     "CLConnectedCombo": CLConnectedCombo,
     "CLAudioPad": CLAudioPad,
@@ -34,6 +36,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CLPromptEnhancerGGUF": "CL Prompt Enhancer (GGUF)",
     "CLPromptMerger": "CL Prompt Merger (Reduced Markdown)",
     "CLSceneLimiter": "CL Scene Limiter (Reduced Markdown)",
+    "CLSeed32": "CL 32-bit Seed",
     "CLStringCombo": "CL String Combo",
     "CLConnectedCombo": "CL Connected Combo",
     "CLAudioPad": "CL Audio Pad (PCM Silence)",

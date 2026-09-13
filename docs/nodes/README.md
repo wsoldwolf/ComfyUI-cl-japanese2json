@@ -25,3 +25,4 @@ Full Mix + Vocal ──> Audio Pad Pair ──> H3 Audio Tracks
 | [CL Load Text File](text-file.md) | 任意場所のUTF-8テキストをD&D入力 |
 | [CL String Combo](string-combo.md) | プロパティーで定義した文字列候補を選択 |
 | [CL Connected Combo](connected-combo.md) | 接続先COMBOの候補へ自動追従 |
+| [CL 32-bit Seed](seed32.md) | GGUFとH3へ同じ保存可能な32-bit seedを供給 |
