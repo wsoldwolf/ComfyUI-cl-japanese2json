@@ -231,9 +231,10 @@ class PromptEnhancerProfileTests(unittest.TestCase):
                 self.assertEqual(style.directives[2:], shared)
         motion = profiles.load_motion_profile("mv_anime_emotional")
         self.assertEqual(motion.directives[:4], shared)
-        self.assertIn("予備動作、主動作、反動", motion.directives[4])
-        self.assertIn("付け根を身体につないだまま", motion.directives[5])
-        self.assertIn("人物の演技を補助する", motion.directives[6])
+        performance = "\n".join(motion.directives[4:])
+        self.assertIn("予備動作、主動作、反動", performance)
+        self.assertIn("付け根を身体につないだまま", performance)
+        self.assertIn("人物の演技を補助する", performance)
 
     def test_emotional_camera_keeps_orbit_and_scopes_visibility(self):
         text = "\n".join(

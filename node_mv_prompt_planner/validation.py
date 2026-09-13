@@ -18,6 +18,7 @@ from .performance_policy import (
     balanced_shot_start_windows,
     minimum_deliberate_action_phases,
     action_signature,
+    motion_phase_signature,
     deduplicate_actions,
 )
 from .placeholders import ReferenceProtector
@@ -123,6 +124,41 @@ _LOCKED_SOURCE_VOCAL_VISUAL_CUES = frozenset(
         "口パク",
     }
 )
+_MOUTH_CHOREOGRAPHY_RE = re.compile(
+    r"(?:唇|舌|上顎|下顎|口元|口形|口の形|口)[をがはの][^。、]{0,24}?"
+    r"(?:引き上げ|引き下げ|押し当て|押し付け|広げ|開く|開け|閉じ|動かす|固定)"
+)
+_MOUTH_EFFECT_RE = re.compile(
+    r"(?:唇|口の中)[^。、]{0,30}(?:金色の光|金色の輝|発光)|"
+    r"(?:光|輝き)[^。、]{0,20}(?:口の中|唇)[^。、]{0,15}(?:溶け|入|消)"
+)
+_BROW_CHOREOGRAPHY_RE = re.compile(
+    r"眉(?:毛)?(?:を|が|は)[^。、]{0,20}(?:引き上げ|上げ|下げ|揺|伸ば|細め|変形)"
+)
+
+
+def performance_safety_error(value: str) -> str | None:
+    """Detect explicit conflicting choreography, not ordinary face descriptions."""
+    if _MOUTH_CHOREOGRAPHY_RE.search(value) or _MOUTH_EFFECT_RE.search(value):
+        return "forbidden mouth choreography; Source Vocal owns lip/jaw motion; express the lyric with hands, torso, stance and an external target"
+    if _BROW_CHOREOGRAPHY_RE.search(value):
+        return "forbidden eyebrow choreography; preserve eyebrow design and use head, shoulders, hands and weight transfer for emotional acting"
+    return None
+
+
+def performance_safety_issues(scene: PlannedScene) -> list[dict[str, object]]:
+    values = [("intent", scene.scene_intent)]
+    for index, shot in enumerate(scene.shots, 1):
+        values.extend((f"Shot {index}", value) for value in (
+            shot.composition, *shot.subject_actions, shot.environment,
+            shot.camera.description, *(v.description for v in shot.auxiliary_visuals),
+        ))
+    return [
+        {"code": "conflicting_facial_choreography", "scene_id": scene.scene_id,
+         "message": f"Scene {scene.scene_id} {context}: {error}"}
+        for context, value in values
+        if (error := performance_safety_error(value))
+    ]
 _INTERNAL_TIMELINE_REFERENCE_RE = re.compile(
     r"(?i)(?:"
     r"\b(?:scene|shot)\s*(?:number\s*)?#?\s*\d+(?!\d)|"
@@ -205,7 +241,7 @@ _DELIBERATE_SUBJECT_MOTION_RE = re.compile(
     r"進む|退く|振り返|向き直|方向転換|ひね|捻|回転|旋回|しゃが|"
     r"屈|起き上|立ち上|重心を|体重を|姿勢を(?:変|低|高|立て直)|"
     r"身を(?:起|沈|伏|反|翻|乗り出|引|寄)|"
-    r"(?:腕|手|指|脚|足)を[^。、]{0,24}(?:伸|引|上|下|振|差し|かざ|翳|"
+    r"(?:腕|手|指|指先|手首|脚|足|足先|足裏|膝)を[^。、]{0,24}(?:伸|引|上|下|振|差し|かざ|翳|"
     r"掲げ|握|開|閉|合わ|交差|曲|広げ|戻|置|当て|動か|揺すぶ|集め)|"
     r"(?:身体|上半身|胴体|腰|肩|首|頭部|頭|顔)を"
     r"(?:傾|倒|起|ひね|捻|回|沈|引|押|振|動か|揺すぶ)|"
@@ -611,6 +647,8 @@ def _parse_lyric_action_record(
     )
     creative_values = [composition, *actions, visible_result]
     for value in creative_values:
+        if error := performance_safety_error(value):
+            raise PlannerResponseError(f"{context} {error}")
         _reject_screen_text_creative_cues(value, context)
         match = _INTERNAL_TIMELINE_REFERENCE_RE.search(value)
         if match is not None:
@@ -707,6 +745,10 @@ def parse_lyric_action_response(
                     "retrying the LLM",
                     scene_id,
                     len(added_actions),
+                )
+            elif motion_issues and blueprint.lyric_response_mode == "direct_subject_action" and motion_issues[0]["actual_phases"] == 0:
+                raise PlannerResponseError(
+                    f"Scene {scene_id} facial-only or passive predicate; choose a physical hand, limb or torso action on an external target"
                 )
             recovered[scene_id] = blueprint
         except PlannerResponseError as exc:
@@ -876,6 +918,7 @@ def _subject_action_motion_issues(
     scene_id: int,
     actions: list[tuple[int, int, str]] | tuple[str, ...],
     duration_seconds: int,
+    has_subject: bool = False,
 ) -> list[dict[str, object]]:
     """Validate purposeful Subject motion in either blueprint or Scene form."""
 
@@ -889,7 +932,7 @@ def _subject_action_motion_issues(
     named_actions = [
         value
         for value in indexed_actions
-        if re.search(r"<Subject [1-9][0-9]*>", value[2])
+        if has_subject or re.search(r"<Subject [1-9][0-9]*>", value[2])
     ]
     if not named_actions:
         return []
@@ -902,7 +945,7 @@ def _subject_action_motion_issues(
     ]
     required = minimum_deliberate_action_phases(duration_seconds)
     unique_deliberate = {
-        action_signature(value[2])
+        motion_phase_signature(value[2])
         for value in deliberate
     }
     if len(unique_deliberate) >= required:
@@ -942,11 +985,26 @@ def subject_motion_issues(
         for shot_number, shot in enumerate(scene.shots, start=1)
         for action_number, action in enumerate(shot.subject_actions, start=1)
     ]
-    return _subject_action_motion_issues(
+    has_subject = scene.lyric_response_mode == "direct_subject_action" or any(
+        re.search(r"<Subject [1-9][0-9]*>", shot.composition)
+        for shot in scene.shots
+    )
+    issues = _subject_action_motion_issues(
         scene_id=scene.scene_id,
         actions=indexed_actions,
         duration_seconds=duration_seconds,
+        has_subject=has_subject,
     )
+    for index, shot in enumerate(scene.shots):
+        end = scene.shots[index + 1].start_ms if index + 1 < len(scene.shots) else duration_seconds * 1000
+        seconds = max(1, (end - shot.start_ms) // 1000)
+        for issue in _subject_action_motion_issues(
+            scene_id=scene.scene_id, actions=shot.subject_actions,
+            duration_seconds=seconds, has_subject=has_subject,
+        ):
+            issues.append({**issue, "shot_number": index + 1,
+                           "message": f"Shot {index + 1}: {issue['message']}"})
+    return issues
 
 
 def _motion_phase_additions(

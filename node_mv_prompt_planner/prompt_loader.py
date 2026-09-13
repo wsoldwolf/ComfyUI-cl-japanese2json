@@ -20,6 +20,7 @@ _PROMPT_NAMES = (
     "lyric_action_system_prompt.txt",
     "scene_plan_system_prompt.txt",
     "auxiliary_visual_repair_system_prompt.txt",
+    "motion_repair_system_prompt.txt",
 )
 
 

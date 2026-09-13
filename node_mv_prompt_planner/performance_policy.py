@@ -9,7 +9,18 @@ import unicodedata
 def action_signature(value: str) -> str:
     """Ignore formatting, not targets, direction, negation or repeat cues."""
 
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).rstrip("。.!！")
+    value = re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).rstrip("。.!！")
+    # Equivalent Subject-led limb instructions are not a second motion phase.
+    value = re.sub(r"(<Subject\d+>)(?:の|は)(?=(?:右|左|両)?(?:手|腕|足|脚|膝|腰))", r"\1", value)
+    return value
+
+
+def motion_phase_signature(value: str) -> str:
+    """A speed adverb alone does not establish another executed phase."""
+    value = action_signature(value)
+    if re.search(r"ない|せず|禁止|もう一度|再び|繰り返|回|拍", value):
+        return value
+    return re.sub(r"ゆっくり(?:と)?", "", value)
 
 
 def deduplicate_actions(actions: tuple[str, ...]) -> tuple[str, ...]:
@@ -27,7 +38,7 @@ def deduplicate_actions(actions: tuple[str, ...]) -> tuple[str, ...]:
             sentence = sentence.strip()
             if sentence.startswith("続いて"):
                 sentence = sentence[len("続いて"):].lstrip("、 ")
-            key = action_signature(sentence)
+            key = motion_phase_signature(sentence)
             if key and key not in seen:
                 kept.append(sentence)
                 seen.add(key)

@@ -119,7 +119,7 @@ def scene_payload(
 ) -> str:
     if scene_id == 1:
         camera = ("static", "none", "none", "斜め後方の低い位置から輪郭を捉える。")
-        motion = "CLMPSUB1Xは口を閉じたまま肩を引き、ゆっくり振り返る。"
+        motion = "CLMPSUB1Xは肩を引き、ゆっくり振り返る。"
     else:
         camera = (
             "arc" if valid else "orbit-ish",
@@ -128,7 +128,7 @@ def scene_payload(
             "CLMPSUB1Xの左側から背後を通って右前方へ大きく回り込む。",
         )
         motion = "CLMPSUB1Xは胸を開き、片腕を空へ伸ばして踏み出す。"
-    action_values = actions or (motion,)
+    action_values = actions or ((motion,) if scene_id == 1 else (motion, "CLMPSUB1Xは右手を下ろして胴体を起こす。"))
     lines = [
         f"SCENE\t{scene_id}",
         f"SCENE_INTENT\tScene {scene_id}の映像意図。",
@@ -1348,8 +1348,8 @@ class MVPromptPlannerTests(unittest.TestCase):
                     "",
                     "SHOT\t2500",
                     "COMPOSITION\t人物と変化後の対象を斜め後方から示す。",
-                    "ACTION\t2\tCLMPSUB1Xは対象から片手を離して身体を起こす。",
-                    "ACTION\t3\tCLMPSUB1Xは一歩後退して両腕を体側へ戻す。",
+                    "ACTION\t3\tCLMPSUB1Xは対象から片手を離して身体を起こす。",
+                    "ACTION\t4\tCLMPSUB1Xは一歩後退して両腕を体側へ戻す。",
                     "ENVIRONMENT\t黒い層が奥へ流れ、対象の輪郭が残る。",
                     "CAMERA\tpull\tlarge\tmoderate\t対象の斜め後方から人物の横を通って後退し、前景の対象と背景の黒い層に視差を作り、人物の全身を含む広い視点で終える。",
                     "END_SHOT",
@@ -1379,7 +1379,7 @@ class MVPromptPlannerTests(unittest.TestCase):
                     "",
                     "SHOT\t2500",
                     "COMPOSITION\t人物と変化後の対象を斜め後方から示す。",
-                    "ACTION\t3\tCLMPSUB1Xは対象から片手を離して身体を起こす。",
+                    "ACTION\t4\tCLMPSUB1Xは対象から片手を離して身体を起こす。",
                     "ENVIRONMENT\t黒い層が奥へ流れ、対象の輪郭が残る。",
                     "CAMERA\tpull\tlarge\tmoderate\t対象の斜め後方から人物の横を通って後退し、前景の対象と背景の黒い層に視差を作り、人物の全身を含む広い視点で終える。",
                     "END_SHOT",
@@ -1395,7 +1395,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(recovered, {})
-        self.assertIn("ACTION indices must start at 1 or 2", scene_errors[2])
+        self.assertIn("ACTION indices must start at 1 or 3", scene_errors[2])
 
     def test_camera_surface_variants_are_normalized_without_scene_retry(self) -> None:
         brief = brief_parser.parse_planning_brief(BRIEF)
@@ -2551,8 +2551,10 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertEqual(recovered_errors, {})
         tail = planning._previous_scene_tail(recovered[1], protector)
         self.assertNotIn("last_auxiliary_visuals", tail)
-        self.assertIn("final_action", tail)
-        self.assertIn("environment", tail)
+        self.assertNotIn("final_action", tail)
+        self.assertNotIn("final_composition", tail)
+        self.assertNotIn("environment", tail)
+        self.assertEqual(tail["subject_references"], ["CLMPSUB1X"])
 
     def test_duplicate_retry_switches_to_chronological_single_scene_requests(self) -> None:
         base_timeline = timeline_parser.parse_prompt_timeline(TIMELINE)
@@ -3074,7 +3076,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         timeline = timeline_parser.parse_prompt_timeline(TIMELINE)
         brief = brief_parser.parse_planning_brief(BRIEF)
         silent_vocalized = scene_payload(1).replace(
-            "CLMPSUB1Xは口を閉じたまま肩を引き、ゆっくり振り返る。",
+            "CLMPSUB1Xは肩を引き、ゆっくり振り返る。",
             "CLMPSUB1Xは一歩踏み出して空を見上げ、力強く歌う。",
         )
 
@@ -3132,7 +3134,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         self.assertIsNone(first_scene_input["scenes"][0]["previous_scene_tail"])
         tail = second_scene_input["scenes"][0]["previous_scene_tail"]
         self.assertEqual(tail["scene_id"], 1)
-        self.assertIn("CLMPSUB1X", tail["final_action"])
+        self.assertIn("CLMPSUB1X", tail["subject_references"])
         self.assertEqual(tail["camera"]["type"], "static")
 
     def test_scene_signature_normalizes_surface_only_and_not_partial_similarity(self) -> None:
@@ -3263,7 +3265,7 @@ class MVPromptPlannerTests(unittest.TestCase):
         )
 
         silent_vocalized = scene_payload(1).replace(
-            "CLMPSUB1Xは口を閉じたまま肩を引き、ゆっくり振り返る。",
+            "CLMPSUB1Xは肩を引き、ゆっくり振り返る。",
             "CLMPSUB1Xは空を見上げて力強く歌う。",
         )
         recovered, scene_errors = validation.parse_scene_response(
