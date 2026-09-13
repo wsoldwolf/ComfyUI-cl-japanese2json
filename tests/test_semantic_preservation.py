@@ -76,6 +76,21 @@ class SemanticProtocolTests(unittest.TestCase):
             review.review_grammar(("R1",), policy="translation_patch"), verbose=False))
         self.assertIsNotNone(LlamaGrammar.from_string(
             review.review_grammar(("R1",), policy="translation_replacement"), verbose=False))
+        self.assertIsNotNone(LlamaGrammar.from_string(
+            review.review_grammar(("R1",), policy="translation_change"), verbose=False))
+
+    def test_change_review_uses_its_own_prompt_and_cache_fingerprint(self):
+        prompt = review.TRANSLATION_CHANGE_PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("判定対象は変更前のcandidate", prompt)
+        self.assertEqual(review.review_messages("translation_change", [], {})[0]["content"], prompt.strip())
+        original = review.review_fingerprint()
+        path_type = type(review.TRANSLATION_CHANGE_PROMPT_PATH)
+        read_bytes = path_type.read_bytes
+        def changed_bytes(path):
+            data = read_bytes(path)
+            return data + b"\nchange" if path == review.TRANSLATION_CHANGE_PROMPT_PATH else data
+        with patch.object(path_type, "read_bytes", changed_bytes):
+            self.assertNotEqual(original, review.review_fingerprint())
 
     def test_full_unit_replacement_binds_only_to_the_supplied_pair(self):
         pairs = [{"id": "R13", "source": "白い服", "candidate": "A black outfit."}]
@@ -179,9 +194,9 @@ class TranslationMeaningTests(unittest.TestCase):
             item = request["pairs"][0]
             return self.patch_response(kwargs, "目尻は目頭より少し高い", item["candidate"],
                                        "The outer eye corner is slightly higher than the inner corner.")
-        llm = FakeLLM([translate, assess, repair, assess])
+        llm = FakeLLM([translate, assess, repair, assess, assess])
         result = compiler.translate_markdown(self.SOURCE, llm, "system", semantic_guard="global", max_tokens=1024)
-        self.assertEqual(len(llm.calls), 4)
+        self.assertEqual(len(llm.calls), 5)
         self.assertIn("outer eye corner", result)
         self.assertNotIn("lower eyelid", result)
         self.assertIn("outfit is white", result)
@@ -194,7 +209,8 @@ class TranslationMeaningTests(unittest.TestCase):
         with self.assertRaisesRegex(compile_errors.TranslationError, "Meaning review failed"):
             compiler.translate_markdown(source, FakeLLM([
                 translated, lambda k: verdict(k, "Added an opposing thickness"),
-                lambda k: self.patch_response(k, "太い", "Thin and short thick", "Short thick")]),
+                lambda k: self.patch_response(k, "太い", "Thin and short thick", "Short thick"),
+                lambda k: verdict(k, "Current candidate still contradicts the required thickness")]),
                                         "system", semantic_guard="global", retry_max=0)
 
     def test_unlimited_transport_does_not_make_meaning_repair_unlimited(self):
@@ -202,15 +218,18 @@ class TranslationMeaningTests(unittest.TestCase):
             return default_stream_translation(kwargs["messages"], lambda _: "The black outfit has two square fasteners.")
         responses = [translated, lambda k: verdict(k, "Wrong color"),
                      lambda k: self.patch_response(k, "白い", "black", "white"),
+                     lambda k: verdict(k, "Current color is wrong"),
                      lambda k: verdict(k, "Wrong count"),
                      lambda k: self.patch_response(k, "三つ", "two", "three"),
+                     lambda k: verdict(k, "Current count is wrong"),
                      lambda k: verdict(k, "Wrong shape"),
-                     lambda k: self.patch_response(k, "丸い", "square", "round")]
+                     lambda k: self.patch_response(k, "丸い", "square", "round"),
+                     lambda k: verdict(k, "Current shape is wrong")]
         llm = FakeLLM(responses)
         with self.assertRaisesRegex(compile_errors.TranslationError, "after 2 repair"):
             compiler.translate_markdown("# 共通プロンプト\n* 白い衣装には三つの丸い留め具がある。\n# シーン\n## ショット\n* 動作。",
                                         llm, "system", semantic_guard="global", retry_max=-1)
-        self.assertEqual(len(llm.calls), 7)
+        self.assertEqual(len(llm.calls), 10)
 
     @staticmethod
     def patch_response(kwargs, source, before, after):
@@ -243,7 +262,8 @@ class TranslationMeaningTests(unittest.TestCase):
             lambda k: default_stream_translation(k["messages"], lambda _: before),
             lambda k: verdict(k, '"one on each side" should be "one on each side" (same); short missing'),
             lambda k: self.patch_response(k, "小さく短く太い楕円形の眉毛", "a small thick elliptical eyebrow",
-                                         "a small, short, thick elliptical eyebrow"), verdict])
+                                         "a small, short, thick elliptical eyebrow"),
+            lambda k: verdict(k, "Current candidate omits short; small does not express length"), verdict])
         result = compiler.translate_markdown(source, llm, "system", semantic_guard="global", debug_events=events)
         self.assertIn(before.replace("small thick", "small, short, thick"), result)
         self.assertEqual(sum("TRANSLATION_STREAM_BEGIN" in k["messages"][-1]["content"] for k in llm.calls), 1)
@@ -299,10 +319,10 @@ class TranslationMeaningTests(unittest.TestCase):
                     lambda k: default_stream_translation(k["messages"], lambda _: original),
                     lambda k: verdict(k, "Wrong color of the left outfit"),
                     lambda k: self.patch_response(k, "左の衣装は白く", locator, "white"),
-                    replace, recheck])
+                    replace, lambda k: verdict(k, "Current left outfit is still black"), recheck])
                 result = compiler.translate_markdown(source, llm, "system", semantic_guard="global", debug_events=events)
                 self.assertIn(corrected, result)
-                self.assertEqual(len(llm.calls), 5)
+                self.assertEqual(len(llm.calls), 6)
                 self.assertEqual(sum(e.get("stage") == "semantic_patch" for e in events), 1)
 
     def test_full_unit_repair_cannot_remove_reference_tag(self):
@@ -361,6 +381,92 @@ class TranslationMeaningTests(unittest.TestCase):
         with self.assertRaisesRegex(compile_errors.TranslationError, "could not validate"):
             compiler.translate_markdown(self.SOURCE, llm, "system", semantic_guard="global")
         self.assertEqual(len(llm.calls), 2)
+
+    def test_redundant_color_expansion_keeps_original_without_repairs(self):
+        source = "# 共通プロンプト\n* 淡い金色で塗られた小さく短く太い楕円形の眉毛を左右に一つずつ配置する。\n# シーン\n## ショット\n* 動作。"
+        phrase = "a small, short, thick, elliptical eyebrow painted in light gold"
+        original = f"Place {phrase} on each side."
+        proposed = phrase + " with a light golden color"
+        events = []
+        def change_review(kwargs):
+            request = json.loads(kwargs["messages"][-1]["content"])
+            self.assertEqual(request["review_policy"], "translation_change")
+            self.assertEqual(request["pairs"][0]["candidate"], original)
+            self.assertEqual(request["context"]["proposed_patch"]["after"], proposed)
+            self.assertEqual(set(request["context"]), {"proposed_patch"})
+            return verdict(kwargs)
+        llm = FakeLLM([
+            lambda k: default_stream_translation(k["messages"], lambda _: original),
+            lambda k: verdict(k, "The light golden color must be added"),
+            lambda k: self.patch_response(k, "淡い金色で塗られた小さく短く太い楕円形の眉毛", phrase, proposed),
+            change_review])
+        result = compiler.translate_markdown(source, llm, "system", semantic_guard="global",
+                                            retry_max=0, debug_events=events)
+        self.assertIn(original, result)
+        self.assertNotIn("with a light golden color", result)
+        self.assertEqual(len(llm.calls), 4)
+        self.assertFalse(any(e.get("stage") == "semantic_patch" for e in events))
+        self.assertEqual(events[-1]["policy"], "translation_change")
+        self.assertEqual(events[-1]["validation"], "passed")
+
+    def test_full_unit_synonymous_replacement_can_keep_original(self):
+        original = "The fabric is translucent."
+        llm = FakeLLM([
+            lambda k: default_stream_translation(k["messages"], lambda _: original),
+            lambda k: verdict(k, "Needs different wording"),
+            lambda k: self.patch_response(k, "半透明", "absent locator", "semitransparent"),
+            json.dumps({"after": "The fabric is translucent and semitransparent."}),
+            verdict])
+        result = compiler.translate_markdown(
+            "# 共通プロンプト\n* 布は半透明。\n# シーン\n## ショット\n* 動作。",
+            llm, "system", semantic_guard="global", retry_max=0)
+        self.assertIn(original, result)
+        self.assertNotIn("semitransparent", result)
+        self.assertEqual(len(llm.calls), 5)
+
+    def test_change_review_does_not_hide_real_count_owner_or_negation_errors(self):
+        guard = module("node_japanese_to_json.compiler.semantic_guard")
+        cases = (
+            ("留め具は三つ。", "There are two fasteners.", "There are three fasteners."),
+            ("左の布は白い。", "The right fabric is white.", "The left fabric is white."),
+            ("右腕を上げない。", "Raise the right arm.", "Do not raise the right arm."),
+        )
+        for source, before, after in cases:
+            with self.subTest(source=source):
+                records, _ = compiler._sentence_records(compiler.lex_japanese_markdown(
+                    f"# 共通プロンプト\n* {source}\n# シーン\n## ショット\n* 動作。").records)
+                record = records[0]
+                record.translated = before
+                llm = FakeLLM([
+                    lambda k: verdict(k, "Current candidate changes a source fact"),
+                    lambda k: self.patch_response(k, source.rstrip("。"), before, after),
+                    lambda k: verdict(k, "Current candidate still changes a source fact"),
+                    verdict])
+                guard.audit_translations(records, llm, "system", scope="global", max_tokens=1024,
+                    temperature=0.1, top_p=0.9, repetition_penalty=1.05, seed=1, retry_max=1,
+                    debug_events=None, progress_callback=None, interrupt_callback=None)
+                self.assertEqual(record.translated, after)
+                self.assertEqual(len(llm.calls), 4)
+
+    def test_malformed_or_truncated_change_review_cannot_approve_candidate(self):
+        responses = (
+            "PASS",
+            "CHECK\tunknown\tPASS",
+            {"choices": [{"message": {"content": "CHECK\tR000001\tPASS"}, "finish_reason": "length"}]},
+        )
+        for invalid in responses:
+            with self.subTest(invalid=invalid):
+                llm = FakeLLM([
+                    lambda k: default_stream_translation(k["messages"], lambda _: "The fabric is translucent."),
+                    lambda k: verdict(k, "Needs different wording"),
+                    lambda k: self.patch_response(k, "半透明", "translucent", "translucent and semitransparent"),
+                    invalid])
+                with self.assertRaisesRegex(compile_errors.TranslationError, "Meaning change review could not validate"):
+                    compiler.translate_markdown(
+                        "# 共通プロンプト\n* 布は半透明。\n# シーン\n## ショット\n* 動作。",
+                        llm, "system", semantic_guard="global", retry_max=-1)
+                self.assertEqual(len(llm.calls), 4)
+
 
     def test_invalid_scope(self):
         with self.assertRaisesRegex(compile_errors.TranslationError, "semantic_guard"):

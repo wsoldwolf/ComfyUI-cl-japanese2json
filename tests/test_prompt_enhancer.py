@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -197,13 +198,81 @@ class PromptEnhancerProfileTests(unittest.TestCase):
                 self.assertIn("キャラクターの動き", directives)
                 self.assertIn("リミテッドアニメーション", directives)
                 self.assertIn("二コマ打ち又は三コマ打ち", directives)
-                self.assertIn("3DCGアニメーション", directives)
-                self.assertIn("フルアニメーション", directives)
-                self.assertIn("Live2D", directives)
                 self.assertIn("リップシンク", directives)
-                self.assertIn("口を閉じたまま固定しない", directives)
+                self.assertIn("保持後は次の動作へ進む", directives)
+                self.assertIn("カメラ移動中もこのタイミングを維持", directives)
+                self.assertIn("発音に合わせて唇と顎を動かし", directives)
+                self.assertIn("口形を音素と休止へ同期", directives)
                 self.assertIn("足裏の接地", directives)
-                self.assertIn("理由のない浮遊", directives)
+                self.assertIn("接地中の足を地面の同じ位置に保ち", directives)
+
+    def test_anime_and_emotional_profiles_use_affirmative_descriptions(self):
+        selected = [
+            profiles.load_style_profile(f"anime_{decade}s")
+            for decade in (2020, 2010, 2000, 1990, 1980)
+        ] + [
+            profiles.load_motion_profile("mv_anime_emotional"),
+            profiles.load_motion_profile("limited_anime"),
+            profiles.load_camera_profile("mv_anime_emotional"),
+        ]
+        for profile in selected:
+            with self.subTest(kind=type(profile).__name__, profile=profile.profile_id):
+                text = "\n".join(profile.directives)
+                self.assertNotRegex(text, r"しない|させない|せず|禁止|止め絵")
+                for unwanted in ("3DCG", "Live2D", "モーフィング", "滑走", "浮遊"):
+                    self.assertNotIn(unwanted, text)
+
+    def test_shared_anime_directives_match_for_exact_deduplication(self):
+        shared = profiles.load_motion_profile("limited_anime").directives
+        self.assertEqual(len(shared), 4)
+        for decade in (2020, 2010, 2000, 1990, 1980):
+            with self.subTest(decade=decade):
+                style = profiles.load_style_profile(f"anime_{decade}s")
+                self.assertEqual(style.directives[2:], shared)
+        motion = profiles.load_motion_profile("mv_anime_emotional")
+        self.assertEqual(motion.directives[:4], shared)
+        self.assertIn("予備動作、主動作、反動", motion.directives[4])
+        self.assertIn("付け根を身体につないだまま", motion.directives[5])
+        self.assertIn("人物の演技を補助する", motion.directives[6])
+
+    def test_emotional_camera_keeps_orbit_and_scopes_visibility(self):
+        text = "\n".join(
+            profiles.load_camera_profile("mv_anime_emotional").directives
+        )
+        for phrase in (
+            "顔が見える区間では表情と口元",
+            "側面や後方からは姿勢、手足の動き",
+            "各Shotでは",
+            "主となるカメラ移動を一つ選ぶ",
+            "広いアーク移動",
+            "開始視点",
+            "終了視点",
+            "強い視差と奥行き",
+            "再登場時の外観を連続",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_profile_edit_invalidates_fingerprint_and_loaded_profile(self):
+        manifest = profiles._MOTION_ROOT / "mv_anime_emotional" / "profile.json"
+        original = manifest.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "mv_anime_emotional" / "profile.json"
+            target.parent.mkdir()
+            target.write_text(original, encoding="utf-8")
+            with patch.object(profiles, "_MOTION_ROOT", root):
+                before = profiles.load_motion_profile("mv_anime_emotional")
+                fingerprint = prompt_loader.enhancer_prompts_fingerprint()
+                stat = target.stat()
+                revised = original.replace("次の動作へ進む", "次の動作へ移る")
+                self.assertNotEqual(original, revised)
+                self.assertEqual(len(original.encode("utf-8")), len(revised.encode("utf-8")))
+                target.write_text(revised, encoding="utf-8")
+                os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                after = profiles.load_motion_profile("mv_anime_emotional")
+                self.assertNotEqual(before.directives, after.directives)
+                self.assertNotEqual(fingerprint, prompt_loader.enhancer_prompts_fingerprint())
 
     def test_system_prompt_composes_only_selected_profile_policy(self):
         value = prompt_loader.load_enhancer_system_prompt(
@@ -598,6 +667,55 @@ class PromptEnhancerEngineTests(unittest.TestCase):
         self.assertEqual(result.report["camera_profile"], "orbit_subject")
         self.assertGreater(result.report["motion_lines_added"], 0)
         self.assertGreater(result.report["camera_lines_added"], 0)
+
+    def test_anime_motion_combination_deduplicates_and_preserves_user_negation(self):
+        user_line = "<Subject 1>は驚いて見開いた目へ変化させない。"
+        user_prompt = f"# 共通プロンプト\n* {user_line}\n"
+        for decade in (2020, 2010, 2000, 1990, 1980):
+            for motion_id in ("mv_anime_emotional", "limited_anime"):
+                with self.subTest(decade=decade, motion=motion_id):
+                    result = engine.enhance_reduced_markdown(
+                        "# サブジェクト\n* 人物を<Subject 1>とする。\n",
+                        user_prompt,
+                        style=profiles.load_style_profile(f"anime_{decade}s"),
+                        background=profiles.load_background_profile("passthrough"),
+                        motion=profiles.load_motion_profile(motion_id),
+                        camera=profiles.load_camera_profile("mv_anime_emotional"),
+                        backend=None,
+                        max_tokens=128,
+                        temperature=0.1,
+                        top_p=0.9,
+                        repetition_penalty=1.05,
+                        seed=1,
+                        retry_max=0,
+                    )
+                    self.assertEqual(result.request_count, 0)
+                    self.assertEqual(result.report["duplicate_common_lines_removed"], 4)
+                    for directive in profiles.load_motion_profile("limited_anime").directives:
+                        self.assertEqual(result.markdown.count(directive), 1)
+                    self.assertIn(user_line, result.markdown)
+                    self.assertIn("主となるカメラ移動を一つ選ぶ", result.markdown)
+
+    def test_emotional_motion_alone_keeps_grounding_and_lip_sync_without_llm(self):
+        result = engine.enhance_reduced_markdown(
+            "# サブジェクト\n* 人物を<Subject 1>とする。\n",
+            "",
+            style=profiles.load_style_profile("passthrough"),
+            background=profiles.load_background_profile("passthrough"),
+            motion=profiles.load_motion_profile("mv_anime_emotional"),
+            backend=None,
+            max_tokens=128,
+            temperature=0.1,
+            top_p=0.9,
+            repetition_penalty=1.05,
+            seed=1,
+            retry_max=0,
+        )
+        self.assertEqual(result.request_count, 0)
+        self.assertIn("リップシンクが指定されたScene", result.markdown)
+        self.assertIn("足裏の接地", result.markdown)
+        self.assertIn("予備動作、主動作、反動", result.markdown)
+        self.assertNotIn("# シーン", result.markdown)
 
     def test_normalized_exact_common_duplicates_are_removed(self):
         directive = profiles.load_motion_profile("limited_anime").directives[0]

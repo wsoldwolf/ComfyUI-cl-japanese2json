@@ -80,6 +80,8 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
         nonlocal request_index
         context = context or {}
         output_budget = min(max_tokens, 2048) if policy in {"translation_patch", "translation_replacement"} else budget
+        if policy == "translation_change":
+            output_budget = min(max_tokens, 256)
         messages = review_messages(policy, pairs, context)
         n_ctx = translator._effective_n_ctx(llm)
         if n_ctx and translator._count_input_tokens(llm, messages) + output_budget > n_ctx:
@@ -102,7 +104,8 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
         return run_review(
             pairs, policy=policy, context=context, invoke=invoke,
             logger=translator.LOGGER,
-            label="[cl_japanese2json] Meaning confirmation" if policy in {"translation_patch", "translation_replacement"}
+            label="[cl_japanese2json] Meaning change review" if policy == "translation_change"
+            else "[cl_japanese2json] Meaning confirmation" if policy in {"translation_patch", "translation_replacement"}
             else "[cl_japanese2json] Meaning review",
             events=debug_events, interrupt_callback=interrupt_callback,
             progress_callback=(lambda n: progress_callback(1, 1, 1, min(n, output_budget), output_budget))
@@ -124,7 +127,7 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
                 if patch is None:
                     raise SemanticReviewError("Meaning confirmation omitted the requested translation")
                 repaired = _validated_patch(record, patch)
-                return (None, None) if repaired == record.translated else (repaired, patch)
+                break
             except (SemanticReviewError, TranslationError) as exc:
                 if confirmation_attempt:
                     raise TranslationError(
@@ -133,6 +136,21 @@ def audit_translations(records, llm, system_prompt, *, scope, max_tokens,
                 translator.LOGGER.warning(
                     "[cl_japanese2json] Rechecking invalid meaning confirmation %s with a source-bound full-unit repair: %s",
                     record.record_id, exc)
+
+        if repaired == record.translated:
+            return None, None
+        # A valid literal patch can still be only a redundant paraphrase.
+        # Judge the CURRENT full candidate before spending a repair attempt;
+        # the proposal is an alternative, never proof that an error exists.
+        try:
+            failures = assess(pairs, policy="translation_change",
+                              context={"proposed_patch": patch})
+        except (SemanticReviewError, TranslationError) as exc:
+            raise TranslationError(
+                f"Meaning change review could not validate {record.record_id}: {exc}") from exc
+        if record.record_id not in failures:
+            return None, None
+        return repaired, patch
 
     while pending:
         batch = []

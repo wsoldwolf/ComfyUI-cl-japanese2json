@@ -19,6 +19,6 @@ json_text ──> MiniMax H3 Contex-Loop Plan.plan_json_input
 - `continuation_context_length`はH3 Generation Profileと同じ値にします。
 - 問題解析時だけ`save_debug_output=True`を使用します。
 
-意味監査には追加のLLM推論が必要です。同じ原文の制約は訳文を共有します。不一致の指摘は原文と現在の訳文で個別に再確認し、同一表現への誤った指摘なら訳文を保持します。実際の訳抜け等は根拠付きの修正案で該当箇所だけ最大2回修復し、参照タグ・台詞と意味を再検証します。LLMの判定なので誤検出・見逃しを完全には防げません。変更を試す際は、以前の結果を固定する`keep_last_prompt=False`にしてください。詳細は[意味・情景保全仕様](../spec/prompt_semantic_preservation_spec.md)を参照してください。
+意味監査には追加のLLM推論が必要です。同じ原文の制約は訳文を共有します。不一致の指摘は原文と現在の訳文で個別に再確認し、同一表現への誤った指摘なら訳文を保持します。文字列が異なる修正案にも、採用前に1回の変更レビューを行います。同義の属性説明を重ねるだけで現行訳が既に原文を満たす場合は、修復回数を消費せず元の訳を保持します。実際の訳抜け等は該当箇所だけ最大2回修復し、参照タグ・台詞と意味を再検証します。LLMの判定なので誤検出・見逃しを完全には防げません。変更を試す際は、以前の結果を固定する`keep_last_prompt=False`にしてください。詳細は[意味・情景保全仕様](../spec/prompt_semantic_preservation_spec.md)を参照してください。
 
 モデルのロード条件、再試行及び全パラメータは[ノード実装仕様](../spec/cl_japanese2json_comfyui_node_spec.md)、コンパイル規則は[コンパイラ仕様](../spec/cl_japanese2json_spec.md)を参照してください。

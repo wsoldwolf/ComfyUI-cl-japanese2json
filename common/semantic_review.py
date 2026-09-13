@@ -17,6 +17,7 @@ PROMPT_PATH = Path(__file__).with_name("prompts") / "semantic_review.txt"
 ENVIRONMENT_PROMPT_PATH = PROMPT_PATH.with_name("environment_review.txt")
 TRANSLATION_PATCH_PROMPT_PATH = PROMPT_PATH.with_name("translation_patch.txt")
 TRANSLATION_REPLACEMENT_PROMPT_PATH = PROMPT_PATH.with_name("translation_replacement.txt")
+TRANSLATION_CHANGE_PROMPT_PATH = PROMPT_PATH.with_name("translation_change_review.txt")
 
 
 class SemanticReviewError(ValueError):
@@ -38,11 +39,12 @@ def review_prompt() -> str:
 def review_fingerprint() -> str:
     return hashlib.sha256(b"\0".join(path.read_bytes() for path in (
         PROMPT_PATH, ENVIRONMENT_PROMPT_PATH, TRANSLATION_PATCH_PROMPT_PATH,
-        TRANSLATION_REPLACEMENT_PROMPT_PATH))).hexdigest()
+        TRANSLATION_REPLACEMENT_PROMPT_PATH, TRANSLATION_CHANGE_PROMPT_PATH))).hexdigest()
 
 
 def review_messages(policy: str, pairs: list[dict], context: dict) -> list[dict]:
     path = {"environment": ENVIRONMENT_PROMPT_PATH,
+            "translation_change": TRANSLATION_CHANGE_PROMPT_PATH,
             "translation_replacement": TRANSLATION_REPLACEMENT_PROMPT_PATH,
             "translation_patch": TRANSLATION_PATCH_PROMPT_PATH}.get(policy, PROMPT_PATH)
     prompt = path.read_text(encoding="utf-8-sig").strip()

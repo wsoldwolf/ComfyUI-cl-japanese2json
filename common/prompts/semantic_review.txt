@@ -18,6 +18,9 @@ attribute, swap the two objects of a comparison, substitute a nearby anatomical 
 a prohibition into a requested state. Repeated correct words do not cancel a contradictory clause.
 Accept natural synonymous translations and changes of word order. Do not demand literal phrasing,
 invent constraints, infer new facts, or reject protected tags. Tags denote the same content in both.
+One faithful expression can cover repeated mentions of the same fact about the same owner.
+Do not require a second synonymous description of an attribute already conveyed. Distinguish
+repeated wording from genuinely separate attributes, owners, counts or temporal constraints.
 
 For policy environment, compare each original Common sentence to candidate_common in context.
 immutable_user_prompt is the authority for intended changes; selected_style and background_detail

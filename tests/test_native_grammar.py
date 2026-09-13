@@ -31,7 +31,7 @@ class NativeGrammarTests(unittest.TestCase):
 
     def test_all_review_grammars_initialize_in_native_runtime(self):
         review = module("common.semantic_review")
-        for policy in ("translation", "environment", "translation_patch", "translation_replacement"):
+        for policy in ("translation", "environment", "translation_patch", "translation_replacement", "translation_change"):
             with self.subTest(policy=policy):
                 self.backend.compile_grammar(review.review_grammar(("R1",), policy=policy))
 
