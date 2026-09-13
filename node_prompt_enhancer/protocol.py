@@ -140,9 +140,21 @@ def parse_enhancement_response(
             "Enhancer SOURCE ids differ from the request; "
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
-    if not minimum_background_lines <= len(background) <= maximum_background_lines:
-        if len(background) < minimum_background_lines and rejected_background:
+    if len(background) < minimum_background_lines:
+        if rejected_background and background:
+            warnings.append(
+                f"accepted {len(background)} safe BACKGROUND line(s), below the "
+                f"requested minimum of {minimum_background_lines}, after discarding "
+                f"{len(rejected_background)} non-background line(s)"
+            )
+        elif rejected_background:
             raise rejected_background[0]
+        else:
+            raise EnhancerResponseError(
+                f"Enhancer returned {len(background)} BACKGROUND line(s); expected "
+                f"{minimum_background_lines}-{maximum_background_lines}"
+            )
+    if len(background) > maximum_background_lines:
         raise EnhancerResponseError(
             f"Enhancer returned {len(background)} BACKGROUND line(s); expected "
             f"{minimum_background_lines}-{maximum_background_lines}"

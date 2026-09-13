@@ -393,6 +393,32 @@ class PromptEnhancerProtocolTests(unittest.TestCase):
         )
         self.assertTrue(any("discarded BACKGROUND" in item for item in parsed.warnings))
 
+    def test_safe_background_subset_is_accepted_below_minimum_after_discard(self):
+        parsed = protocol.parse_enhancement_response(
+            "ENHANCEMENT_V1\nSOURCE\tC001\tbackground\n"
+            "BACKGROUND\t夜霧が石畳の上を流れる。\n"
+            "BACKGROUND\t鳥居の前で人物がポーズをとっている。\n"
+            "END_ENHANCEMENT",
+            expected_source_ids=("C001",),
+            minimum_background_lines=2,
+            maximum_background_lines=4,
+        )
+        self.assertEqual(parsed.background_lines, ("夜霧が石畳の上を流れる。",))
+        self.assertTrue(any("below the requested minimum" in item
+                            for item in parsed.warnings))
+
+    def test_all_non_background_records_still_fail_closed(self):
+        with self.assertRaisesRegex(errors.EnhancerResponseError, "environment only"):
+            protocol.parse_enhancement_response(
+                "ENHANCEMENT_V1\nSOURCE\tC001\tbackground\n"
+                "BACKGROUND\t鳥居の前で人物がポーズをとっている。\n"
+                "BACKGROUND\t正面からの視点で被写体を捉える。\n"
+                "END_ENHANCEMENT",
+                expected_source_ids=("C001",),
+                minimum_background_lines=2,
+                maximum_background_lines=4,
+            )
+
     def test_protocol_rejects_missing_ids_unknown_classes_and_references(self):
         cases = (
             "ENHANCEMENT_V1\nEND_ENHANCEMENT",
