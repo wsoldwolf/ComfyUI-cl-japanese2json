@@ -89,7 +89,7 @@ def review_grammar(ids: tuple[str, ...], *, policy: str = "translation") -> str:
         if len(ids) != 1:
             raise SemanticReviewError("Meaning confirmation reviews exactly one current translation")
         return r'''root ::= "{" ws "\"after\"" ws ":" ws string ws "}" ws
-string ::= "\"" char{1,8192} "\""
+string ::= "\"" char+ "\""
 char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
 ws ::= [ \t\n\r]*
 '''

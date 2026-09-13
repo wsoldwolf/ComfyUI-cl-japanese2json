@@ -209,6 +209,45 @@ class LlamaBackendTests(unittest.TestCase):
         with self.assertRaisesRegex(errors.ModelLoadError, 'LlamaGrammar'):
             backend.compile_grammar('root ::= "ok"')
 
+    def test_deferred_grammar_is_natively_validated_and_probe_freed(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        compiled = SimpleNamespace(_grammar='root ::= "ok"', _root="root")
+        native = SimpleNamespace(
+            LlamaGrammar=SimpleNamespace(from_string=Mock(return_value=compiled)),
+            llama_sampler_init_grammar=Mock(return_value=123),
+            llama_sampler_free=Mock())
+        backend = backend_module.LlamaBackend(llama_module=native)
+        backend.llm = SimpleNamespace(_model=SimpleNamespace(vocab=456))
+        self.assertIs(backend.compile_grammar(compiled._grammar), compiled)
+        native.llama_sampler_init_grammar.assert_called_once_with(456, b'root ::= "ok"', b"root")
+        native.llama_sampler_free.assert_called_once_with(123)
+
+    def test_null_native_grammar_is_rejected_without_sampling_or_freeing_null(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        native = SimpleNamespace(
+            LlamaGrammar=SimpleNamespace(from_string=Mock(return_value=SimpleNamespace(_grammar="bad", _root="root"))),
+            llama_sampler_init_grammar=Mock(return_value=None),
+            llama_sampler_free=Mock())
+        backend = backend_module.LlamaBackend(llama_module=native)
+        backend.llm = SimpleNamespace(_model=SimpleNamespace(vocab=456), create_completion=Mock())
+        with self.assertRaisesRegex(errors.ModelLoadError, "NULL sampler"):
+            backend.compile_grammar("bad")
+        native.llama_sampler_free.assert_not_called()
+        backend.llm.create_completion.assert_not_called()
+
+    def test_deferred_grammar_without_vocabulary_fails_before_native_call(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        native = SimpleNamespace(
+            LlamaGrammar=SimpleNamespace(from_string=Mock(return_value=SimpleNamespace(_grammar="bad"))),
+            llama_sampler_init_grammar=Mock(), llama_sampler_free=Mock())
+        backend = backend_module.LlamaBackend(llama_module=native)
+        with self.assertRaisesRegex(errors.ModelLoadError, "Cannot safely validate"):
+            backend.compile_grammar("bad")
+        native.llama_sampler_init_grammar.assert_not_called()
+
     def setUp(self) -> None:
         FakeLoadedLlama.instances.clear()
         FakeAbortLlamaModule.abort_callback = None

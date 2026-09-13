@@ -554,6 +554,24 @@ class LlamaBackend:
             raise ModelLoadError("Could not build the protected translation grammar") from exc
         if grammar is None:
             raise ModelLoadError("llama-cpp-python returned no translation grammar")
+        # Recent bindings only store the GBNF in from_string(). Native parsing
+        # happens later; a rejected grammar can produce a NULL sampler that the
+        # bindings add unchecked to the chain, causing an access violation.
+        native_source = getattr(grammar, "_grammar", None)
+        if isinstance(native_source, str):
+            initialize = getattr(self.llama_module, "llama_sampler_init_grammar", None)
+            release = getattr(self.llama_module, "llama_sampler_free", None)
+            vocab = getattr(getattr(self.llm, "_model", None), "vocab", None)
+            root = getattr(grammar, "_root", "root")
+            if not callable(initialize) or not callable(release) or not vocab or not isinstance(root, str):
+                raise ModelLoadError("Cannot safely validate the deferred llama.cpp grammar; native grammar API and loaded model vocabulary are required")
+            try:
+                sampler = initialize(vocab, native_source.encode("utf-8"), root.encode("utf-8"))
+            except Exception as exc:
+                raise ModelLoadError("llama.cpp grammar initialization failed before sampling") from exc
+            if not sampler:
+                raise ModelLoadError("llama.cpp rejected the grammar (NULL sampler); inference was not started")
+            release(sampler)
         return grammar
 
     def complete_chat(self, **kwargs: Any) -> Any:
