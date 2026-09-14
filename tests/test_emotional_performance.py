@@ -164,6 +164,55 @@ class EmotionalPerformanceTests(unittest.TestCase):
                 "<Subject 1>の髪が揺れ、口が動き、衣装が風を受ける",)),)),
             duration_seconds=15))
 
+    def test_logged_scene7_posture_and_omitted_references(self):
+        actions = (
+            "<Subject 1>の右手を腰に添えながら前傾姿勢を取る",
+            "<Subject 1>の左足を前に踏み出し、膝を曲げて前進する",
+            "<Subject 1>の右足を前に踏み出し、体を前傾させて鳥居をくぐる")
+        result = "<Subject 1>は鳥居をくぐり抜け、前方へ進み続ける"
+        first = replace(self.scene.shots[0], subject_actions=actions[:2])
+        last = replace(first, start_ms=7000, subject_actions=(actions[2], result))
+        scene = replace(self.scene, scene_id=7, shots=(first, last))
+        timeline = replace(self.timeline, scene_id=7, duration_seconds=14)
+        blueprint = replace(self.blueprint, scene_id=7, subject_actions=actions, visible_result=result)
+        # The original request already meets the motion floor; no inference is needed.
+        self.assertEqual(validation.subject_motion_issues(scene, duration_seconds=14), [])
+        raw = "\n".join((
+            "MOTION_REPAIR\t7", "SHOT\t0",
+            "ACTION\t1\t右手を腰に添えながら前傾姿勢を取る",
+            "ACTION\t2\t左足を前に踏み出し、膝を曲げて前進する",
+            "END_SHOT", "SHOT\t7000",
+            "ACTION\t1\t右足を前に踏み出し、体を前傾させて鳥居をくぐる",
+            "ACTION\t2\t鳥居をくぐり抜け、前方へ進み続ける",
+            "END_SHOT", "END_MOTION_REPAIR"))
+        self.assertEqual(repair.parse_motion_repair(raw, scene, timeline, self.protector, blueprint), scene)
+        for invalid in (
+            raw.replace("右手を腰", "左手を腰"),
+            raw.replace("鳥居をくぐる", "石灯籠に触れる"),
+            raw.replace("ACTION\t1\t右手を腰に添えながら前傾姿勢を取る\nACTION\t2\t左足を前に踏み出し、膝を曲げて前進する",
+                        "ACTION\t1\t左足を前に踏み出し、膝を曲げて前進する\nACTION\t2\t右手を腰に添えながら前傾姿勢を取る"),
+        ):
+            with self.assertRaisesRegex(validation.PlannerResponseError, "lost or reordered"):
+                repair.parse_motion_repair(invalid, scene, timeline, self.protector, blueprint)
+
+    def test_reference_recovery_requires_unique_exact_source_action(self):
+        source = ("<Subject 1>は右手を前へ伸ばす。", "<Subject 2>は右手を前へ伸ばす。")
+        self.assertEqual(repair._restore_omitted_subject("右手を前へ伸ばす。", source), "右手を前へ伸ばす。")
+        for text in ("右手をゆっくり前へ伸ばす。", "左手を前へ伸ばす。", "右手を前へ伸ばさない。"):
+            self.assertEqual(repair._restore_omitted_subject(text, source[:1]), text)
+        self.assertEqual(repair._restore_omitted_subject("右手を前へ伸ばす。", source[:1]), source[0])
+
+    def test_adopting_posture_counts_but_holding_it_does_not(self):
+        for action, accepted in (
+            ("<Subject 1>は前傾姿勢を取る", True),
+            ("<Subject 1>は低い姿勢をとる", True),
+            ("<Subject 1>は右手を腰に添える", True),
+            ("<Subject 1>は前傾姿勢を保つ", False),
+        ):
+            with self.subTest(action=action):
+                scene = replace(self.scene, shots=(replace(self.scene.shots[0], subject_actions=(action,)),))
+                self.assertEqual(not validation.subject_motion_issues(scene, duration_seconds=3), accepted)
+
     def test_logged_scene6_repairs_one_missing_phase_with_numeric_protocol(self):
         actions = (
             "<Subject 1>の右手をゆっくりと胸の位置へ引き寄せながら、左手を顔の横に置く",

@@ -1,6 +1,7 @@
 """Bounded ACTION-only regeneration with immutable scene and lyric structure."""
 
 from dataclasses import replace
+import re
 
 from .errors import PlannerResponseError
 from .performance_policy import action_signature, deduplicate_actions
@@ -9,6 +10,18 @@ from .validation import (
     camera_guard_issues, performance_safety_issues, subject_motion_issues,
     vocal_guard_issues,
 )
+
+
+def _restore_omitted_subject(value, original_actions):
+    """Recover only a uniquely matching original line with its Subject removed."""
+    if re.search(r"<Subject [1-9][0-9]*>", value):
+        return value
+    matches = set()
+    for original in original_actions:
+        prefix = re.match(r"^<Subject [1-9][0-9]*>(?:の|は|が)", original)
+        if prefix and action_signature(original[prefix.end():]) == action_signature(value):
+            matches.add(original)
+    return next(iter(matches)) if len(matches) == 1 else value
 
 
 def parse_motion_repair(content, scene, timeline, protector, blueprint=None):
@@ -30,6 +43,7 @@ def parse_motion_repair(content, scene, timeline, protector, blueprint=None):
                 raise PlannerResponseError("Motion repair ACTION indices must be consecutive from 1")
             value = protector.restore(_text(parts[2], "Motion repair ACTION"))
             _reject_screen_text_creative_cues(value, "Motion repair ACTION")
+            value = _restore_omitted_subject(value, shot.subject_actions)
             actions.append(value)
             cursor += 1
         if not 1 <= len(actions) <= 8 or cursor >= len(lines) or lines[cursor] != "END_SHOT":
@@ -50,7 +64,11 @@ def parse_motion_repair(content, scene, timeline, protector, blueprint=None):
                 try:
                     position = keys.index(key, position) + 1
                 except ValueError as exc:
-                    raise PlannerResponseError("Motion repair lost or reordered a locked lyric ACTION") from exc
+                    raise PlannerResponseError(
+                        "Motion repair lost or reordered a locked lyric ACTION; "
+                        f"SHOT {original.start_ms} must retain in order: "
+                        + " | ".join(protector.protect(a) for a in original.subject_actions
+                                     if action_signature(a) in locked)) from exc
         if action_signature(repaired.shots[-1].subject_actions[-1]) != action_signature(blueprint.visible_result):
             raise PlannerResponseError("Motion repair must finish with the locked VISIBLE_RESULT")
     issues = (
