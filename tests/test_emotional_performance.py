@@ -147,3 +147,63 @@ class EmotionalPerformanceTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         self.assertEqual(len(backend.calls), 2)
         self.assertTrue(error)
+
+    def test_logged_scene5_steps_count_without_repair(self):
+        # Actual last response from the failed run: all four actions are physical.
+        first = replace(self.scene.shots[0], subject_actions=(
+            "<Subject 1>の右手を腰に添えてゆっくりと足元へ下げる",
+            "<Subject 1>の左手を腰に添えてゆっくりと足元へ下げる"))
+        last = replace(first, start_ms=7500, subject_actions=(
+            "<Subject 1>の右足を地面につけながら左足を前へ出す",
+            "<Subject 1>の左足を地面につけながら右足を前へ出す",
+            "足元には葉が積もっている"))
+        self.assertEqual(validation.subject_motion_issues(
+            replace(self.scene, shots=(first, last)), duration_seconds=15), [])
+        self.assertTrue(validation.subject_motion_issues(
+            replace(self.scene, shots=(replace(first, subject_actions=(
+                "<Subject 1>の髪が揺れ、口が動き、衣装が風を受ける",)),)),
+            duration_seconds=15))
+
+    def test_logged_scene6_repairs_one_missing_phase_with_numeric_protocol(self):
+        actions = (
+            "<Subject 1>の右手をゆっくりと胸の位置へ引き寄せながら、左手を顔の横に置く",
+            "<Subject 1>の右手を胸の古傷の上部に当て、左手を顔の横から少し下へ動かす",
+            "<Subject 1>の右手を胸の古傷の上部で静止し、左手を顔の横からさらに下へ下げて固定する")
+        result = "胸の古傷が明らかに広がり、表面に赤みが浮かび上がる"
+        first = replace(self.scene.shots[0], subject_actions=actions[:2])
+        last = replace(first, start_ms=7000, subject_actions=(actions[2], result))
+        scene = replace(self.scene, scene_id=6, shots=(first, last))
+        timeline = replace(self.timeline, scene_id=6, duration_seconds=14)
+        blueprint = replace(self.blueprint, scene_id=6, subject_actions=actions, visible_result=result)
+        self.assertTrue(validation.subject_motion_issues(scene, duration_seconds=14))
+        extra = "<Subject 1>は右手を胸の古傷から離す"
+        lines = ["MOTION_REPAIR\t6"]
+        for start, values in ((0, actions[:2]), (7000, (actions[2], extra, result))):
+            lines.append(f"SHOT\t{start}")
+            lines.extend(f"ACTION\t{i}\t{self.protector.protect(a)}" for i, a in enumerate(values, 1))
+            lines.append("END_SHOT")
+        lines.append("END_MOTION_REPAIR")
+        valid = "\n".join(lines)
+        invalid = valid.replace("MOTION_REPAIR\t6", "MOTION_REPAIR\trequested scene_id")
+        backend = FakePlannerBackend([invalid, valid])
+        events = []
+        updated, attempts, error = planning._repair_scene_actions(
+            backend, scene=scene, timeline=timeline, blueprint=blueprint,
+            planning_brief={}, protector=self.protector,
+            call_settings=dict(max_tokens=1024, temperature=0.1, top_p=0.9, repetition_penalty=1.05, seed=1),
+            request_index=0, maximum_attempts=2,
+            progress_callback=None, interrupt_callback=None, debug_events=events)
+        self.assertIsNotNone(updated)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(error, "")
+        system = backend.calls[0]["messages"][0]["content"]
+        self.assertIn("MOTION_REPAIR\t6", system)
+        self.assertIn("SHOT\t0\nSHOT\t7000", system)
+        self.assertNotIn("requested scene_id", system)
+        self.assertNotIn("{scene_id}", system)
+        self.assertNotEqual(events[0]["request_payload"]["retry_feedback"], events[1]["request_payload"]["retry_feedback"])
+        self.assertEqual(updated.shots[1].subject_actions, (actions[2], extra, result))
+        # Repeated Scene wrappers, even with the correct id, remain invalid.
+        malformed = valid.replace("END_SHOT\nSHOT\t7000", "END_SHOT\nEND_MOTION_REPAIR\nMOTION_REPAIR\t6\nSHOT\t7000")
+        with self.assertRaises(validation.PlannerResponseError):
+            repair.parse_motion_repair(malformed, scene, timeline, self.protector, blueprint)

@@ -3,11 +3,10 @@ The scene's composition, camera, environment, timings, lyric predicate and Sourc
 Derive missing bodily phases from the current action: prepare its support and reach, perform contact or movement, follow through and resolve its weight. Each Shot must meet its supplied minimum deliberate phases. Give each phase a named Subject. Use 2-4 useful ACTIONs per Shot, up to 8 including the locked result. Do not count a repeated instruction, a completed pose, gaze, eyebrows, ears, hair, light or mouth as a bodily phase.
 Maintain a physically executable sequence across Shots. A hand still touching an object releases it before moving elsewhere. A planted foot supports a step; a raised foot subsequently lands. Keep a composed pause brief and between related motions. Do not append unrelated crouching, arm throws, turns or travelling just to reach a count. Any final held pose must follow from the preceding motion.
 Source Vocal controls the mouth. Emotional performance uses head inclination, shoulder tension, hands, torso and supported weight transfer; it never prescribes lip, tongue or jaw articulation, mouth light, or independent eyebrow oscillation. Avoid direct speech, added sounds and camera instructions. Retain left/right, negation and explicit repetition counts. Do not paraphrase the same phase as another action.
-Return exactly this structure for the supplied Scene and each existing Shot, with actual TAB delimiters:
-MOTION_REPAIR	requested scene_id
-SHOT	existing start_ms
-ACTION	1	first chronological action
-ACTION	2	next chronological action
-END_SHOT
-END_MOTION_REPAIR
-Repeat SHOT through END_SHOT once per supplied Shot, preserve order, and restart ACTION numbering at 1 for each Shot. No other lines, prose, quotes or Markdown.
+Return ONE Scene block covering ALL supplied Shots, with actual TAB delimiters.
+The first line must be exactly:
+MOTION_REPAIR	{scene_id}
+Inside that single block, write each of these exact Shot headers once, in this order:
+{shot_headers}
+After each Shot header, write ACTION rows with three TAB-separated fields: ACTION, its integer index starting at 1, and the Japanese action text. End each Shot with END_SHOT. Only after the LAST END_SHOT, write END_MOTION_REPAIR exactly once. Restart ACTION indices for each Shot, but never restart the Scene block.
+Both the whole Scene and each Shot must meet the minimum deliberate phases in the request. Copy locked_actions exactly, and add missing, distinct bodily actions in chronological order around them. A final static visible result is an additional row and does not count as motion. Use retry_feedback to correct the previous failure. No other fields, prose, quotes or Markdown.

@@ -745,6 +745,10 @@ def _subject_motion_contract(scene: TimelineScene) -> dict[str, object]:
     return {
         "required_when_a_subject_is_named_in_actions": True,
         "minimum_deliberate_action_phases": minimum_phases,
+        "per_shot_minimum_deliberate_action_phases": {
+            "up_to_4_seconds": 1, "5_to_7_seconds": 2,
+            "8_to_11_seconds": 3, "12_seconds_or_more": 4,
+        },
         "suggested_motion_family": motion_families[
             (scene.scene_id - 1) % len(motion_families)
         ],
@@ -1656,6 +1660,7 @@ def _repair_scene_actions(
         "planning_brief": planning_brief, "reference_legend": protector.legend(),
         "lyric_lines": _lyric_lines(timeline, protector),
         "shots": [],
+        "minimum_deliberate_phases": minimum_deliberate_action_phases(timeline.duration_seconds),
         "locked_visible_result": protector.protect(blueprint.visible_result) if blueprint else None,
     }
     locked = {action_signature(a) for a in blueprint.subject_actions} if blueprint else set()
@@ -1676,13 +1681,16 @@ def _repair_scene_actions(
             "locked_actions": [protector.protect(a) for a in shot.subject_actions if action_signature(a) in locked],
         })
     error = "; ".join(str(i["message"]) for i in subject_motion_issues(scene, duration_seconds=timeline.duration_seconds))
+    system = load_planner_prompt("motion_repair_system_prompt.txt").replace(
+        "{scene_id}", str(scene.scene_id)
+    ).replace("{shot_headers}", "\n".join(f"SHOT\t{shot.start_ms}" for shot in scene.shots))
     attempts = 0
     while attempts < maximum_attempts:
-        payload["retry_feedback"] = error
+        payload = {**payload, "retry_feedback": error}
         attempts += 1
         try:
             raw, event = _call(
-                backend, system=load_planner_prompt("motion_repair_system_prompt.txt"),
+                backend, system=system,
                 payload=payload, seed=_seed(call_settings["seed"], request_index + attempts - 1),
                 label=f"motion repair Scene {scene.scene_id} attempt {attempts}",
                 progress_callback=progress_callback, interrupt_callback=interrupt_callback,
@@ -1889,6 +1897,7 @@ def generate_mv_plan(
     vocal_warnings: list[dict[str, object]] = []
     motion_repairs: list[dict[str, object]] = []
     motion_repair_attempts: dict[int, int] = {}
+    motion_repair_errors: dict[int, str] = {}
     duplicate_diagnostics: list[dict[str, int]] = []
     duplicate_action_diagnostics: list[dict[str, int]] = []
     duplicate_auxiliary_diagnostics: list[dict[str, int]] = []
@@ -2182,7 +2191,11 @@ def generate_mv_plan(
                         motion_repair_attempts[scene_id] = used + attempts
                         request_index += attempts
                         if repaired is None:
+                            if attempts:
+                                motion_repair_errors[scene_id] = repair_error
                             errors[scene_id] = repair_error or str(motion_issues[0]["message"])
+                            if scene_id in motion_repair_errors:
+                                errors[scene_id] += f"; ACTION repair exhausted (2 attempts): {motion_repair_errors[scene_id]}"
                             continue
                         motion_repairs.append({"scene_id": scene_id, "method": "targeted_llm",
                                                "reason": str(motion_issues[0]["message"]), "attempts": attempts})

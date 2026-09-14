@@ -14,7 +14,9 @@ from .validation import (
 def parse_motion_repair(content, scene, timeline, protector, blueprint=None):
     lines = _lines(content, "Motion repair")
     if lines[0] != f"MOTION_REPAIR\t{scene.scene_id}" or lines[-1] != "END_MOTION_REPAIR":
-        raise PlannerResponseError("Motion repair requires matching scene id and END_MOTION_REPAIR")
+        raise PlannerResponseError(
+            f"Motion repair must start exactly with MOTION_REPAIR<TAB>{scene.scene_id}; "
+            f"return one block containing all {len(scene.shots)} Shots and one final END_MOTION_REPAIR")
     cursor = 1
     shots = []
     for shot in scene.shots:
